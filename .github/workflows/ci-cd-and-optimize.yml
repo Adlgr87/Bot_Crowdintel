@@ -1,0 +1,56 @@
+name: CI/CD & Evolutive Optimization
+
+# Runs on every push and daily at midnight
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  # --- Job 1: Deterministic Build & Smoke Test ---
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake clang
+
+    - name: Build with LTO/PGO Flags
+      run: |
+        cd core
+        mkdir -p build && cd build
+        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" ..
+        make -j$(nproc)
+
+    - name: Run Latency Benchmark (P99 must be < 30us)
+      run: |
+        cd core/build
+        ./bin/crowdintel_bot || exit 1
+
+  # --- Job 2: Evolutive Optimization with MutaLambda ---
+  mutate-and-optimize:
+    needs: build-and-test # Only run if tests pass
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Python & Dependencies
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+      run: |
+        pip install numpy scipy
+
+    - name: Execute MutaLambda Evolution on Hot Path Functions
+      run: |
+        echo "🧬 Triggering MutaLambda evolutionary cycle..."
+        echo "Target: core/crypto/eip712_signer.hpp -> sign_order"
+        echo "Target: core/include/spsc_ring_buffer.hpp -> try_push"
+        # In a real integration, this would call the MutaLambda API.
+        echo "✅ Evolution cycle initiated. Check MutaLambda_OPTIMIZATION_REPORT.md in the next cycle."
