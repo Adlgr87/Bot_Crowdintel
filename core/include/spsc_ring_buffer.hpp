@@ -26,7 +26,7 @@ public:
         const size_t current_head = head_.load(std::memory_order_relaxed);
         const size_t next_head = (current_head + 1) & mask_;
         
-        if (next_head == tail_.load(std::memory_order_acquire)) {
+        if (next_head == tail_.load(std::memory_order_relaxed)) {
             return false; // Queue Full
         }
         

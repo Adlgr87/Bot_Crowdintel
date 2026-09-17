@@ -1,4 +1,5 @@
 #ifndef ORDER_BOOK_HPP
+#pragma GCC optimize("O3,unroll-loops,fast-math")
 #define ORDER_BOOK_HPP
 
 #include <cstdint>
@@ -23,6 +24,7 @@ public:
     OrderBookL2() : sequence_(0) {}
 
     // Update a bid level with zero allocation
+        #pragma unroll 4
     inline void update_bid(uint32_t level, uint64_t price, uint64_t size, uint64_t ts) {
         if (level < MAX_LEVELS) {
             bids_[level] = {price, size, ts};
@@ -31,6 +33,7 @@ public:
     }
 
     // Update an ask level with zero allocation
+        #pragma unroll 4
     inline void update_ask(uint32_t level, uint64_t price, uint64_t size, uint64_t ts) {
         if (level < MAX_LEVELS) {
             asks_[level] = {price, size, ts};

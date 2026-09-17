@@ -2,107 +2,155 @@
 #define LIGHTWEIGHT_CLIENT_HPP
 
 #include <string>
-#include <sys/socket.h>
-#include <unistd.h> // For close()
-#include <netinet/tcp.h>  // For TCP_NODELAY
-#include <arpa/inet.h>
-#include <netdb.h>        // For gethostbyname
-#include <cstring>
-#include <iostream>
 #include <array>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 #include <vector>
+#include <openssl/hmac.h>
+#include <iostream>
+#include <openssl/evp.h>
+#include <curl/curl.h>
 
 /**
- * LightweightCLOBClient: Custom HTTP client for Polymarket.
- * Bypasses heavy SDKs and JSON libraries in the Hot Path.
+ * LightweightCLOBClient: HTTPS client for Polymarket CLOB V2.
+ * Uses libcurl for TLS and implements Polymarket's required HMAC authentication.
  */
 struct SignedOrder {
     uint64_t nonce;
     std::array<uint8_t, 65> signature;
-    std::string payload;
+    std::string payload; // The URL-encoded JSON body of the signed order
 };
 
 class LightweightCLOBClient {
 public:
-    LightweightCLOBClient(const std::string& host, int port, const std::string& api_key)
-        : host_(host), port_(port), api_key_(api_key) {}
+    LightweightCLOBClient(
+        const std::string& api_key,
+        const std::string& secret,
+        const std::string& passphrase,
+        const std::string& base_url = "https://api.polymarket.com")
+        : api_key_(api_key), secret_(secret), passphrase_(passphrase), base_url_(base_url) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    }
 
-    // Submits an order using a raw TCP socket with TCP_NODELAY enabled.
+    ~LightweightCLOBClient() {
+        curl_global_cleanup();
+    }
+
+    // Submits an order to Polymarket CLOB V2 with HMAC authentication.
+    // Returns true on HTTP 200, false otherwise.
     bool submit_order(const SignedOrder& order) {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-             std::cerr << "❌ Failed to create socket." << std::endl;
-             return false;
-        }
-
-        // Disable Nagle's algorithm for minimum latency
-        int flag = 1;
-        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)) < 0) {
-            std::cerr << "⚠️ Failed to set TCP_NODELAY." << std::endl;
-        }
-
-        struct sockaddr_in server_addr;
-        struct hostent* server = gethostbyname(host_.c_str());
-        if (!server) {
-            std::cerr << "❌ Failed to resolve host: " << host_ << std::endl;
-            close(sock);
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            std::cerr << "❌ Failed to initialize CURL." << std::endl;
             return false;
         }
 
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(port_);
-        bcopy((char*)server->h_addr, (char*)&server_addr.sin_addr.s_addr, server->h_length);
+        // 1. Get the current timestamp (in milliseconds) for the X-Timestamp header
+        long long timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
-        if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-            std::cerr << "❌ Failed to connect to " << host_ << ":" << port_ << std::endl;
-            close(sock);
-            return false;
+        // 2. Calculate HMAC signature: HMAC_SHA256(secret, timestamp + method + request_path + body)
+        std::string method = "POST";
+        std::string request_path = "/v2/order";
+        std::string body = order.payload;
+        std::string prehash = std::to_string(timestamp_ms) + method + request_path + body;
+        std::string signature = hmac_sha256_base64(secret_, prehash);
+
+        // 3. Set up the libcurl request with the required headers
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, ("X-API-Key: " + api_key_).c_str());
+        headers = curl_slist_append(headers, ("X-Signature: " + signature).c_str());
+        headers = curl_slist_append(headers, ("X-Passphrase: " + passphrase_).c_str());
+        headers = curl_slist_append(headers, ("X-Timestamp: " + std::to_string(timestamp_ms)).c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        std::string full_url = base_url_ + request_path;
+        curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
+
+        // Disable Nagle for the underlying TCP connection (if possible)
+        // Note: libcurl handles this well by default for HTTPS.
+        
+        // Capture the response code
+        long response_code = 0;
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // We don't need the body for a quick check
+
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         }
 
-        // Build a minimal HTTP/1.1 POST request
-        std::string request =
-            "POST /v2/order HTTP/1.1\r\n"
-            "Host: " + host_ + "\r\n"
-            "Content-Type: application/json\r\n"
-            "Authorization: Bearer " + api_key_ + "\r\n"
-            "X-Signature: ";
-        
-        // Encode signature (simple hex for demo)
-        char sig_hex[130];
-        for(int i = 0; i < 65; ++i) sprintf(sig_hex + i*2, "%02x", order.signature[i]);
-        request += std::string(sig_hex, 130);
-        request += "\r\n";
-        request += "X-Nonce: " + std::to_string(order.nonce) + "\r\n";
-        request += "Connection: close\r\n";
-        request += "Content-Length: " + std::to_string(order.payload.length()) + "\r\n\r\n";
-        request += order.payload;
+        std::cout << "🌐 HTTPS Order Submitted | Code: " << response_code 
+                  << " | Nonce: " << order.nonce << std::endl;
 
-        if (send(sock, request.c_str(), request.length(), 0) < 0) {
-            std::cerr << "❌ Failed to send request." << std::endl;
-            close(sock);
-            return false;
-        }
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
         
-        std::cout << "🌐 Submitted Order (TCP_NODELAY) | Nonce: " << order.nonce << std::endl;
-        
-        // For Hot Path, we don't wait for a full response synchronously.
-        // A real impl would use non-blocking sockets or epoll_wait.
-        char buffer[256];
-        ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-        if (bytes > 0) {
-             buffer[bytes] = '\0';
-             // Log response status without full parsing to save cycles.
-             // In a truly async model, this would signal via a callback/queue.
-        }
-
-        close(sock);
-        return bytes >= 0;
+        // Consider any 2xx status code a success
+        return (response_code >= 200 && response_code < 300);
     }
 
 private:
-    std::string host_;
-    int port_;
     std::string api_key_;
+    std::string secret_;        // HMAC Secret
+    std::string passphrase_;
+    std::string base_url_;
+
+    // HMAC-SHA256 and returns the signature as a Base64 string (as Polymarket expects).
+    static std::string hmac_sha256_base64(const std::string& secret, const std::string& data) {
+        unsigned int len = 0;
+        unsigned char hmac[EVP_MAX_MD_SIZE];
+        
+        HMAC(EVP_sha256(), secret.c_str(), secret.length(),
+             reinterpret_cast<const unsigned char*>(data.c_str()), data.length(),
+             hmac, &len);
+
+        // Base64 encode the binary HMAC
+        return base64_encode(hmac, len);
+    }
+
+    // Simple Base64 encoder
+    static std::string base64_encode(const unsigned char* bytes_to_encode, size_t len) {
+        static constexpr char base64_chars[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string ret;
+        int i = 0;
+        int j = 0;
+        unsigned char char_array_3[3];
+        unsigned char char_array_4[4];
+
+        while (len--) {
+            char_array_3[i++] = *(bytes_to_encode++);
+            if (i == 3) {
+                char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+                char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+                char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+                char_array_4[3] = char_array_3[2] & 0x3f;
+                for(i = 0; i < 4; i++) ret += base64_chars[char_array_4[i]];
+                i = 0;
+            }
+        }
+
+        if (i) {
+            for (j = i; j < 3; j++) char_array_3[j] = 0;
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+            for (j = 0; j < i + 1; j++) ret += base64_chars[char_array_4[j]];
+            while(i++ < 3) ret += '=';
+        }
+        return ret;
+    }
+
+    // libcurl callback to discard body
+    static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+        return size * nmemb; // Just ignore the response body
+    }
 };
 
 #endif // LIGHTWEIGHT_CLIENT_HPP

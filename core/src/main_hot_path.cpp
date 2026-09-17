@@ -22,7 +22,7 @@ int main() {
     NonceManager nonce_mgr;
     
     // Use the new LightweightCLOBClient constructor
-    LightweightCLOBClient client("clob-v2.polymarket.com", 443, "YOUR_API_KEY_HERE");
+    LightweightCLOBClient client("YOUR_API_KEY", "YOUR_SECRET", "YOUR_PASSPHRASE", "https://clob.polymarket.com");
     ExecutionEngine engine(book, alpha_queue, client);
 
     // 2. Start the persistent WebSocket listener in the background
