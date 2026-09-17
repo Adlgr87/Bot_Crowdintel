@@ -4,41 +4,45 @@
 #include "nonce_manager.hpp"
 #include "lightweight_client.hpp"
 #include "alpha_receiver.hpp"
+#include "ws_market_listener.hpp"
 #include <iostream>
 #include <thread>
+#include <chrono>
 
 /**
  * MAIN HOT PATH LOOP
  * This loop must be pinned to an isolated CPU core.
  */
 int main() {
-    std::cout << "⚡ Starting Hot Path Execution Engine..." << std::endl;
+    std::cout << "⚡ Starting Hot Path Execution Engine (CROWDINTEL v1.0)..." << std::endl;
 
     // 1. Initialize Core Components
     OrderBookL2 book;
     SPSC_RingBuffer<AlphaSignal> alpha_queue;
     NonceManager nonce_mgr;
-    LightweightCLOBClient client("API_KEY", "PASSPHRASE");
+    
+    // Use the new LightweightCLOBClient constructor
+    LightweightCLOBClient client("clob-v2.polymarket.com", 443, "YOUR_API_KEY_HERE");
     ExecutionEngine engine(book, alpha_queue, client);
 
-    // 2. Mock: Simulate a Cold Path signal being pushed
-    // In production, this is done by the AlphaParser in a separate thread/core
-    AlphaSignal mock_signal;
-    mock_signal.type = AlphaSignal::Type::WHALE_TRADE;
-    std::strncpy(mock_signal.market_slug, "BTC-USD-UP", 31);
-    mock_signal.confidence = 0.95;
-    mock_signal.ev_per_dollar = 0.05;
-    mock_signal.q_value = 0.01;
-    
-    alpha_queue.try_push(mock_signal);
+    // 2. Start the persistent WebSocket listener in the background
+    WsMarketListener listener(alpha_queue);
+    listener.start();
 
-    // 3. The Tick Loop
-    // Run for a few iterations to demonstrate the flow
-    for (int i = 0; i < 5; ++i) {
-        std::cout << "Tick " << i << "..." << std::endl;
+    // Give the listener a moment to start
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // 3. Tick Loop - Processes signals from the queue
+    // In a real deployment, this runs continuously on a pinned core.
+    std::cout << "--- Running 10 ticks to demonstrate the flow ---" << std::endl;
+    for (int i = 0; i < 10; ++i) {
         engine.run_tick();
+        // Yield to allow the listener thread to push new data
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    std::cout << "✅ Hot Path Cycle Demonstrated." << std::endl;
+    // 4. Clean shutdown
+    listener.stop();
+    std::cout << "✅ Hot Path Cycle Demonstrated. Listener Stopped." << std::endl;
     return 0;
 }
