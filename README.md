@@ -1,114 +1,149 @@
-# ⚡ Bot CrowdIntel: Ultra-Low Latency Polymarket Trader
+# ⚡ Bot CrowdIntel: Low-Latency Polymarket Trader
 
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/Adlgr87/Bot_Crowdintel/ci-cd-and-optimize.yml?branch=main)](https://github.com/Adlgr87/Bot_Crowdintel/actions)
-[![Performance](https://img.shields.io/badge/Latency-Tick--to--Wire_~26us-red)]()
-[![Code](https://img.shields.io/badge/Code-C++20%20|%20Python-blue)]()
+A C++20 implementation of a high-frequency trading bot for Polymarket's CLOB V2.
+The bot is structured around a deterministic, zero-allocation **Hot Path** for order execution
+and a **Cold Path** for signal processing and risk management.
 
-**Bot CrowdIntel** es una implementación funcional de un bot de trading de alta frecuencia (HFT) para Polymarket, construido bajo la directiva del **SQUAD OMNISCIENT**. El bot implementa un **Hot Path determinista y zero-allocation** en C++20, una conexión WebSocket persistente a Polymarket CLOB y una arquitectura preparada para optimización evolutiva con **MutaLambda**.
-
-> **Nota de Estado:** Este es un **proyecto de código abierto activo y funcional**. Aunque está optimizado para ultra-baja latencia, las barreras de red externas (como la congestión de la blockchain Polygon) siguen siendo el factor dominante de la latencia final.
+It is designed for deployment on a low-latency Linux server (e.g., in an AWS eu-west-3 region).
 
 ---
 
-## 🚀 Estado Actual del Proyecto
+## 📐 Project Structure
 
-| Componente | Estado | Descripción |
-| :--- | :--- | :--- |
-| **Hot Path (C++)** | ✅ Funcional | Compila y ejecuta. Order Book, EIP-712 (stub), Nonce Manager integrados. |
-| **Cold Path / Alpha Engine** | ✅ Funcional | Parser de CrowdIntel con filtrado FDR $q$-value y Kelly Sizing. |
-| **WebSocket Listener** | ✅ Functional | Cliente persistente conectado al CLOB V2 de Polymarket para datos en tiempo real. |
-| **Red de Infraestructura** | ✅ Lista | Scripts de Kernel Tuning (Linux), Dockerfile determinista con LTO/PGO. |
-| **Benchmarking** | ✅ Listo | Benchmarks de latencia con `RDTSC` y backtester L2. |
-| **Optimización MutaLambda** | ✅ Adaptador Integrado | Puente limpio (`mutalambda_adapter.py`) listo para la evolución. |
-| **CI/CD** | ✅ Activo | GitHub Actions automatizan compilación, pruebas y pipelines. |
-
----
-
-## 🧠 Arquitectura y Diseño
-
-El bot está diseñado con una estricta separación entre ejecución (Hot Path) e inteligencia (Cold Path).
-
-### 🔴 The Hot Path (`core/`) — C++20
-
-> Todo el código en este directorio está optimizado para la determinismo y velocidad. Se evita la asignación de memoria dinámica (`malloc`/`new`) en tiempo de ejecución.
-
-- **`OrderBookL2`**: Libro de órdenes nivel 2 con arrays estáticos y alineación a caché.
-- **`EIP712Signer`**: Motor de firma EIP-712 con separador de dominio pre-computado. *(Nota: Implementación funcional pero reemplazable con una biblioteca `secp256k1` SIMD real para producción)*.
-- **`SPSC_RingBuffer`**: Cola de un productor-un consumidor sin bloqueos, usada para transferir señales del Cold Path al Hot Path.
-- **`ExecutionEngine`**: El cerebro del Hot Path. Consume señales, evalúa el libro de órdenes y ejecuta órdenes firmadas.
-- **`LightweightCLOBClient`**: Cliente HTTP/TCP personalizado con `TCP_NODELAY` para enviar órdenes a Polymarket sin SDKs pesados.
-
-### 🔵 The Cold Path (`alpha/`) — C++/Python
-
-- **`crowdintel/`**: Ingesta de señales de insiders y filtrado estadístico FDR.
-- **`strategy/`**: Motor de tamaño de posición Kelly Criterion.
-- **`WsMarketListener`**: Mantiene la conexión WebSocket para alimentar datos de mercado al Order Book en tiempo real.
+```
+core/
+  ├── include/          # Hot Path headers (Order Book, SPSC Queue)
+  ├── crypto/           # EIP-712 signing logic
+  └── src/              # Execution Engine, WebSocket listener, HTTP Client
+alpha/
+  ├── crowdintel/       # Signal parsing (FDR q-value filtering)
+  └── strategy/         # Kelly Criterion position sizing
+infra/
+  ├── scripts/          # Kernel tuning, optimization orchestration
+  └── docker/           # Production build definitions
+tests/
+  ├── benchmarks/       # Latency measurement (RDTSC)
+  └── replay/           # L2 backtesting utilities
+docs/                   # Technical documentation
+```
 
 ---
 
-## 🧬 Optimización con MutaLambda
+## 🔧 Core Components
 
-El Bot CrowdIntel fue **evolucionado** mediante el framework de optimización genética **[MutaLambda](https://github.com/Adlgr87/MutaLambda)**. Para mantener el repositorio del bot limpio y desacoplado, se utiliza un **adaptador limpio (`infra/mutalambda/adapter/mutalambda_adapter.py`)** que actúa como puente entre el código C++ del Hot Path y el motor evolutivo de MutaLambda.
+### 1. Hot Path (`core/`)
+- **`OrderBookL2`**: An in-memory Level-2 order book using fixed-size arrays
+  for O(1) updates. Aligned to cache lines to prevent false sharing.
+- **`SPSC_RingBuffer`**: A lock-free, single-producer/single-consumer queue.
+  Used to pass signals from the Cold Path to the Hot Path without mutexes.
+- **`EIP712Signer`**: A signer for EIP-712 typed structured data.
+  Pre-computes the domain separator to minimize cycles during signing.
+- **`ExecutionEngine`**: The main loop. Pops signals from the SPSC queue,
+  reads the `OrderBookL2`, computes size via the Kelly Criterion, and submits
+  signed orders via the `LightweightCLOBClient`.
+- **`LightweightCLOBClient`**: A TCP/HTTP client using `TCP_NODELAY` to send
+  signed orders directly to the Polymarket CLOB, avoiding heavy SDKs.
 
-Este enfoque permite que el bot evolucione sus funciones críticas (`sign_order`, `try_push`, `run_tick`) sin necesidad de incluir el motor MutaLambda como una dependencia directa en el código fuente.
+### 2. Cold Path (`alpha/`)
+- **`AlphaParser` / `AlphaReceiver`**: Receives webhook alerts from
+  CrowdIntel, validates them (confidence, EV, FDR $q$-value), and enqueues
+  valid signals onto the SPSC queue.
+- **`WsMarketListener`**: Maintains a persistent WebSocket connection to
+  `wss://ws-subscriptions-clob.polymarket.com/ws/market` to stream live
+  market data and update the `OrderBookL2`.
+- **`KellyEngine`**: Implements the Kelly Criterion formula to calculate
+  the optimal fraction of capital to risk per trade.
 
-> **¿Quieres ver el detalle del proceso de evolución?** Consulta nuestro [Lineage de Optimización](docs/OPTIMIZATION_LINEAGE.md).
-
-- **`optimization_targets.json`**: Define qué funciones evolucionar y bajo qué métrica (`minimize_cycles`).
-- **`mutalambda_optimize.py`**: El script principal que orquesta ciclos de mutación y benchmarking.
-- **CI/CD**: El pipeline de GitHub Actions dispara MutaLambda diariamente para una optimización continua.
+### 3. Infrastructure (`infra/`)
+- **`kernel_tuning.sh`**: Applies Linux kernel parameters optimized for
+  low-latency networking (`net.ipv4.tcp_low_latency`, `BBR` congestion control,
+  `TCP_NODELAY` defaults).
+- **`Dockerfile.prod`**: A multi-stage build using `clang` with
+  `-O3 -march=native -flto` for a deterministic production binary.
+- **`mutalambda_optimize.py`**: An orchestration script that drives the
+  evolutive optimization of hot-path functions.
 
 ---
 
-## 🛠️ Stack Tecnológico
+## 🧬 Optimization with MutaLambda
 
-- **Lenguajes:** C++20 (Hot Path), Python (Scripts/Infra).
-- **Tuning del Sistema:** `isolcpus`, `PREEMPT_RT`, `TCP_NODELAY`, Control de Congestión `BBR`.
-- **Infraestructura:** Compatible con Linux Bare-Metal y VPS. Incluye `Dockerfile` para builds deterministas.
-- **Métricas de Latencia:** Medición de ciclos de CPU con la instrucción ensambladora `RDTSC`.
+The bot's performance was improved using **[MutaLambda](https://github.com/Adlgr87/MutaLambda)**,
+a genetic programming engine for low-level code optimization.
+
+The evolution process does not modify the source files directly.
+Instead, it uses a **decoupled adapter** (`infra/mutalambda/adapter/mutalambda_adapter.py`)
+to communicate with the MutaLambda engine.
+
+### How It Works:
+1. `mutalambda_optimize.py` identifies target functions (e.g., `sign_order`, `try_push`).
+2. The adapter sends these functions to the MutaLambda engine.
+3. MutaLambda applies genetic mutations (e.g., loop vectorization, instruction selection).
+4. Mutated variants are compiled and benchmarked using `RDTSC` timers.
+5. Beneficial mutations are logged and recommended for manual integration.
+
+### Target Functions (Defined in `optimization_targets.json`):
+- `EIP712Signer::sign_order` (`minimize_cycles`)
+- `SPSC_RingBuffer::try_push` (`minimize_atomic_contention`)
+- `ExecutionEngine::run_tick` (`minimize_cycle_time`)
+
+For details on the optimization history and results, see
+[`docs/OPTIMIZATION_LINEAGE.md`](docs/OPTIMIZATION_LINEAGE.md).
 
 ---
 
-## 🚦 Guía de Inicio Rápido
+## 🚀 Getting Started
 
-### Requisitos
-- Un sistema Linux (Ubuntu 22.04+ recomendado).
-- Un compilador C++20 compatible (`g++` o `clang++`).
+### Prerequisites
+- Linux OS (Ubuntu 20.04+/Debian recommended).
+- C++20 compiler (`g++` or `clang++`).
+- CMake 3.16+.
+- Python 3.8+ (for optimization scripts).
 
-### 1. Compilación
+### Build
 ```bash
 git clone https://github.com/Adlgr87/Bot_Crowdintel.git
 cd Bot_Crowdintel/core
 mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake -DCMAKE_BUILD_TYPE=RELEASE ..
 make -j$(nproc)
 ```
 
-### 2. Ejecutar el Motor
+### Run
 ```bash
 ./bin/crowdintel_bot
 ```
+This will simulate a few ticks of market data processing and order submission.
+For a live run, configure your Polymarket API credentials and WebSocket endpoints
+in the relevant modules.
 
-### 3. Optimización con MutaLambda (Opcional)
+---
+
+## 🧪 Testing
+
+Run the latency benchmark to measure Tick-to-Wire performance:
 ```bash
-python3 ../infra/scripts/mutalambda_optimize.py
+cd core/build
+./bin/crowdintel_bot
+```
+
+Run the MutaLambda optimization pipeline (optional):
+```bash
+python3 infra/scripts/mutalambda_optimize.py
 ```
 
 ---
 
-## 🧪 Pruebas y Benchmarking
-
-- **`tests/benchmarks/latency_bench.cpp`**: Mide la latencia del Hot Path usando `RDTSC`.
-- **`tests/replay/l2_backtester.cpp`**: Simula operaciones contra datos históricos L2.
-- **`tests/benchmarks/mem_audit.py`**: Integra `valgrind` para asegurar zero-allocation.
+## ⚖️ Notes & Limitations
+- The bot contains a **stub EIP-712 signer** for demonstration. A production version
+  must integrate a real, audited `secp256k1` library.
+- The actual latency to reach a Polygon block (`Wire-to-Block`) is ~2 seconds and is
+  outside the control of this bot. The focus of the Hot Path is to minimize
+  pre-block latency (`Tick-to-Wire`).
+- `isolcpus` and `PREEMPT_RT` kernel tuning require bare-metal root access and are
+  not applicable in shared virtualized environments.
 
 ---
 
-## 🛡️ Auditoría de Seguridad y Garantía
-
-Este sistema ha pasado por una auditoría adversarial interna. El código del Hot Path está verificado para no usar asignaciones dinámicas.
-- El manejo de claves privadas está estructurado para una integración futura con `secp256k1` y/o un HSM.
-- La gestión de credenciales se realizará en el Cold Path, nunca dentro del Hot Path.
-
-**SQUAD OMNISCIENT: Precision. Speed. Profit. 🔥**
+## 📄 License
+This project is licensed under the terms of the MIT license.
+See [`LICENSE`](LICENSE) for details.
