@@ -49,7 +49,11 @@ El bot está diseñado con una estricta separación entre ejecución (Hot Path) 
 
 ## 🧬 Optimización con MutaLambda
 
-En lugar de clonar el motor de optimización MutaLambda directamente, el bot utiliza un **adaptador desacoplado (`infra/mutalambda/adapter/mutalambda_adapter.py`)**. Esto permite que el bot evolucione sus funciones críticas (`sign_order`, `try_push`, `run_tick`) sin acoplarse a la complejidad interna de MutaLambda.
+El Bot CrowdIntel fue **evolucionado** mediante el framework de optimización genética **[MutaLambda](https://github.com/Adlgr87/MutaLambda)**. Para mantener el repositorio del bot limpio y desacoplado, se utiliza un **adaptador limpio (`infra/mutalambda/adapter/mutalambda_adapter.py`)** que actúa como puente entre el código C++ del Hot Path y el motor evolutivo de MutaLambda.
+
+Este enfoque permite que el bot evolucione sus funciones críticas (`sign_order`, `try_push`, `run_tick`) sin necesidad de incluir el motor MutaLambda como una dependencia directa en el código fuente.
+
+> **¿Quieres ver el detalle del proceso de evolución?** Consulta nuestro [Lineage de Optimización](docs/OPTIMIZATION_LINEAGE.md).
 
 - **`optimization_targets.json`**: Define qué funciones evolucionar y bajo qué métrica (`minimize_cycles`).
 - **`mutalambda_optimize.py`**: El script principal que orquesta ciclos de mutación y benchmarking.
