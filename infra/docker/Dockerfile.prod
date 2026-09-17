@@ -1,0 +1,36 @@
+# Dockerfile for Deterministic Build (LTO/PGO)
+FROM ubuntu:22.04 AS builder
+
+# Install high-performance toolchain
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang-15 \
+    llvm-15 \
+    cmake \
+    git \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set compiler to Clang for better LTO/PGO support
+ENV CC=clang-15
+ENV CXX=clang++-15
+
+WORKDIR /app
+COPY . .
+
+# Build with aggressive optimization flags
+# -O3: Max optimization
+# -march=native: Use all instructions available on the host CPU (AVX2, etc)
+# -flto: Link Time Optimization (cross-module optimization)
+# -fno-exceptions -fno-rtti: Remove C++ overhead for low latency
+RUN mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-O3 -march=native -flto -fno-exceptions -fno-rtti" .. && \
+    make -j$(nproc)
+
+FROM ubuntu:22.04
+WORKDIR /app
+COPY --from=builder /app/build/bot_bin .
+# Entrypoint for pinned CPU execution
+ENTRYPOINT ["/usr/bin/taskset", "-c", "2,3", "./bot_bin"]

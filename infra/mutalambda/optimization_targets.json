@@ -1,0 +1,25 @@
+{
+  "targets": [
+    {
+      "module": "core/crypto/eip712_signer.hpp",
+      "function": "sign_order",
+      "priority": "CRITICAL",
+      "goal": "Reduce cycles by leveraging AVX-512 or eliminating redundant memory loads",
+      "metric": "cycles_per_signature"
+    },
+    {
+      "module": "core/include/spsc_ring_buffer.hpp",
+      "function": "try_push",
+      "priority": "HIGH",
+      "goal": "Optimize atomic memory ordering from acquire/release to relaxed where safe",
+      "metric": "nanoseconds_per_push"
+    },
+    {
+      "module": "core/include/order_book.hpp",
+      "function": "update_bid",
+      "priority": "HIGH",
+      "goal": "Eliminate potential cache misses through better data packing",
+      "metric": "cycles_per_update"
+    }
+  ]
+}
