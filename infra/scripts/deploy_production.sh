@@ -20,7 +20,7 @@ make -j$(nproc)
 
 # --- 2. Copy binary to server ---
 echo "📦 2. Copying binary to $DEPLOY_SERVER..."
-scp -i "$SSH_KEY_PATH" crowdintel_bot_test "$DEPLOY_USER@$DEPLOY_SERVER:/home/$DEPLOY_USER/$APP_NAME"
+scp -i "$SSH_KEY_PATH" "$BOT_ROOT/core/build/bin/crowdintel_bot" "$DEPLOY_USER@$DEPLOY_SERVER:/home/$DEPLOY_USER/$APP_NAME"
 
 # --- 3. Run Kernel Tuning on the server ---
 echo "⚙️ 3. Running kernel tuning on the server..."

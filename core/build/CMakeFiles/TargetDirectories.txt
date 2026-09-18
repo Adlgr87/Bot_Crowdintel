@@ -1,3 +1,0 @@
-/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build/CMakeFiles/crowdintel_bot.dir
-/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build/CMakeFiles/edit_cache.dir
-/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build/CMakeFiles/rebuild_cache.dir

@@ -18,7 +18,7 @@ jobs:
     - name: Setup Build Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake clang
+        sudo apt-get install -y build-essential cmake clang libcurl4-openssl-dev libssl-dev
 
     - name: Build with LTO/PGO Flags
       run: |
@@ -45,12 +45,17 @@ jobs:
       with:
         python-version: '3.10'
       run: |
-        pip install numpy scipy
+        pip install numpy scipy click rich pyyaml pydantic msgpack requests
+
+    - name: Checkout MutaLambda Framework
+      uses: actions/checkout@v4
+      with:
+        repository: Adlgr87/MutaLambda
+        path: MutaLambda
 
     - name: Execute MutaLambda Evolution on Hot Path Functions
       run: |
         echo "🧬 Triggering MutaLambda evolutionary cycle..."
-        echo "Target: core/crypto/eip712_signer.hpp -> sign_order"
-        echo "Target: core/include/spsc_ring_buffer.hpp -> try_push"
-        # In a real integration, this would call the MutaLambda API.
-        echo "✅ Evolution cycle initiated. Check MutaLambda_OPTIMIZATION_REPORT.md in the next cycle."
+        export MUTALAMBDA_PATH="$PWD/MutaLambda"
+        export PYTHONPATH="$PWD/MutaLambda:$PYTHONPATH"
+        python infra/mutalambda/adapter/mutalambda_adapter.py

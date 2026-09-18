@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     git \
     libssl-dev \
+    libcurl4-openssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -22,7 +23,7 @@ COPY . .
 # Build with aggressive optimization flags
 # -O3: Max optimization
 # -march=native: Use all instructions available on the host CPU (AVX2, etc)
-# -flto: Link Time Optimization (cross-module optimization)
+# -flto: Link Time Optimization (whole-program optimization)
 # -fno-exceptions -fno-rtti: Remove C++ overhead for low latency
 RUN mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release \
@@ -31,6 +32,14 @@ RUN mkdir build && cd build && \
 
 FROM ubuntu:22.04
 WORKDIR /app
-COPY --from=builder /app/build/bot_bin .
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libcurl4 \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/build/bin/crowdintel_bot .
+
 # Entrypoint for pinned CPU execution
-ENTRYPOINT ["/usr/bin/taskset", "-c", "2,3", "./bot_bin"]
+ENTRYPOINT ["/usr/bin/taskset", "-c", "2,3", "./crowdintel_bot"]

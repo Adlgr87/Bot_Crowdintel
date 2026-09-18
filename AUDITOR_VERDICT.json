@@ -1,0 +1,118 @@
+{
+  "overall_verdict": "FAIL",
+  "categories": [
+    {
+      "name": "Compilabilidad",
+      "status": "FAIL",
+      "findings": [
+        "core/CMakeLists.txt defines a single target (crowdintel_bot) and performs NO find_package(CURL)/find_package(OpenSSL) and NO target_link_libraries. A clean build from the current tree terminates with: fatal error: curl/curl.h: No such file or directory (verified in a clean /tmp configure+make).",
+        "libssl-dev and libcurl4-openssl-dev are not installed (verified: /usr/include/curl/ absent; no matching dpkg packages). OpenSSL headers exist but there is no linker invocation for -lcurl -lssl -lcrypto.",
+        "CI workflow (.github/workflows/ci-cd-and-optimize.yml) installs only build-essential cmake clang — no curl/SSL dev headers — so the build-and-test job cannot compile/link the hot path.",
+        "The committed core/build/* artifacts are stale and non-reproducible: ldd bin/crowdintel_bot shows the shipped binary links only libstdc++/libm/libc (NO libcurl, NO OpenSSL), and its stdout ('Tick 0...', 'Submitting Order') differs from the current main_hot_path.cpp ('Running 10 ticks...', 'Size: $'). The source tree cannot reproduce its own build/ binaries.",
+        "core/crypto/test_signer.cpp, tests/benchmarks/latency_bench.cpp and tests/replay/l2_backtester.cpp are NOT CMake targets and are never compiled by make (glob only covers src/*.cpp + ../alpha/crowdintel/*.cpp).",
+        "Dockerfile.prod COPYs /app/build/bot_bin which does not exist (CMake emits bin/crowdintel_bot), and does not install libcurl4-openssl-dev.",
+        "Stale binaries crowdintel_bot_test/_optimized/_final and latency_bench_final exist in core/build/ but are not CMake targets."
+      ],
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "Criptografía (EIP-712)",
+      "status": "FAIL",
+      "findings": [
+        "keccak256_hash() is a STUB that calls SHA256(). EIP-712 (Polymarket CLOB V2) requires Keccak-256 (pre-FIPS Keccak padding, NOT SHA3-256). Every struct digest is therefore wrong and signatures will FAIL off-chain verification.",
+        "Domain separator is bogus: static array {0xAB} padded with zeros instead of keccak256('EIP712Domain(...)') — signatures are not bound to Polymarket's domain (cross-domain/replay exposure).",
+        "Private keys are hardcoded dummies: 0x01*32 in ExecutionEngine, 0xAA*32 in BenchExecutionEngine, test_signer, and main_hot_path (no real wallet).",
+        "OrderParams.salt is hardcoded to 12345 (non-random, deterministic, replayable) — Polymarket requires a unique random salt per order.",
+        "Recovery id v is hardcoded to 27; Ethereum secp256k1 requires 27/28 by y-parity — fixed v breaks recovery ~50% of the time.",
+        "Double-hashing bug: EVP_PKEY_CTX_set_signature_md(EVP_sha256()) + signing the 32-byte eip712_hash as the message makes OpenSSL SHA-256 the digest again. Combined with the SHA-256-vs-Keccak error, the signing path is wrong on two independent axes.",
+        "test_signer.cpp is not built by CMake and only checks 'no throw' — it performs no known-answer verification against a canonical EIP-712 test vector, so the 'PASS' claim is unverifiable."
+      ],
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "Red / Seguridad (libcurl HMAC)",
+      "status": "FAIL",
+      "findings": [
+        "submit_order sets CURLOPT_NOBODY 1L together with CURLOPT_POSTFIELDS — NOBODY is for HEAD requests and may discard the POST body on some libcurl builds, risking silent order non-submission.",
+        "No CURLOPT_TIMEOUT/NOSIGNAL: a saturated peer can block the calling thread indefinitely (unbounded latency stall in the real path).",
+        "order.payload is the literal string 'order_data_placeholder' and the HMAC-SHA256 is computed over that placeholder body, NOT the actual signed order JSON — the signature and the authenticated body are disconnected.",
+        "main_hot_path.cpp constructs LightweightCLOBClient with literal 'YOUR_API_KEY'/'YOUR_SECRET'/'YOUR_PASSPHRASE' in the production entrypoint — bogus credentials shipped as 'real'.",
+        "Secrets are held in std::string with no zeroization; HMAC() one-shot return size is unchecked.",
+        "No certificate pinning for a single-host trading client (low-severity exposure to MITM on a hostile VPS)."
+      ],
+      "severity": "HIGH"
+    },
+    {
+      "name": "Latencia / Hot Path",
+      "status": "FAIL",
+      "findings": [
+        "std::cout is invoked on every hot tick (ExecutionEngine::run_tick prints 'Size: $...' and submit_order prints 'HTTPS Order Submitted') — synchronous, mutex-locked, flushed I/O on the critical path destroys any sub-microsecond P99 claim.",
+        "NonceManager::get_timestamp_ms() returns a hardcoded constant (1600000000000); nonce = constant*1000 + (counter%1000) is non-monotonic real time and wraps every 1ms under load — replay and CLOB out-of-order rejection risk.",
+        "OrderBookL2::get_bid()/get_ask() perform no bounds check on level; an out-of-range index reads/writes past std::array (UB in the hot path).",
+        "Headline latency numbers are invalid: latency_bench.cpp pre-fills 20000 signals into an SPSC_RingBuffer whose default Capacity is 1024 and ignores try_push's return value — only 1024 are stored; ~18976 of the 20000 measured ticks pop an EMPTY queue and do no work. The reported '24 cycles / 7.8ns P99' measures the empty try_pop fast-fail path, not the signed-order hot path.",
+        "cycle_to_us = 1.0/3000.0 hardcodes a 3.0 GHz assumption with no TSC calibration — ns conversions are wrong unless the host is exactly 3.0 GHz.",
+        "latency_bench.cpp is not a CMake target, yet README/WORKFLOW cite 'RDTSC Benchmark, 20K ticks' as Source of Truth.",
+        "Documentation of memory ordering is inaccurate (claims 'memory_order_acq_rel verificado'); actual code uses release/acquire/relaxed — correct for SPSC, but the prose is misleading."
+      ],
+      "severity": "HIGH"
+    },
+    {
+      "name": "Infraestructura (kernel, docker, despliegue)",
+      "status": "FAIL",
+      "findings": [
+        "Dockerfile.prod references /app/build/bot_bin (does not exist; CMake emits bin/crowdintel_bot) so the final COPY fails and the image is broken.",
+        "CI/CD builds from HEAD with no curl/SSL dev and no real latency assertion — the 'P99 < 30us' gate only runs ./bin/crowdintel_bot || exit 1, which always exits 0.",
+        "deploy_production.sh ships crowdintel_bot_test (a stale non-CMake artifact) and runs it under taskset -c 2, but never installs libcurl/OpenSSL on the host and never verifies runtime deps; the hot binary links no curl/SSL so it cannot actually submit orders.",
+        "kernel_tuning.sh rewrites /etc/default/grub + update-grub and disables C-states, requiring a reboot; it will fail or hang on VPS/shared roots, and sets tcp_congestion_control=bbr which may not load on older kernels.",
+        "MutaLambda integration is disconnected/simulated: the adapter's MUTALAMBDA_ROOT default resolves to .../Bot_BajaLatencia/MutaLambda (outside the repo) which does not exist (engine actually lives in Bot_Crowdintel/MutaLambda but is gitignored). _validate_mutalambda_installation then forces dry_run=True and emits fabricated '2.14% improvement / AVX-512' messages; even pointing at the correct dir, 'from runners import SubprocessRunner' fails (Traceback at runners.py:29). OPTIMIZATION_LINEAGE 'MutaLambda v5.0 Real' is therefore fictional, and its dates (2026-09-17) are in the future.",
+        "Dockerfile does COPY . . with no .dockerignore, copying the large stale core/build/ tree into the build context."
+      ],
+      "severity": "HIGH"
+    },
+    {
+      "name": "Testing / Benchmarks",
+      "status": "FAIL",
+      "findings": [
+        "No enable_testing()/add_test/ctest. Zero unit tests for crypto, SPSC, OrderBook, Kelly, or AlphaParser; CI runs no assertions.",
+        "core/crypto/test_signer.cpp is not a CMake target; never compiled/run; performs no known-answer EIP-712 test-vector verification (docs claim 'test_signer PASS' but it is unverifiable).",
+        "latency_bench.cpp is not a CMake target and, where present, has invalid methodology (20k pre-fill into a 1024-cap queue with ignored try_push return; empty ticks dominate); no warmup/empty-guard filtering, no confidence intervals.",
+        "mem_audit.py is a stub (prints 'binary not yet compiled', never invokes valgrind); l2_backtester.cpp is a skeleton with // ... bodies and a divide-by-zero-risk fill computation (total_cost/filled_size when filled_size==0).",
+        "CI 'Run Latency Benchmark' step is mislabeled — it executes the demo binary ./bin/crowdintel_bot, not any benchmark."
+      ],
+      "severity": "HIGH"
+    },
+    {
+      "name": "Documentación / README",
+      "status": "FAIL",
+      "findings": [
+        "README states 'It compiles, signs orders using OpenSSL's ECDSA' — contradicted by the non-compiling clean build and the SHA-256 Keccak stub.",
+        "README/OPTIMIZATION_LINEAGE/FINAL_AUDIT publish fabricated latency (P99 24 cycles / 7.8ns) derived from an invalid benchmark (empty-queue domination).",
+        "docs/FINAL_AUDIT.md declares 'Final Verdict: APPROVED FOR PRODUCTION' — a safety-relevant claim directly contradicted by the keccak stub, placeholder keys, mock nonce, stub HMAC payload, non-linking binary, and non-compiling build.",
+        "docs/PERF_METRICS.md and OPTIMIZATION_LINEAGE.md reference 'make pgo-build' and './bin/benchmark_latency' which do not exist as Make/CMake targets; OPTIMIZATION_LINEAGE uses future dates (2026-09-17).",
+        "Docs conflate performance of a 'Python equivalent' benchmarked by MutaLambda with improvement of the C++ hot path — methodologically invalid."
+      ],
+      "severity": "HIGH"
+    }
+  ],
+  "critical_issues": [
+    "Build is broken from a clean tree: CMakeLists has no find_package(CURL)/find_package(OpenSSL)/target_link_libraries and libcurl-dev is absent; clean build fails at curl/curl.h. Committed build/ artifacts are stale and do not match the current source (ldd shows no curl/SSL linkage; stdout differs).",
+    "EIP-712 is cryptographically non-compliant: keccak256 is a SHA-256 stub; domain separator is a 0xAB placeholder; salt/private key/v are hardcoded; signatures will fail verification on Polymarket. DO NOT deploy with funds.",
+    "Hot-path latency claims are fabricated/invalid: std::cout in the hot path; benchmark pre-fills 20k signals into a 1024-cap queue (18976 ticks are empty) and the reported P99 measures the empty try_pop path; CPU frequency is assumed 3.0 GHz without calibration.",
+    "Order payload is the literal 'order_data_placeholder' and the client is constructed with 'YOUR_API_KEY'/'YOUR_SECRET'/'YOUR_PASSPHRASE' in the production entrypoint — orders can never authenticate/submit correctly.",
+    "MutaLambda 'evolution' is simulated (wrong default path; runners import fails; dry-run emits fabricated 2.14% / AVX-512 gains with future dates) — no real evolutionary optimization touched the C++ hot path.",
+    "docs/FINAL_AUDIT.md 'APPROVED FOR PRODUCTION' contradicts the keccak stub, placeholder creds, mock nonce, non-linking binary, and non-compiling build — a critical documentation/safety defect.",
+    "Dockerfile and CI/CD reference artifacts that do not exist (bot_bin, crowdintel_bot_test, benchmark_latency, make pgo-build) — the deployment pipeline cannot succeed."
+  ],
+  "recommendations": [
+    "Add find_package(CURL REQUIRED) and find_package(OpenSSL REQUIRED) plus target_link_libraries(crowdintel_bot PRIVATE CURL::libcurl OpenSSL::Crypto OpenSSL::SSL); install libcurl4-openssl-dev/libssl-dev in CI and Dockerfile; remove stale build/ artifacts.",
+    "Replace the keccak256 SHA-256 stub with a real Keccak-256 (e.g., keccak-tiny or botan's SHA3-256 with Keccak padding); compute the proper EIP-712 domainSeparator and verify against a canonical EIP-712 known-answer vector in a CMake-built test.",
+    "Generate per-order random salts (crypto-grade RNG), load real private keys from a secure secret store (never hardcode), and set v to the ECDSA recovery id (27/28) from the signature.",
+    "Remove all std::cout from run_tick/submit_order; use a lock-free ring-buffer/spsc logger flushed off the hot core, and bind the hot loop to an isolated CPU (taskset + nohz_full).",
+    "Implement NonceManager against a real monotonic clock (clock_gettime(CLOCK_REALTIME)) with sub-ms counter overflow handling matching CLOB nonce semantics; remove the mock timestamp.",
+    "Rewrite submit_order with CURLOPT_TIMEOUT/NOSIGNAL, remove CURLOPT_NOBODY, sign/emit the actual order JSON, and pin the API over verified TLS (consider cert pinning).",
+    "Register latency_bench.cpp and test_signer.cpp as CMake targets (add_executable), add ctest, and fix the benchmark to (a) bound the pre-filled queue to Capacity, (b) ignore empty ticks or measure only productive ticks, and (c) calibrate TSC-to-ns at startup via clock_gettime.",
+    "Point the MutaLambda adapter at the in-repo MutaLambda engine, fix the runners import / dry-run fallback, and validate mutations against the REAL C++ benchmark — not a Python transpilation.",
+    "Fix Dockerfile COPY to /app/build/bin/crowdintel_bot; add a .dockerignore; install libcurl4-openssl-dev in the image. Fix CI to install dev deps and to assert a real latency gate (e.g., awk/grep the benchmark P99) instead of relying on the demo's exit code.",
+    "Withdraw or qualify the 'APPROVED FOR PRODUCTION' verdict in FINAL_AUDIT.md until the crypto stub, placeholder credentials, and non-compiling build are resolved; align documentation with measured reality."
+  ]
+}
