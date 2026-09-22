@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install build deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake libcurl4-openssl-dev libssl-dev
+
+    - name: Build libsecp256k1 v0.8.0 (recovery + asm)
+      run: |
+        git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+        cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
+          -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+          -DSECP256K1_ENABLE_MODULE_RECOVERY=ON -DSECP256K1_ASM=x86_64 \
+          -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF
+        cmake --build /tmp/secp256k1/build -j$(nproc)
+
+    - name: Configure
+      run: |
+        cd core
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+          -DSECP256K1_LIBRARY=/tmp/secp256k1/build/lib/libsecp256k1.a \
+          -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include
+
+    - name: Build
+      run: cmake --build core/build -j$(nproc)
+
+    - name: Crypto KATs + golden vector (C++ vs embedded reference)
+      run: core/build/bin/test_signer
+
+    - name: Unit tests (SPSC, book, Kelly, amounts, wire body, HMAC, WSS parser)
+      run: core/build/bin/test_core
+
+    - name: Independent Python cross-check of the EIP-712 V2 signer
+      run: |
+        pip install pycryptodome coincurve
+        core/build/bin/test_signer --json > /tmp/signer.json
+        python3 tests/crypto/cross_check_v2.py /tmp/signer.json
+
+    - name: Latency benchmark (calibrated; completes and reports percentiles)
+      run: core/build/bin/latency_bench
+
+    - name: Backtester smoke
+      run: core/build/bin/l2_backtester tests/replay/sample_ticks.csv
+
+    - name: Bot offline demo (mock mode, bounded ticks)
+      run: |
+        BOT_MODE=mock BOT_PRIVATE_KEY_HEX=$(python3 -c "print('11'*32)") \
+          BOT_TICKS=8 core/build/bin/crowdintel_bot

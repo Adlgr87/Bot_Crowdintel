@@ -1,33 +1,84 @@
-# 🏛️ Architecture: Bot CrowdIntel (Ultra-Low Latency)
+# 🏛️ Architecture — Bot CrowdIntel (CLOB V2)
 
-## 1. Design Philosophy
-The bot is designed for **Deterministic Execution**. Every microsecond counts. The system is split into a **Hot Path** (critical execution) and a **Cold Path** (alpha generation and management).
+## 1. Design principles
 
-### Core Principles:
-- **Zero Allocation:** No `malloc`, `new`, or `std::vector` resizing during the Hot Path.
-- **Lock-Free:** Communication between the Cold Path and Hot Path via Single-Producer Single-Consumer (SPSC) Ring Buffers.
-- **Cache Alignment:** All critical structures are padded to 64 bytes to prevent False Sharing.
-- **Deterministic Latency:** CPU pinning and kernel isolation to eliminate jitter.
+- **Deterministic hot path**: no heap allocation, no syscalls, no logging,
+  no unbounded loops between "signal seen" and "order on the wire".
+- **Single market focus**: one configured `tokenId` ⇒ everything expensive
+  (decimal token string, hex addresses, domain separator, typehash, HMAC
+  midstates, TLS session) is computed once at startup and cached.
+- **Precompute everything the signal hasn't seen yet**: the pre-signed pool
+  moves ECDSA *off* the critical path entirely.
 
-## 2. System Topology
+## 2. Topology
 
-### A. The Hot Path (The Fast Lane) - C++/Rust
-- **Network Ingest:** Custom WebSocket parser $\rightarrow$ Binary frames $\rightarrow$ OrderBook.
-- **OrderBook L2:** Static array-backed L2 book. Update complexity: $O(1)$.
-- **Execution Engine:** Strategy Eval $\rightarrow$ Position Sizing $\rightarrow$ Order Builder.
-- **Crypto Engine:** EIP-712 Signing using AVX2/SIMD.
-- **Wire Transmission:** `TCP_NODELAY` sockets $\rightarrow$ Polymarket CLOB V2.
+```
+                         ┌────────────────────────────── COLD PATHS ─────────┐
+                         │                                                    │
+ wss://…/ws/market ──► WsMarketListener ── seqlock ──► OrderBookL2            │
+ (RFC 6455 + TLS,        (thread)                                 │            │
+  hand-rolled)                                                    │            │
+ CrowdIntel webhook ─► AlphaParser ── SPSC ──► [signals]          │            │
+ (FDR q, confidence)    (thread)                              │            │
+ Presign thread ──────► PresignedOrderPool ── atomic flip ────────┤            │
+ (±8 ticks × both sides, exact-Kelly bucket, TTL refresh)         │            │
+                         └────────────────────────────────────────┼────────────┘
+                                                                  ▼
+                     ExecutionEngine (pinned core, spin/park)
+                     filters (edge, liquidity, size) → Kelly →
+                     pool hit (~90 ns) | inline ECDSA (~24 µs) →
+                     wire body (fixed buffers) → HMAC midstates
+                                                                  │
+                                                                  ▼
+                     LightweightCLOBClient — persistent TLS,
+                     POST /order with POLY_* L2 headers
+                                                                  │
+                                                                  ▼
+                     clob.polymarket.com  (CLOB V2)
+```
 
-### B. The Cold Path (The Brain) - Rust/Python
-- **CrowdIntel Ingest:** Webhook receiver $\rightarrow$ Alpha Parser.
-- **Alpha Engine:** FDR $q$-value filtering $\rightarrow$ Kelly Sizing calculation.
-- **Management:** API Key rotation, Heartbeat monitoring, Logging.
+## 3. The hot path, step by step (per tick)
 
-## 3. Data Flow (Tick-to-Wire)
-`NIC` $\xrightarrow{0.1\mu s}$ `Packet Parser` $\xrightarrow{0.5\mu s}$ `OrderBook Update` $\xrightarrow{3\mu s}$ `Strategy` $\xrightarrow{5\mu s}$ `SPSC Queue` $\xrightarrow{20\mu s}$ `EIP-712 Sign` $\xrightarrow{5\mu s}$ `Wire`
+1. `SPSC::try_pop(signal)` — ~10 ns, wait-free.
+2. Statistical filters re-check (q, confidence, p_win sanity) — a few ns.
+3. `OrderBookL2::read_top()` — seqlock-guarded best bid/ask snapshot; up to
+   4 retries, else `NO_BOOK`.
+4. Direction: signal hint, else the side with the larger edge.
+5. Economic filters: `edge = p_win − ask` (BUY) below `min_edge` ⇒ skip.
+6. Sizing: exact Kelly `f = (w−p)/(1−p)` × fraction cap × bankroll ÷ price,
+   floor to ×1e6, clamp to visible level size, enforce min size.
+7. Amounts: `__int128` product, 6-decimal raw units, tick-rounded price.
+8. **Pool first**: linear scan (≤16 slots) for `(side, price, size)` with a
+   fresh timestamp → memcpy of a ready wire body (~50 ns).
+   Miss ⇒ inline: build `OrderV2` (fresh RDRAND salt + wall-clock ms),
+   ABI-encode (stack), Keccak ×3, libsecp256k1 recoverable sign (~24 µs on a
+   2.1 GHz shared vCPU; ~2–5 µs on tuned bare metal), fill the wire template.
+9. `client.submit(body)`: timestamp (s) + `HMAC-SHA256` over
+   `ts + "POST" + "/order" + body` via precomputed midstates (~0.3 µs) →
+   headers + POSTFIELDS on the persistent libcurl handle → `curl_easy_perform`.
 
-## 4. Infrastructure Topology
-- **Location:** AWS Amsterdam (eu-west-3).
-- **OS:** Linux 6.18+ with `PREEMPT_RT`.
-- **CPU:** Intel Xeon Sapphire Rapids $\rightarrow$ `isolcpus=2,3`.
-- **NIC:** ENA Express.
+## 4. Thread & concurrency model
+
+| Thread | Role | Sync primitive |
+| :--- | :--- | :--- |
+| WSS listener | feed → book producer | seqlock (odd/even counter) |
+| Presign | pool rebuild + flip | `atomic<uint32_t>` release/acquire |
+| Webhook/alpha ingest | signal producer | SPSC head/tail release/acquire |
+| Engine (pinned) | consumer, submitter | reads only; `pause`/nanosleep park |
+
+No locks anywhere. No atomics on data (only on counters/indices). All shared
+structures are single-writer.
+
+## 5. Build
+
+CMake, C++20. `-O3 -funroll-loops -fno-plt -fvisibility=hidden` +
+optional `-march=native` (`CROWDINTEL_MARCH_NATIVE`, default ON) + LTO.
+The network layer (curl/OpenSSL) is optional (`CROWDINTEL_NETWORK=OFF`
+builds tests/bench/backtester without any network library).
+
+## 6. Deployment posture
+
+- Bare metal with `isolcpus` for the engine core (`infra/scripts/kernel_tuning.sh`
+  applies universal sysctls everywhere and GRUB isolation only where writable).
+- Deterministic Docker build: `infra/docker/Dockerfile.prod`.
+- Secrets only via environment; optional TLS pinning; secret buffers wiped.

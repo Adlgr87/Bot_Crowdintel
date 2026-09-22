@@ -1,38 +1,23 @@
 # Build artifacts
 core/build/
-MutaLambda/build/
-MutaLambda/dist/
-MutaLambda/.venv/
+build/
+.git/
 
-# Test binaries (compiled locally)
-test_keccak
-test_keccak_bin
-test_keccak_debug
-test_keccak_verify
-test_keccak.cpp
-test_keccak_debug.cpp
-test_keccak_verify.cpp
-
-# Python artifacts
+# Python
 __pycache__/
 *.pyc
-*.pyo
-*.egg-info/
 .mypy_cache/
 
-# Git
-.git/
-.gitignore
+# Secrets (defense in depth — the bot reads them from the environment)
+.env
+*.key
 
-# OS files
+# OS / IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
 *.swp
-*.swo
 
-# Logs
+# Docs tooling
 *.log

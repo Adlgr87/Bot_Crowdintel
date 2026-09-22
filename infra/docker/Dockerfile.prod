@@ -1,56 +1,39 @@
-# Dockerfile for Deterministic Build (LTO/PGO)
+# Deterministic production build for Bot CrowdIntel (CLOB V2).
+# Static libsecp256k1; dynamic libssl/libcurl from the runtime layer.
 FROM ubuntu:22.04 AS builder
 
-# Install high-performance toolchain
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    clang-15 \
-    llvm-15 \
-    cmake \
-    git \
-    libssl-dev \
-    libcurl4-openssl-dev \
-    pkg-config \
-    autoconf \
+    build-essential cmake git libssl-dev libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build libsecp256k1 v0.8.0 from source (no system package available on Ubuntu 22.04)
+# libsecp256k1 v0.8.0 — recovery module + x86_64 asm, static.
 RUN git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1 \
-    && cd /tmp/secp256k1 \
-    && ./autogen.sh \
-    && ./configure --enable-module-recovery --enable-module-ecdh --disable-tests --disable-bench --disable-shared \
-    && make -j$(nproc) \
-    && cp .libs/libsecp256k1.a /usr/local/lib/ \
-    && cp -r include/secp256k1* /usr/local/include/ \
-    && rm -rf /tmp/secp256k1
-
-# Set compiler to Clang for better LTO/PGO support
-ENV CC=clang-15
-ENV CXX=clang++-15
+    && cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+        -DSECP256K1_ENABLE_MODULE_RECOVERY=ON -DSECP256K1_ASM=x86_64 \
+        -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF \
+    && cmake --build /tmp/secp256k1/build -j$(nproc)
 
 WORKDIR /app
 COPY . .
 
-# Build with aggressive optimization flags
-# -O3: Max optimization
-# -march=native: Use all instructions available on the host CPU (AVX2, etc)
-# -flto: Link Time Optimization (whole-program optimization)
-# -fno-exceptions -fno-rtti: Remove C++ overhead for low latency
-RUN mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-O3 -march=native -flto -fno-exceptions -fno-rtti" .. && \
-    make -j$(nproc)
+# -march=native is intentional: build on the SAME host class that runs the image
+# (or set CROWDINTEL_MARCH_NATIVE=OFF for portable binaries).
+RUN cmake -S core -B core/build -DCMAKE_BUILD_TYPE=Release \
+      -DSECP256K1_LIBRARY=/tmp/secp256k1/build/lib/libsecp256k1.a \
+      -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
+    && cmake --build core/build -j$(nproc) \
+    && ctest --test-dir core/build --output-on-failure
 
 FROM ubuntu:22.04
-WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    libcurl4 \
-    libssl3 \
+RUN apt-get update && apt-get install -y libcurl4 libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/build/bin/crowdintel_bot .
+WORKDIR /app
+COPY --from=builder /app/core/build/bin/crowdintel_bot /app/crowdintel_bot
 
-# Entrypoint for pinned CPU execution
-ENTRYPOINT ["/usr/bin/taskset", "-c", "2,3", "./crowdintel_bot"]
+# Credentials are injected at runtime (never baked into the image):
+#   BOT_PRIVATE_KEY_HEX, CLOB_API_KEY, CLOB_SECRET, CLOB_PASSPHRASE,
+#   BOT_TOKEN_ID, [BOT_NEG_RISK, BOT_SIGNATURE_TYPE, BOT_MAKER_ADDRESS, ...]
+# Pin the hot loop with BOT_PIN_CPU=<isolcpus core>.
+ENTRYPOINT ["/app/crowdintel_bot"]

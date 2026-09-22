@@ -1,28 +1,41 @@
 #ifndef ALPHA_RECEIVER_HPP
 #define ALPHA_RECEIVER_HPP
 
-#include <string>
 #include <cstdint>
-#include <optional>
+#include <cstring>
 
-/**
- * AlphaSignal: POD structure for insider signals from CrowdIntel.
- * Designed for zero-allocation passage through the SPSC Ring Buffer.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// AlphaSignal: POD message from the CrowdIntel alpha feed (cold path) to the
+// execution engine (hot path). Trivially copyable so it crosses the SPSC ring
+// buffer as a plain memcpy.
+//
+// Semantics (important — this is the engine's contract):
+//   p_win       : posterior probability that the configured outcome resolves
+//                 YES, in (0,1). The engine combines this with the LIVE book
+//                 price to compute edge and Kelly size (statistical filters
+//                 happen here in the cold path; economic filters, which need
+//                 the live price, happen in the hot path).
+//   confidence  : signal quality ∈ [0,1] (reject < BOT_MIN_CONFIDENCE).
+//   q_value     : FDR q-value (reject > BOT_MAX_Q_VALUE).
+// ─────────────────────────────────────────────────────────────────────────────
+
 struct AlphaSignal {
     enum class Type : uint8_t {
         WHALE_TRADE = 0,
         FUNDING_CLUSTER = 1,
         MACHINE_DETECTION = 2,
-        HUMAN_SIGNAL = 3
+        MARKET_EVENT = 3
     };
 
-    Type type;
-    char market_slug[32];   // Fixed size to avoid std::string allocation
-    double confidence;      // 0.0 to 1.0
-    double ev_per_dollar;   // Expected Value
-    double q_value;         // False Discovery Rate
-    uint64_t timestamp_ns;  // RDTSC or system clock
+    Type     type;
+    uint8_t  direction_hint;   // 0 = buy, 1 = sell, 2 = engine decides
+    double   p_win;            // posterior P(YES)
+    double   confidence;       // signal quality
+    double   q_value;          // false discovery rate
+    uint64_t timestamp_ns;     // signal arrival time (CLOCK_REALTIME ns)
+    char     market_slug[16];  // debug label only (hot path uses the single
+                               // configured market/token)
 };
+static_assert(sizeof(AlphaSignal) <= 64, "keep signals cache-line friendly");
 
 #endif // ALPHA_RECEIVER_HPP
