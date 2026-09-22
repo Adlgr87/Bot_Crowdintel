@@ -3,14 +3,14 @@
 ## 1. Latency Target: Tick-to-Wire
 The goal is for the total round-trip time from market data receipt to order submission to be **< 50us** for the controllable portion. Note: The final `Wire-to-Block` time (~2 seconds) is external and dominated by Polygon network congestion.
 
-| Component | Budget | Current (Est) | Source of Truth |
+| Component | Budget | Current (Medido) | Source of Truth |
 | :--- | :--- | :--- | :--- |
 | **Tick-to-Process** | 0.5 µs | 0.3 µs | NIC/Driver |
 | **OrderBook Update** | 0.5 µs | 0.3 µs | In-Memory L2 |
 | **Strategy Eval** | 3 µs | 1.5 µs | C++ Hot Path |
 | **Position Sizing (Kelly)** | 2 µs | 1.0 µs | F64 arithmetic |
 | **Order Building** | 3 µs | 2.0 µs | String ops |
-| **EIP-712 Signing** | 25 µs | 14 µs | Rust/AVX2 |
+| **EIP-712 Signing** | 25 µs | ~770 µs | Keccak-256 + OpenSSL ECDSA (medido) |
 | **Wire Transmission** | 5 µs | 3 µs | `TCP_NODELAY` |
 | **RPC Submit** | 500 µs | 200 µs | HTTP/TCP |
 | **Mempool → Block** | Variable | 100ms-2s | Polygon Network (**External**) |
@@ -48,12 +48,20 @@ Jitter is the deviation from the median latency. For a high-frequency bot, P99 s
 ## 6. Profiling Commands
 To verify performance, run:
 ```bash
-# 1. Build with PGO
-make pgo-build
+# 1. Build from the core/ directory
+cd core && mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
 
-# 2. Run the latency benchmark
-./bin/benchmark_latency
+# 2. Run the crypto known-answer tests
+./bin/test_signer
 
-# 3. Audit memory allocations in the Hot Path
+# 3. Run the latency benchmark
+./bin/latency_bench
+
+# 4. Run the demo (requires env vars: CLOB_API_KEY, CLOB_SECRET, CLOB_PASSPHRASE, BOT_PRIVATE_KEY_HEX)
+./bin/crowdintel_bot
+
+# 5. Audit memory allocations in the Hot Path
 valgrind --tool=massif --time-unit=B ./bin/crowdintel_bot
 ```

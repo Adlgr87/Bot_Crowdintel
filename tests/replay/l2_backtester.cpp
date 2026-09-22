@@ -30,10 +30,14 @@ public:
         
         double available = (double)entry.size / 1e6;
         double fill = std::min(target_size, available);
-        
+
         total_cost = fill * ((double)entry.price / 1e6);
         filled_size = fill;
 
+        // Guard against divide-by-zero when no liquidity at the level
+        if (filled_size == 0.0) {
+            return 0.0; // No fill — return zero price
+        }
         return total_cost / filled_size; // Average fill price
     }
 

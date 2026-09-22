@@ -12,36 +12,62 @@ Este documento rastrea el origen y la evolución del código del Hot Path del **
 
 ## 🔄 Ciclos de Evolución
 
-| Fecha | Componente Mutado | Versión Base | Generaciones | Resultado del Benchmark | Mutación Aplicada |
+> **Status**: MutaLambda integration is wired but **not yet executed**.
+> The adapter is configured to use the in-repo `MutaLambda/` engine via
+> `$MUTALAMBDA_PATH`. When the engine is not present, the adapter reports
+> `status: "not_configured"` with 0% improvement (no fabricated numbers).
+
+| Fecha | Componente Mutado | Versión Base | Generaciones | Resultado | Mutación Aplicada |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `2026-09-17` | `EIP712Signer::sign_order` | `v1.0.0` | 20 | ✅ Real (MutaLambda v5.0): 2.14% de mejora en ciclos (24.0 → 23.5) | AVX-512 vectorización del hash + eliminación de cargas redundantes |
-| `2026-09-17` | `SPSC_RingBuffer::try_push` | `v1.0.0` | 20 | ✅ Real (MutaLambda v5.0): 2.14% de mejora en ciclos (2.0 → 1.96) | Orden de memoria relaxed (acquire→relaxed) en head_ |
-| `2026-09-17` | `OrderBookL2::update_bid` | `v1.0.0` | 20 | ✅ Real (MutaLambda v5.0): 2.14% de mejora en ciclos (10.0 → 9.8) | Empaque de datos de nivel para mejor localidad de caché |
+| _(pendiente)_ | `EIP712Signer::sign_order` | `v1.0.0` | — | — | Keccak-256 chain-based ρ+π (aplicado manualmente, pendiente de evolución) |
+| _(pendiente)_ | `SPSC_RingBuffer::try_push` | `v1.0.0` | — | — | memory_order_relaxed en head_ (aplicado manualmente) |
+| _(pendiente)_ | `OrderBookL2::update_bid` | `v1.0.0` | — | — | Pack de datos de nivel para localidad de caché (aplicado manualmente) |
 
 ### 📈 Métricas Post-Evolución (RDTSC Benchmark, 20K ticks, 5K warmup)
-| Métrica | Valor (ciclos) | Valor (ns @ 3.0GHz) |
-| :--- | :--- | :--- |
-| Min | 19 | 6.3 |
-| P50 | 21 | 7.0 |
-| P99 | 23.5 | **7.8** |
 
-> **Nota**: Las mutaciones se aplicaron al benchmark equivalente Python para validación de corrección. Las optimizaciones C++ subyacentes en `eip712_signer.hpp`, `spsc_ring_buffer.hpp`, y `order_book.hpp` ya incorporan los patrones evolucionados (memory_order_relaxed, pack data, stack allocation).
+Medidas reales con `latency_bench` (calibrado TSC → ns vía `clock_gettime`):
+
+| Métrica | Valor (ciclos) | Valor (ns) |
+| :--- | :--- | :--- |
+| Min | ~2070K | ~770 μs |
+| P50 | ~3.2M | ~1.19 ms |
+| P99 | ~6.99M | ~2.60 ms |
+
+> **Nota**: El hot path incluye ECDSA signing (Keccak-256 + OpenSSL ECDSA_sign).
+> Las latencias anteriores (24 ciclos / 7.8ns) eran de la ruta vacía del queue
+> y **no representan** el costo real de signing. El adaptador de MutaLambda genera
+> equivalentes Python usando **Keccak-256** (no SHA-256) para validación de
+> corrección durante la evolución.
+
+### Optimizaciones aplicadas manualmente (pre-MutaLambda)
+1. **Keccak-256**: Implementación chain-based ρ+π (XKCP reference), no tabla ROT.
+2. **SPSC_RingBuffer**: Capacidad 4096, `placement new` zero-alloc, `memory_order_release/acquire`.
+3. **OrderBookL2**: Bounds check con sentinel, `alignas(64)` para evitar false sharing.
+4. **NonceManager**: `clock_gettime(CLOCK_REALTIME)` + contador atómico.
+5. **ExecutionEngine**: Sin `std::cout` en `run_tick`, private key desde env var.
 
 ## 🔬 Motor de Optimización Real
 
-- **Framework**: [MutaLambda v5.0](https://github.com/Adlgr87/MutaLambda)
-- **Arquitectura**: Multi-isla NSGA-II (4 islas, 8 individuos c/u)
-- **Runner**: SubprocessRunner con escaneo AST de seguridad
-- **Estrategia de mutación**: Operadores adaptativos (random, guided, crossover)
-- **Topología de migración**: Anillo (ring topology)
-- **Validación**: 2 casos de prueba por función (correctness + performance)
+- **Framework**: [MutaLambda](https://github.com/Adlgr87/MutaLambda)
+- **Arquitectura**: NSGA-II multi-isla
+- **Runner**: `SubprocessRunner` con escaneo AST
+- **Validación**: Test cases por función (correctness + performance)
 
 ## 🧭 Cómo Reproducir
 
-Para ejecutar los ciclos de optimización:
-1. Asegúrate de tener el motor de MutaLambda instalado en tu `$MUTALAMBDA_PATH`.
-2. Ejecuta el script de optimización:
+1. Clona el motor MutaLambda:
    ```bash
-   python3 infra/scripts/mutalambda_optimize.py
+   git clone https://github.com/Adlgr87/MutaLambda MutaLambda
    ```
-3. El adaptador (`infra/mutalambda/adapter/mutalambda_adapter.py`) se encargará de la comunicación con el motor.
+2. Instala dependencias Python:
+   ```bash
+   pip install numpy scipy click rich pyyaml pydantic msgpack requests pycryptodome
+   ```
+3. Ejecuta el adaptador:
+   ```bash
+   export MUTALAMBDA_PATH="$PWD/MutaLambda"
+   export PYTHONPATH="$PWD/MutaLambda:$PYTHONPATH"
+   python infra/mutalambda/adapter/mutalambda_adapter.py
+   ```
+4. El adaptador generará equivalentes Python con **Keccak-256** y ejecutará
+   la evolución genética sobre las funciones objetivo.

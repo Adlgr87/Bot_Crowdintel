@@ -1,0 +1,38 @@
+# Build artifacts
+core/build/
+MutaLambda/build/
+MutaLambda/dist/
+MutaLambda/.venv/
+
+# Test binaries (compiled locally)
+test_keccak
+test_keccak_bin
+test_keccak_debug
+test_keccak_verify
+test_keccak.cpp
+test_keccak_debug.cpp
+test_keccak_verify.cpp
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.mypy_cache/
+
+# Git
+.git/
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log

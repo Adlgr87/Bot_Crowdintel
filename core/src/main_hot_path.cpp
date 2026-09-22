@@ -6,6 +6,7 @@
 #include "alpha_receiver.hpp"
 #include "ws_market_listener.hpp"
 #include <iostream>
+#include <cstdlib>
 #include <thread>
 #include <chrono>
 
@@ -21,8 +22,16 @@ int main() {
     SPSC_RingBuffer<AlphaSignal> alpha_queue;
     NonceManager nonce_mgr;
     
-    // Use the new LightweightCLOBClient constructor
-    LightweightCLOBClient client("YOUR_API_KEY", "YOUR_SECRET", "YOUR_PASSPHRASE", "https://clob.polymarket.com");
+    // Load credentials from environment — NEVER hardcode in production entrypoint
+    const char* env_api_key = std::getenv("CLOB_API_KEY");
+    const char* env_secret = std::getenv("CLOB_SECRET");
+    const char* env_passphrase = std::getenv("CLOB_PASSPHRASE");
+    if (!env_api_key || !env_secret || !env_passphrase) {
+        std::cerr << "❌ FATAL: CLOB_API_KEY, CLOB_SECRET, and CLOB_PASSPHRASE must be set in the environment."
+                  << std::endl;
+        return 1;
+    }
+    LightweightCLOBClient client(env_api_key, env_secret, env_passphrase, "https://clob.polymarket.com");
     ExecutionEngine engine(book, alpha_queue, client);
 
     // 2. Start the persistent WebSocket listener in the background

@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <cstring>
+#include <cstdlib>
 #include <array>
 #include <chrono>
 
@@ -71,21 +72,20 @@ private:
     NonceManager nonce_mgr_;
     EIP712Signer signer_;
 
-    // Load private key from environment variable or use deterministic test key
+    // Load private key from environment variable — REQUIRED for production
     static std::vector<uint8_t> load_private_key() {
         const char* env_key = std::getenv("BOT_PRIVATE_KEY_HEX");
-        if (env_key) {
-            std::vector<uint8_t> key;
-            size_t len = strlen(env_key);
-            key.reserve(len / 2);
-            for (size_t i = 0; i < len; i += 2) {
-                char buf[3] = {env_key[i], env_key[i + 1], 0};
-                key.push_back(static_cast<uint8_t>(strtol(buf, nullptr, 16)));
-            }
-            return key;
+        if (!env_key || strlen(env_key) != 64) {
+            throw std::runtime_error(
+                "BOT_PRIVATE_KEY_HEX must be set to a 64-character hex string (32 bytes). "
+                "DO NOT hardcode private keys in source.");
         }
-        // Fallback: deterministic test key (NOT for production use)
-        return std::vector<uint8_t>(32, 0x01);
+        std::vector<uint8_t> key(32);
+        for (size_t i = 0; i < 32; i++) {
+            char buf[3] = {env_key[i * 2], env_key[i * 2 + 1], 0};
+            key[i] = static_cast<uint8_t>(strtol(buf, nullptr, 16));
+        }
+        return key;
     }
 
     // Build proper order payload for Polymarket CLOB V2 submission

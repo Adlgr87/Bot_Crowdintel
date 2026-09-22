@@ -77,6 +77,15 @@ set_target_properties(crowdintel_bot PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# --- CTest Integration ---
+enable_testing()
+add_test(NAME keccak_known_answer
+    COMMAND $<TARGET_FILE:test_signer>
+)
+add_test(NAME latency_benchmark
+    COMMAND $<TARGET_FILE:latency_bench>
+)
+
 # --- Test Targets (built from core/ root, tests/ is sibling) ---
 # EIP-712 Signer Test
 add_executable(test_signer crypto/test_signer.cpp)

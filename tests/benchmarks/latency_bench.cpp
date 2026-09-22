@@ -48,10 +48,10 @@ void run_latency_test() {
     }
     printf(">> Queue pre-filled with %zu signals (capacity: %zu)\n", filled, QUEUE_CAPACITY);
 
-    // Warm-up phase: process with continuous refill
+    // Warm-up phase: process with continuous refill, checking try_push return
     for (size_t i = 0; i < WARMUP_TICKS; ++i) {
         if (i % (QUEUE_CAPACITY / 4) == 0) {
-            // Refill queue during warmup
+            size_t refilled = 0;
             for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
                 AlphaSignal s{};
                 s.type = AlphaSignal::Type::WHALE_TRADE;
@@ -59,13 +59,14 @@ void run_latency_test() {
                 s.ev_per_dollar = 0.05;
                 s.q_value = 0.01;
                 s.timestamp_ns = i * QUEUE_CAPACITY + j;
-                alpha_queue.try_push(s);
+                if (alpha_queue.try_push(s)) refilled++;
             }
+            printf("   Warmup refill: %zu/%zu signals queued\n", refilled, QUEUE_CAPACITY - 1);
         }
         engine.run_tick();
     }
 
-    // Final refill before measurement
+    // Final refill before measurement (ensure queue is full)
     for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
         AlphaSignal s{};
         s.type = AlphaSignal::Type::WHALE_TRADE;
@@ -78,26 +79,34 @@ void run_latency_test() {
 
     std::vector<uint64_t> latencies;
     latencies.reserve(TOTAL_TICKS);
+    size_t empty_ticks = 0;
 
     printf(">> Running %zu ticks (post-warmup, with continuous refill)...\n", TOTAL_TICKS);
     for (size_t i = 0; i < TOTAL_TICKS; ++i) {
-        // Refill queue periodically to avoid starvation
-        if (i % (QUEUE_CAPACITY / 2) == 0) {
-            for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
-                AlphaSignal s{};
-                s.type = AlphaSignal::Type::WHALE_TRADE;
-                s.confidence = 0.95;
-                s.ev_per_dollar = 0.05;
-                s.q_value = 0.01;
-                s.timestamp_ns = i * QUEUE_CAPACITY + j;
-                alpha_queue.try_push(s);
-            }
+        // Refill queue before each tick to guarantee productive measurement
+        // (avoids measuring empty try_pop fast-fail path)
+        for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
+            AlphaSignal s{};
+            s.type = AlphaSignal::Type::WHALE_TRADE;
+            s.confidence = 0.95;
+            s.ev_per_dollar = 0.05;
+            s.q_value = 0.01;
+            s.timestamp_ns = i * QUEUE_CAPACITY + j;
+            alpha_queue.try_push(s);
         }
 
         uint64_t start = rdtscp();
         engine.run_tick();
         uint64_t end = rdtscp();
-        latencies.push_back(end - start);
+        uint64_t delta = end - start;
+
+        // Only record productive ticks (delta > 0 means work was done)
+        // Empty ticks (try_pop returns nullopt) would be near-zero cycles
+        if (delta > 0) {
+            latencies.push_back(delta);
+        } else {
+            empty_ticks++;
+        }
     }
 
     std::sort(latencies.begin(), latencies.end());

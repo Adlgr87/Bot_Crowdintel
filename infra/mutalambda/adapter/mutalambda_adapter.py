@@ -63,11 +63,12 @@ class MutaLambdaAdapter:
         try:
             from runners import SubprocessRunner, create_runner
             from evaluation_service import EvaluationService
+            self.dutalambda_available = True
             self.dry_run = False
             print(f"✅ MutaLambda engine loaded from {self.mutalambda_path}")
         except ImportError as e:
             print(f"⚠️ Could not import MutaLambda modules: {e}")
-            print("   Running in dry-run mode (simulated mutations).")
+            print("   Running in dry-run mode — no mutations will be applied to C++ hot path.")
             self.dry_run = True
 
     def _load_targets(self) -> List[Dict[str, Any]]:
@@ -221,18 +222,30 @@ def {function_name}_evolution_target(data):
             "goal": optimization_goal,
             "generations": generations,
             "population_size": population_size,
-            "engine": "MutaLambda v5.0",
+            "engine": "MutaLambda",
         }
 
         if self.dry_run:
-            report["status"] = "simulated"
-            report["message"] = "MutaLambda engine not fully operational. Mutation simulated."
-            report["mutation_strategy"] = "AVX2 vectorization + relaxed memory ordering"
-            report["expected_gain_pct"] = 2.14
+            report["status"] = "not_configured"
+            report["message"] = (
+                "MutaLambda engine not available. Set MUTALAMBDA_PATH to the "
+                "MutaLambda repository root for real evolutionary optimization."
+            )
+            report["improvement_pct"] = 0.0
             return report
 
         # Generate Python equivalent for benchmarking
         python_benchmark = self.extract_function_from_cpp(module_path, function_name)
+
+        # Compute domain separator for EIP-712 test cases (must match C++ signer)
+        from Crypto.Hash import keccak
+        domain_type = "EIP712Domain(string name,address verifyingContract)"
+        domain_type_hash = keccak.new(digest_bits=256, data=domain_type.encode()).digest()
+        name_hash = keccak.new(digest_bits=256, data=b"TEST").digest()
+        addr_padded = b"\x00" * 12 + b"\xab" * 20
+        domain_data = name_hash + addr_padded
+        domain_sep = keccak.new(digest_bits=256, data=domain_type_hash + domain_data).digest()
+        domain_sep_hex = domain_sep.hex()
 
         # Write benchmark to temp file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=self.mutalambda_path) as f:
@@ -246,8 +259,8 @@ def {function_name}_evolution_target(data):
             # Generate test cases specific to each function
             test_case_templates = {
                 "sign_order": [
-                    {"function": "sign_order_evolution_target", "args": [123456789, 500000000, 1000000000, 987654321, 0], "expected": True, "comparison": "equal"},
-                    {"function": "sign_order_evolution_target", "args": [111, 999999, 5000000, 42, 1], "expected": True, "comparison": "equal"}
+                    {"function": "sign_order_evolution_target", "args": [123456789, 500000000, 1000000000, 987654321, 0, domain_sep_hex], "expected": True, "comparison": "equal"},
+                    {"function": "sign_order_evolution_target", "args": [111, 999999, 5000000, 42, 1, domain_sep_hex], "expected": True, "comparison": "equal"}
                 ],
                 "try_push": [
                     {"function": "try_push_evolution_target", "args": [{}, "item1", 0, 1], "expected": True, "comparison": "equal"},
@@ -301,7 +314,7 @@ def {function_name}_evolution_target(data):
             if improvement_match:
                 report["improvement_pct"] = float(improvement_match.group(1))
             else:
-                report["improvement_pct"] = 2.14  # Default simulated gain
+                report["improvement_pct"] = 0.0  # No improvement detected
 
         except subprocess.TimeoutExpired:
             report["status"] = "timeout"

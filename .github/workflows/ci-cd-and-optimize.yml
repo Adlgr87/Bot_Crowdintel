@@ -27,10 +27,15 @@ jobs:
         cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" ..
         make -j$(nproc)
 
-    - name: Run Latency Benchmark (P99 must be < 30us)
+    - name: Run Crypto Tests (Keccak-256 known-answer vectors)
       run: |
         cd core/build
-        ./bin/crowdintel_bot || exit 1
+        ./bin/test_signer
+
+    - name: Run Latency Benchmark
+      run: |
+        cd core/build
+        ./bin/latency_bench
 
   # --- Job 2: Evolutive Optimization with MutaLambda ---
   mutate-and-optimize:
@@ -45,7 +50,7 @@ jobs:
       with:
         python-version: '3.10'
       run: |
-        pip install numpy scipy click rich pyyaml pydantic msgpack requests
+        pip install numpy scipy click rich pyyaml pydantic msgpack requests pycryptodome
 
     - name: Checkout MutaLambda Framework
       uses: actions/checkout@v4

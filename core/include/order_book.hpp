@@ -41,8 +41,15 @@ public:
         }
     }
 
-    inline const Level2Entry& get_bid(uint32_t level) const { return bids_[level]; }
-    inline const Level2Entry& get_ask(uint32_t level) const { return asks_[level]; }
+    inline const Level2Entry& get_bid(uint32_t level) const {
+        // Zero-allocation bounds guard — returns sentinel entry for out-of-range
+        static const Level2Entry empty_entry = {0, 0, 0};
+        return (level < MAX_LEVELS) ? bids_[level] : empty_entry;
+    }
+    inline const Level2Entry& get_ask(uint32_t level) const {
+        static const Level2Entry empty_entry = {0, 0, 0};
+        return (level < MAX_LEVELS) ? asks_[level] : empty_entry;
+    }
     inline uint64_t get_sequence() const { return sequence_.load(std::memory_order_acquire); }
 
 private:

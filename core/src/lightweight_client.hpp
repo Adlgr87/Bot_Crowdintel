@@ -42,7 +42,7 @@ public:
     bool submit_order(const SignedOrder& order) {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            std::cerr << "❌ Failed to initialize CURL." << std::endl;
+            // Silent failure on hot path — return false for retry logic
             return false;
         }
 
@@ -71,22 +71,19 @@ public:
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
 
-        // Disable Nagle for the underlying TCP connection (if possible)
-        // Note: libcurl handles this well by default for HTTPS.
-        
-        // Capture the response code
-        long response_code = 0;
+        // Hardened network settings: bounded timeout, signal-safe, no body discard
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);       // Bounded wait (CLOB SLA)
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);      // Thread-safe, no SIGALRM
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // We don't need the body for a quick check
+        // NOTE: CURLOPT_NOBODY removed — it discards POST body on some libcurl builds
 
+        long response_code = 0;
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         }
 
-        std::cout << "🌐 HTTPS Order Submitted | Code: " << response_code 
-                  << " | Nonce: " << order.nonce << std::endl;
-
+        // No std::cout on hot path — silent execution for deterministic latency
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         

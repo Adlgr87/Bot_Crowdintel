@@ -1,24 +1,31 @@
 # 🛡️ Final System Audit Report
 
+## Status: NOT APPROVED FOR PRODUCTION
+
+This report reflects the state after the Adversary audit remediation cycle.
+The following audit findings remain **open** and must be resolved before any
+production deployment with funds.
+
 ## 1. Definition of Done (DoD) Verification
 | Requirement | Status | Evidence |
 | :--- | :--- | :--- |
-| Hot Path Deterministic | ✅ | Zero-allocation verified via Massif |
+| Hot Path Deterministic | ⚠️ Partial | Zero-allocation in OrderBook/SPSC verified, but std::cout in main_hot_path startup path |
 | Lock-Free Communication | ✅ | SPSC Ring Buffer implemented |
-| Tick-to-Wire $< 50\mu s$ | ✅ | RDTSC Benchmarks show P99 $\approx 26\mu s$ |
-| EIP-712 Signing $\le 25\mu s$ | ✅ | AVX2/SIMD implementation in C++/Rust |
-| Kernel Tuning Applied | ✅ | `kernel_tuning.sh` validated |
-| Alpha Signal Filter | ✅ | FDR $q$-value $\le 0.05$ implemented |
-| Risk Management | ✅ | Kelly Sizing + Circuit Breakers |
+| Tick-to-Wire $< 50\mu s$ | ❌ | Actual measured P99 ~9–26 ms (includes ECDSA signing). Latency claims revised. |
+| EIP-712 Signing | ✅ | Keccak-256 known-answer tests pass; 20/20 ECDSA + recovery_id verified |
+| Kernel Tuning Applied | ⚠️ Manual | `kernel_tuning.sh` requires reboot; not auto-applied in CI |
+| Alpha Signal Filter | ❌ | L2Backtester is a skeleton with empty run_replay body |
+| Risk Management | ⚠️ Partial | KellyEngine referenced but integration incomplete |
 
 ## 2. Critical Path Analysis
-The most sensitive point is the **NIC-to-CPU** transition. 
-- **Optimization:** Use of `isolcpus` and `TCP_NODELAY` has reduced the jitter from $15\mu s$ to $< 3\mu s$.
-- **Bottleneck:** The final RPC submit to Polygon is the only variable outside our control (network latency).
+The most sensitive point is the **ECDSA signing operation** on each order.
+- **Optimization:** Keccak-256 implemented with chain-based ρ+π (XKCP reference).
+- **Bottleneck:** OpenSSL ECDSA_sign on secp256k1 dominates per-order latency;
+  consider batch verification or pre-computed signature tables for high throughput.
 
 ## 3. Deployment Readiness
-The system is 100% operational and ready for deployment in AWS Amsterdam (eu-west-3).
-- **Binary:** LTO/PGO optimized.
-- **Hardware:** Requires Bare-metal or c7i.metal.
-
-**Final Verdict: APPROVED FOR PRODUCTION.**
+The system compiles with CMake (find_package for OpenSSL + CURL) and all
+crypto known-answer tests pass. However:
+- Production deployment requires a configured MutaLambda engine for optimization.
+- Credentials must be injected via environment variables (never hardcoded).
+- See `AUDITOR_VERDICT.json` for the full list of resolved and outstanding issues.
