@@ -21,7 +21,7 @@ public:
         double ask_size;
     };
 
-    explicit MarketMakingEngine(double initial_twel) : twap_(initial_twel), confidence_(0.90) {}
+    explicit MarketMakingEngine(double initial_twap) : twap_(initial_twap), confidence_(0.90) {}
 
     // Generates a Quote based on the current order book and alpha signals
     Quote generate_quote(const OrderBookL2& book) {

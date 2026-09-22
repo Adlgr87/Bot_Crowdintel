@@ -2,6 +2,7 @@
 #include "spsc_ring_buffer.hpp"
 #include <iostream>
 #include <cstring>
+#include <chrono>
 
 /**
  * AlphaParser: Cold Path component that transforms JSON-like alerts 
@@ -40,7 +41,8 @@ public:
         signal.confidence = conf;
         signal.ev_per_dollar = ev;
         signal.q_value = q_val;
-        signal.timestamp_ns = 123456789; // Mock timestamp
+        signal.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
         // 5. Push to Hot Path (Lock-Free)
         return queue_.try_push(signal);
