@@ -1,3 +1,12 @@
 core/build/
 MutaLambda/
 __pycache__/
+
+# Stray Keccak test artifacts (experimental, not part of build system)
+test_keccak
+test_keccak_bin
+test_keccak_debug
+test_keccak_verify
+test_keccak.cpp
+test_keccak_debug.cpp
+test_keccak_verify.cpp
