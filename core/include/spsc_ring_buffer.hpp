@@ -1,64 +1,70 @@
 #ifndef SPSC_RING_BUFFER_HPP
 #define SPSC_RING_BUFFER_HPP
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SPSC_RingBuffer: wait-free single-producer/single-consumer queue.
+//
+// - Capacity is a power of two (compile-time enforced).
+// - Storage is a member array (no unique_ptr indirection on every access).
+// - Elements must be trivially copyable (POD) — we memcpy slots in/out, which
+//   avoids placement-new/destructor bookkeeping and lets the compiler emit
+//   simple mov instructions.
+// - acquire/release pairing publishes/consumes slot contents; producer's
+//   head counter is relaxed (only one producer), consumer's tail likewise.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <array>
 #include <atomic>
-#include <memory>
-#include <optional>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 
-/**
- * SPSC_RingBuffer: Single-Producer Single-Consumer Lock-Free Queue.
- * Zero-allocation after construction (buffer allocated once at init).
- * Capacity must be a power of 2 for fast modulo via bitmask.
- */
-template<typename T, size_t Capacity = 4096>
+template <typename T, size_t Capacity = 4096>
 class SPSC_RingBuffer {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
     static_assert(Capacity > 1, "Capacity must be > 1");
+    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
 
 public:
-    SPSC_RingBuffer() : head_(0), tail_(0) {
-        buffer_ = std::make_unique<T[]>(Capacity);
-    }
-
-    // Producer: Push an item into the queue
-    bool try_push(const T& item) {
-        const size_t current_head = head_.load(std::memory_order_relaxed);
-        const size_t next_head = (current_head + 1) & mask_;
-
-        if (next_head == tail_.load(std::memory_order_acquire)) {
-            return false; // Queue Full
+    // Producer: returns false when full. Counters are unbounded (size_t wrap
+    // is benign: Capacity is a power of two and wrap is masked consistently).
+    inline bool try_push(const T& item) {
+        const size_t h = head_.load(std::memory_order_relaxed);
+        if (h - tail_cache_ >= Capacity - 1) {
+            tail_cache_ = tail_.load(std::memory_order_acquire);  // refresh
+            if (h - tail_cache_ >= Capacity - 1) return false;    // full
         }
-
-        new (&buffer_[current_head]) T(item);  // Placement new, no allocation
-        head_.store(next_head, std::memory_order_release);
+        std::memcpy(&slots_[h & MASK], &item, sizeof(T));
+        head_.store(h + 1, std::memory_order_release);
         return true;
     }
 
-    // Consumer: Pop an item from the queue
-    std::optional<T> try_pop() {
-        const size_t current_tail = tail_.load(std::memory_order_relaxed);
-
-        if (current_tail == head_.load(std::memory_order_acquire)) {
-            return std::nullopt; // Queue Empty
+    // Consumer: returns false when empty; on success copies into `out`.
+    inline bool try_pop(T& out) {
+        const size_t t = tail_.load(std::memory_order_relaxed);
+        if (t == head_cache_) {
+            head_cache_ = head_.load(std::memory_order_acquire);  // refresh
+            if (t == head_cache_) return false;                   // empty
         }
-
-        size_t next_tail = (current_tail + 1) & mask_;
-        T item = buffer_[current_tail];  // Copy out (POD type)
-        buffer_[current_tail].~T();      // Call destructor
-        tail_.store(next_tail, std::memory_order_release);
-        return item;
+        std::memcpy(&out, &slots_[t & MASK], sizeof(T));
+        tail_.store(t + 1, std::memory_order_release);
+        return true;
     }
 
-    // Returns current capacity
     static constexpr size_t capacity() { return Capacity; }
 
 private:
-    alignas(64) std::unique_ptr<T[]> buffer_;
-    alignas(64) std::atomic<size_t> head_;  // Producer writes
-    alignas(64) std::atomic<size_t> tail_;  // Consumer writes
-    static constexpr size_t mask_ = Capacity - 1;
+    static constexpr size_t MASK = Capacity - 1;
+
+    alignas(64) std::array<uint8_t, sizeof(T) * Capacity> storage_{};
+    // Slots overlay storage_ (constructed lazily via memcpy — POD only).
+    T* slots_ = reinterpret_cast<T*>(storage_.data());
+
+    alignas(64) std::atomic<size_t> head_{0};   // producer-only writes
+    alignas(64) std::atomic<size_t> tail_{0};   // consumer-only writes
+    size_t tail_cache_ = 0;                     // producer-side cache of tail_
+    size_t head_cache_ = 0;                     // consumer-side cache of head_
 };
 
 #endif // SPSC_RING_BUFFER_HPP

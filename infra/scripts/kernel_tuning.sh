@@ -15,9 +15,7 @@ net.core.rmem_default = 262144
 net.core.wmem_default = 262144
 
 # Low latency networking
-net.ipv4.tcp_low_latency = 1
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_congestion_control = bbr # Or 'bbr2' if available
 net.ipv4.ip_local_port_range = 1024 65535
 
 # Reduce time-wait recycling and keep-alive overhead
@@ -33,8 +31,16 @@ net.core.busy_poll = 50
 net.core.busy_read = 50
 SYSCTL
 
+# BBR only if the module is actually available on this kernel
+if modprobe tcp_bbr 2>/dev/null && sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-lowlatency.conf
+    echo "✅ BBR congestion control enabled."
+else
+    echo "ℹ️ BBR not available — keeping default congestion control."
+fi
+
 sysctl -p /etc/sysctl.d/99-lowlatency.conf > /dev/null
-echo "✅ Universal Network Stack Optimized (TCP_NODELAY, BBR, Buffers)."
+echo "✅ Universal Network Stack Optimized (buffers, busy-poll, port range)."
 
 # --- Phase 2: Advanced Optimizations (Bare-Metal Only) ---
 # Check if we have access to GRUB (implies we can reboot / we own the machine)

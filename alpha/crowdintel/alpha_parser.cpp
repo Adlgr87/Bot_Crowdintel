@@ -1,53 +1,49 @@
 #include "alpha_receiver.hpp"
 #include "spsc_ring_buffer.hpp"
-#include <iostream>
-#include <cstring>
-#include <chrono>
 
-/**
- * AlphaParser: Cold Path component that transforms JSON-like alerts 
- * into binary AlphaSignal PODs and pushes them to the Hot Path.
- */
+#include <chrono>
+#include <cstring>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AlphaParser (cold path): CrowdIntel webhook payload → binary AlphaSignal.
+//
+// Applies the statistical filters that do NOT depend on live market data:
+//   1. FDR q-value  (reject if q > max_q)
+//   2. Confidence   (reject if conf < min_conf)
+//   3. p_win sanity (reject outside (0,1))
+// Economic filters (edge vs live price) are applied by the engine, which sees
+// the order book — the parser deliberately does not.
+// ─────────────────────────────────────────────────────────────────────────────
+
 class AlphaParser {
 public:
-    explicit AlphaParser(SPSC_RingBuffer<AlphaSignal>& queue) : queue_(queue) {}
+    AlphaParser(SPSC_RingBuffer<AlphaSignal>& queue,
+                double max_q = 0.05, double min_conf = 0.85)
+        : queue_(queue), max_q_(max_q), min_conf_(min_conf) {}
 
-    // Simulates receiving a webhook payload
-    bool process_webhook_payload(const std::string& market, double conf, double ev, double q_val) {
-        // 1. Statistical Filter (FDR q-value)
-        // Reject signals with high false discovery rate
-        if (q_val > 0.05) {
-            return false; 
-        }
+    bool process_webhook_payload(const char* market, double p_win,
+                                 double conf, double q_val,
+                                 uint8_t direction_hint = 2) {
+        if (q_val > max_q_ || conf < min_conf_) return false;
+        if (!(p_win > 0.0 && p_win < 1.0))     return false;
 
-        // 2. Confidence Filter
-        if (conf < 0.85) {
-            return false;
-        }
-
-        // 3. EV Filter
-        if (ev < 0.02) {
-            return false;
-        }
-
-        // 4. Construct POD signal
-        AlphaSignal signal;
-        signal.type = AlphaSignal::Type::WHALE_TRADE;
-        
-        // Safe copy of market slug to fixed-size buffer
-        std::memset(signal.market_slug, 0, sizeof(signal.market_slug));
-        std::strncpy(signal.market_slug, market.c_str(), sizeof(signal.market_slug) - 1);
-        
-        signal.confidence = conf;
-        signal.ev_per_dollar = ev;
-        signal.q_value = q_val;
-        signal.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        AlphaSignal s{};
+        s.type = AlphaSignal::Type::WHALE_TRADE;
+        s.direction_hint = direction_hint;
+        s.p_win = p_win;
+        s.confidence = conf;
+        s.q_value = q_val;
+        s.timestamp_ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-
-        // 5. Push to Hot Path (Lock-Free)
-        return queue_.try_push(signal);
+        if (market) {
+            std::strncpy(s.market_slug, market, sizeof(s.market_slug) - 1);
+            s.market_slug[sizeof(s.market_slug) - 1] = '\0';
+        }
+        return queue_.try_push(s);
     }
 
 private:
     SPSC_RingBuffer<AlphaSignal>& queue_;
+    double max_q_;
+    double min_conf_;
 };

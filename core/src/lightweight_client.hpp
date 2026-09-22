@@ -1,153 +1,184 @@
 #ifndef LIGHTWEIGHT_CLIENT_HPP
 #define LIGHTWEIGHT_CLIENT_HPP
 
-#include <string>
-#include <array>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
-#include <vector>
-#include <openssl/hmac.h>
-#include <iostream>
-#include <openssl/evp.h>
+// ─────────────────────────────────────────────────────────────────────────────
+// LightweightCLOBClient: HTTPS order submission for Polymarket CLOB V2.
+//
+// Wire protocol (docs.polymarket.com — L2 auth headers are unchanged in V2):
+//   POST {host}/order
+//   POLY_ADDRESS / POLY_SIGNATURE / POLY_TIMESTAMP / POLY_API_KEY / POLY_PASSPHRASE
+//   POLY_SIGNATURE = base64url( HMAC-SHA256( base64url_decode(secret),
+//                                            ts_seconds + "POST" + "/order" + body ) )
+//
+// Hot-path design:
+//   - ONE persistent curl easy handle (connection + TLS session reuse; the
+//     TCP/TLS handshake happens once, not per order).
+//   - HMAC key midstates precomputed once → per-order HMAC ≈ 2 SHA-256 blocks.
+//   - Secret decoded into a fixed buffer and wiped on destruction (volatile
+//     stores the optimizer cannot elide).
+//   - Optional TLS public-key pinning (CURLOPT_PINNEDPUBLICKEY, "sha256//...").
+//   - Response captured into a fixed buffer; the CLOB orderID is extracted so
+//     the caller can track/cancel the order.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+
 #include <curl/curl.h>
 
-/**
- * LightweightCLOBClient: HTTPS client for Polymarket CLOB V2.
- * Uses libcurl for TLS and implements Polymarket's required HMAC authentication.
- */
-struct SignedOrder {
-    uint64_t nonce;
-    std::array<uint8_t, 65> signature;
-    std::string payload; // The URL-encoded JSON body of the signed order
-};
+#include "../crypto/secure_zero.hpp"
+#include "../crypto/sha256_engine.hpp"
+#include "market_config.hpp"
+#include "polymarket_order.hpp"
 
 class LightweightCLOBClient {
 public:
-    LightweightCLOBClient(
-        const std::string& api_key,
-        const std::string& secret,
-        const std::string& passphrase,
-        const std::string& base_url = "https://api.polymarket.com")
-        : api_key_(api_key), secret_(secret), passphrase_(passphrase), base_url_(base_url) {
-        curl_global_init(CURL_GLOBAL_DEFAULT);
+    LightweightCLOBClient(const MarketConfig& cfg) : cfg_(cfg) {
+        static std::once_flag curl_once;
+        std::call_once(curl_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+
+        // Decode the base64url secret ONCE — the HMAC key is the raw bytes.
+        const size_t slen = std::strlen(cfg.api_secret_b64);
+        secret_len_ = base64url_decode(cfg.api_secret_b64, slen, secret_raw_);
+        if (secret_len_ == 0 || secret_len_ == (size_t)-1 ||
+            secret_len_ > sizeof(secret_raw_)) {
+            std::fprintf(stderr, "FATAL: CLOB_SECRET is not valid base64url\n");
+            std::exit(1);
+        }
+        hmac_.set_key(secret_raw_, secret_len_);
+
+        // Persistent handle: connection cache + TLS session survive across orders.
+        curl_ = curl_easy_init();
+        if (!curl_) { std::fprintf(stderr, "FATAL: curl_easy_init failed\n"); std::exit(1); }
+        std::snprintf(url_, sizeof(url_), "%s/order", cfg.clob_host);
+        curl_easy_setopt(curl_, CURLOPT_URL, url_);
+        curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
+        curl_easy_setopt(curl_, CURLOPT_CONNECTTIMEOUT, 3L);
+        curl_easy_setopt(curl_, CURLOPT_TIMEOUT, 5L);
+        curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl_, CURLOPT_WRITEDATA, this);
+        curl_easy_setopt(curl_, CURLOPT_ACCEPT_ENCODING, nullptr);  // identity — no decompress latency
+        curl_easy_setopt(curl_, CURLOPT_USERAGENT, "crowdintel-bot/2.0");
+        if (cfg.tls_pin[0]) {
+            curl_easy_setopt(curl_, CURLOPT_PINNEDPUBLICKEY, cfg.tls_pin);
+        }
     }
 
     ~LightweightCLOBClient() {
-        curl_global_cleanup();
+        if (curl_) {
+            curl_easy_cleanup(curl_);
+            curl_ = nullptr;
+        }
+        secure_zero(secret_raw_, sizeof(secret_raw_));
+        secure_zero(&hmac_, sizeof(hmac_));
     }
 
-    // Submits an order to Polymarket CLOB V2 with HMAC authentication.
-    // Returns true on HTTP 200, false otherwise.
-    bool submit_order(const SignedOrder& order) {
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            // Silent failure on hot path — return false for retry logic
-            return false;
+    LightweightCLOBClient(const LightweightCLOBClient&) = delete;
+    LightweightCLOBClient& operator=(const LightweightCLOBClient&) = delete;
+
+    // HOT PATH (network egress). `body` is the fully built, signed wire JSON.
+    SubmitResult submit(const WireBody& body) {
+        SubmitResult res{false, 0, {0}};
+        resp_len_ = 0;
+
+        // 1. Timestamp (seconds) for both the header and the HMAC message.
+        char ts[24];
+        const uint64_t now_sec = now_unix_seconds();
+        const size_t ts_len = u64_to_dec(now_sec, ts);
+
+        // 2. HMAC over  ts + "POST" + "/order" + body  (stack-joined message;
+        //    ≈700-1200 bytes → one streaming pass over precomputed midstates).
+        char sig_b64[48];
+        uint8_t digest[32];
+        {
+            char msg[1600 + 64];
+            size_t off = 0;
+            std::memcpy(msg + off, ts, ts_len); off += ts_len;
+            std::memcpy(msg + off, "POST", 4); off += 4;
+            std::memcpy(msg + off, "/order", 6); off += 6;
+            std::memcpy(msg + off, body.buf, body.len); off += body.len;
+            hmac_.compute((const uint8_t*)msg, off, digest);
+            secure_zero(msg, off);
         }
+        const size_t sig_len = base64url_encode(digest, 32, sig_b64);
+        sig_b64[sig_len] = '\0';
 
-        // 1. Get the current timestamp (in milliseconds) for the X-Timestamp header
-        long long timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        // 3. Headers (two of them vary per request → rebuilt per call).
+        char h_addr[80], h_sig[96], h_ts[48], h_key[96], h_pp[160], h_ct[40];
+        std::snprintf(h_addr, sizeof(h_addr), "POLY_ADDRESS: %s", cfg_.maker_hex);
+        std::snprintf(h_sig,  sizeof(h_sig),  "POLY_SIGNATURE: %s", sig_b64);
+        std::snprintf(h_ts,   sizeof(h_ts),   "POLY_TIMESTAMP: %.*s", (int)ts_len, ts);
+        std::snprintf(h_key,  sizeof(h_key),  "POLY_API_KEY: %s", cfg_.owner_api_key);
+        std::snprintf(h_pp,   sizeof(h_pp),   "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
+        std::snprintf(h_ct,   sizeof(h_ct),   "Content-Type: application/json");
 
-        // 2. Calculate HMAC signature: HMAC_SHA256(secret, timestamp + method + request_path + body)
-        std::string method = "POST";
-        std::string request_path = "/v2/order";
-        std::string body = order.payload;
-        std::string prehash = std::to_string(timestamp_ms) + method + request_path + body;
-        std::string signature = hmac_sha256_base64(secret_, prehash);
-
-        // 3. Set up the libcurl request with the required headers
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, ("X-API-Key: " + api_key_).c_str());
-        headers = curl_slist_append(headers, ("X-Signature: " + signature).c_str());
-        headers = curl_slist_append(headers, ("X-Passphrase: " + passphrase_).c_str());
-        headers = curl_slist_append(headers, ("X-Timestamp: " + std::to_string(timestamp_ms)).c_str());
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        headers = curl_slist_append(headers, h_addr);
+        headers = curl_slist_append(headers, h_sig);
+        headers = curl_slist_append(headers, h_ts);
+        headers = curl_slist_append(headers, h_key);
+        headers = curl_slist_append(headers, h_pp);
+        headers = curl_slist_append(headers, h_ct);
 
-        std::string full_url = base_url_ + request_path;
-        curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
+        curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, body.buf);
+        curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, (long)body.len);
 
-        // Hardened network settings: bounded timeout, signal-safe, no body discard
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);       // Bounded wait (CLOB SLA)
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);      // Thread-safe, no SIGALRM
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-        // NOTE: CURLOPT_NOBODY removed — it discards POST body on some libcurl builds
-
-        long response_code = 0;
-        CURLcode res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+        // 4. Send. libcurl reuses the keep-alive connection.
+        const CURLcode rc = curl_easy_perform(curl_);
+        if (rc == CURLE_OK) {
+            curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &res.http_code);
+            res.ok = (res.http_code >= 200 && res.http_code < 300);
         }
+        if (res.ok && resp_len_) extract_order_id(res.order_id, sizeof(res.order_id));
 
-        // No std::cout on hot path — silent execution for deterministic latency
         curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-        
-        // Consider any 2xx status code a success
-        return (response_code >= 200 && response_code < 300);
+        return res;
     }
 
 private:
-    std::string api_key_;
-    std::string secret_;        // HMAC Secret
-    std::string passphrase_;
-    std::string base_url_;
-
-    // HMAC-SHA256 and returns the signature as a Base64 string (as Polymarket expects).
-    static std::string hmac_sha256_base64(const std::string& secret, const std::string& data) {
-        unsigned int len = 0;
-        unsigned char hmac[EVP_MAX_MD_SIZE];
-        
-        HMAC(EVP_sha256(), secret.c_str(), secret.length(),
-             reinterpret_cast<const unsigned char*>(data.c_str()), data.length(),
-             hmac, &len);
-
-        // Base64 encode the binary HMAC
-        return base64_encode(hmac, len);
+    static uint64_t now_unix_seconds() {
+        timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        return (uint64_t)ts.tv_sec;
     }
 
-    // Simple Base64 encoder
-    static std::string base64_encode(const unsigned char* bytes_to_encode, size_t len) {
-        static constexpr char base64_chars[] =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        std::string ret;
-        int i = 0;
-        int j = 0;
-        unsigned char char_array_3[3];
-        unsigned char char_array_4[4];
-
-        while (len--) {
-            char_array_3[i++] = *(bytes_to_encode++);
-            if (i == 3) {
-                char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-                char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-                char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-                char_array_4[3] = char_array_3[2] & 0x3f;
-                for(i = 0; i < 4; i++) ret += base64_chars[char_array_4[i]];
-                i = 0;
-            }
+    static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+        auto* self = static_cast<LightweightCLOBClient*>(userdata);
+        const size_t total = size * nmemb;
+        const size_t space = sizeof(self->resp_) - self->resp_len_ - 1;
+        const size_t take = total < space ? total : space;
+        if (take) {
+            std::memcpy(self->resp_ + self->resp_len_, ptr, take);
+            self->resp_len_ += take;
+            self->resp_[self->resp_len_] = '\0';
         }
-
-        if (i) {
-            for (j = i; j < 3; j++) char_array_3[j] = 0;
-            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-            char_array_4[3] = char_array_3[2] & 0x3f;
-            for (j = 0; j < i + 1; j++) ret += base64_chars[char_array_4[j]];
-            while(i++ < 3) ret += '=';
-        }
-        return ret;
+        return total;  // always consume everything
     }
 
-    // libcurl callback to discard body
-    static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
-        return size * nmemb; // Just ignore the response body
+    void extract_order_id(char* out, size_t cap) const {
+        static constexpr char K[] = "\"orderID\":\"";
+        const char* hit = std::strstr(resp_, K);
+        if (!hit) return;
+        hit += sizeof(K) - 1;
+        size_t i = 0;
+        while (hit[i] && hit[i] != '"' && i < cap - 1) { out[i] = hit[i]; ++i; }
+        out[i] = '\0';
     }
+
+    const MarketConfig& cfg_;
+    CURL* curl_ = nullptr;
+    char  url_[192];
+    HmacSha256 hmac_;
+    uint8_t secret_raw_[64];
+    size_t  secret_len_ = 0;
+    char    resp_[1024];
+    size_t  resp_len_ = 0;
 };
 
 #endif // LIGHTWEIGHT_CLIENT_HPP
