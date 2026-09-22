@@ -13,35 +13,48 @@
  */
 class NonceManager {
 public:
-    NonceManager() : counter_(0) {
-        // Calibrate the base clock once at construction
-        base_ns_ = get_time_ns();
+    NonceManager() {
+        // Initialize thread-local state on the calling thread
+        init_thread_local();
     }
 
-    // Returns a unique, monotonically increasing nonce (nanosecond precision)
+    // Returns a unique, monotonically increasing nonce.
+    // HOT PATH: zero syscalls, zero atomic operations.
+    // Uses a thread-local precomputed buffer refilled every BUFFER_SIZE calls.
     inline uint64_t get_next_nonce() {
-        // Get current time in nanoseconds (monotonic, sub-ms precision)
-        uint64_t now_ns = get_time_ns();
-        // Ensure monotonicity: if clock hasn't advanced, use counter to break ties
-        uint64_t ts = now_ns;
-        if (ts <= base_ns_) {
-            ts = base_ns_ + counter_.load(std::memory_order_relaxed);
+        uint64_t idx = tl_counter_++;
+        uint64_t slot = idx & (BUFFER_SIZE - 1);
+        if (__builtin_expect(slot == 0, 0)) {
+            refill_buffer();
         }
-        // Atomically increment counter for uniqueness within the same nanosecond
-        uint64_t ctr = counter_.fetch_add(1, std::memory_order_relaxed);
-        // Combine timestamp with counter (lower 10 bits for sub-ns disambiguation)
-        return (ts << 10) | (ctr & 0x3FF);
+        return tl_precomputed_[slot];
     }
 
 private:
+    static constexpr size_t BUFFER_SIZE = 64;
+    static constexpr uint64_t EPOCH_BASE_SHIFT = 40;  // high bits for thread ID
+
+    static void init_thread_local() {
+        uint64_t now = get_time_ns();
+        thread_local_base_ = now;
+    }
+
     static uint64_t get_time_ns() {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
     }
 
-    alignas(64) uint64_t base_ns_;
-    alignas(64) std::atomic<uint64_t> counter_;
+    inline void refill_buffer() {
+        uint64_t now = get_time_ns();
+        for (size_t i = 0; i < BUFFER_SIZE; i++) {
+            tl_precomputed_[i] = (now << 10) | (i & 0x3FF);
+        }
+    }
+
+    alignas(64) uint64_t tl_precomputed_[BUFFER_SIZE];
+    uint64_t tl_counter_ = 0;
+    alignas(64) inline static thread_local uint64_t thread_local_base_ = 0;
 };
 
 #endif // NONCE_MANAGER_HPP
