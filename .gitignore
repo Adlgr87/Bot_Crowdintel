@@ -1,8 +1,14 @@
+# Dependencias / build
 core/build/
+build/
 MutaLambda/
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.mypy_cache/
 
-# Stray Keccak test artifacts (experimental, not part of build system)
+# Binarios y artefactos de prueba locales
 test_keccak
 test_keccak_bin
 test_keccak_debug
@@ -10,3 +16,23 @@ test_keccak_verify
 test_keccak.cpp
 test_keccak_debug.cpp
 test_keccak_verify.cpp
+*.a
+*.o
+*.so
+
+# Secretos locales (nunca commitear)
+.env
+*.key
+*_secret*
+
+# SO / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+massif.out*
