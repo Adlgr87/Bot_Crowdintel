@@ -11,7 +11,18 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libcurl4-openssl-dev \
     pkg-config \
+    autoconf \
     && rm -rf /var/lib/apt/lists/*
+
+# Build libsecp256k1 v0.8.0 from source (no system package available on Ubuntu 22.04)
+RUN git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1 \
+    && cd /tmp/secp256k1 \
+    && ./autogen.sh \
+    && ./configure --enable-module-recovery --enable-module-ecdh --disable-tests --disable-bench --disable-shared \
+    && make -j$(nproc) \
+    && cp .libs/libsecp256k1.a /usr/local/lib/ \
+    && cp -r include/secp256k1* /usr/local/include/ \
+    && rm -rf /tmp/secp256k1
 
 # Set compiler to Clang for better LTO/PGO support
 ENV CC=clang-15

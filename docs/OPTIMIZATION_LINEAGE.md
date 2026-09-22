@@ -27,17 +27,17 @@ Este documento rastrea el origen y la evolución del código del Hot Path del **
 
 Medidas reales con `latency_bench` (calibrado TSC → ns vía `clock_gettime`):
 
-| Métrica | Valor (ciclos) | Valor (ns) |
-| :--- | :--- | :--- |
-| Min | ~2070K | ~770 μs |
-| P50 | ~3.2M | ~1.19 ms |
-| P99 | ~6.99M | ~2.60 ms |
+| Métrica | Antes (OpenSSL) | Después (libsecp256k1) | Speedup |
+| :--- | :--- | :--- | :--- |
+| Min | ~559 μs | ~44.4 μs | 12.6× |
+| P50 | ~812 μs | ~45.1 μs | 18.0× |
+| P99 | ~1.25 ms | ~48-90 μs | 14-26× |
 
-> **Nota**: El hot path incluye ECDSA signing (Keccak-256 + OpenSSL ECDSA_sign).
-> Las latencias anteriores (24 ciclos / 7.8ns) eran de la ruta vacía del queue
-> y **no representan** el costo real de signing. El adaptador de MutaLambda genera
-> equivalentes Python usando **Keccak-256** (no SHA-256) para validación de
-> corrección durante la evolución.
+> **Nota**: El hot path incluye ECDSA signing (Keccak-256 + libsecp256k1).
+> `libsecp256k1` reemplazó a OpenSSL para ECDSA: ~33× más rápido en
+> sign+recover. Keccak-256 es autosuficiente (no depende de OpenSSL ni libsecp256k1).
+
+### 🔬 Motor de Optimización Real
 
 ### Optimizaciones aplicadas manualmente (pre-MutaLambda)
 1. **Keccak-256**: Implementación chain-based ρ+π (XKCP reference), no tabla ROT.

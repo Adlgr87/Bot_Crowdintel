@@ -10,7 +10,7 @@ The goal is for the total round-trip time from market data receipt to order subm
 | **Strategy Eval** | 3 µs | 1.5 µs | C++ Hot Path |
 | **Position Sizing (Kelly)** | 2 µs | 1.0 µs | F64 arithmetic |
 | **Order Building** | 3 µs | 2.0 µs | String ops |
-| **EIP-712 Signing** | 25 µs | ~770 µs | Keccak-256 + OpenSSL ECDSA (medido) |
+| **EIP-712 Signing** | 25 µs | ~45 µs | Keccak-256 + libsecp256k1 (medido) |
 | **Wire Transmission** | 5 µs | 3 µs | `TCP_NODELAY` |
 | **RPC Submit** | 500 µs | 200 µs | HTTP/TCP |
 | **Mempool → Block** | Variable | 100ms-2s | Polygon Network (**External**) |

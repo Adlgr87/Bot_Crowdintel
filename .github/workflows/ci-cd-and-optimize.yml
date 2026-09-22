@@ -18,13 +18,25 @@ jobs:
     - name: Setup Build Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake clang libcurl4-openssl-dev libssl-dev
+        sudo apt-get install -y build-essential cmake clang libcurl4-openssl-dev libssl-dev autoconf
+
+    - name: Build libsecp256k1 v0.8.0
+      run: |
+        git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+        cd /tmp/secp256k1
+        ./autogen.sh
+        ./configure --enable-module-recovery --disable-tests --disable-bench --disable-shared
+        make -j$(nproc)
 
     - name: Build with LTO/PGO Flags
       run: |
         cd core
         mkdir -p build && cd build
-        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" ..
+        cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" \
+          -DSECP256K1_LIBRARY=/tmp/secp256k1/.libs/libsecp256k1.a \
+          -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
+          ..
         make -j$(nproc)
 
     - name: Run Crypto Tests (Keccak-256 known-answer vectors)
