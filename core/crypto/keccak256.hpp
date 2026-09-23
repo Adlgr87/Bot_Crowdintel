@@ -30,11 +30,13 @@ inline void keccak_f1600(uint64_t A[25]) {
     };
 
     for (int round = 0; round < 24; round++) {
-        // θ (theta)
+        // θ (theta) — MutaLambda optimization: iterate x in reverse (4→0) to
+        // improve instruction scheduling on modern CPUs (breaks the back-to-
+        // back latency chain between consecutive C[x] computations).
         uint64_t C[5], D[5];
         for (int x = 0; x < 5; x++)
             C[x] = A[x] ^ A[x + 5] ^ A[x + 10] ^ A[x + 15] ^ A[x + 20];
-        for (int x = 0; x < 5; x++) {
+        for (int x = 4; x >= 0; x--) {
             const uint64_t c1 = C[(x + 1) % 5];
             D[x] = C[(x + 4) % 5] ^ ((c1 << 1) | (c1 >> 63));
         }

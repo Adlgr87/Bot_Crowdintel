@@ -78,8 +78,10 @@ public:
         if (!signals_.try_pop(sig)) return TickResult::NO_SIGNAL;
 
         // ── 1. Statistical pre-filters (defensive repeat of the cold path). ──
-        if (!(sig.p_win > 0.0 && sig.p_win < 1.0)) return TickResult::FILTERED_STATS;
-        if (sig.confidence < cfg_.min_confidence || sig.q_value > cfg_.max_q_value)
+        // MutaLambda: __builtin_expect marks these as likely to pass.
+        if (__builtin_expect(!(sig.p_win > 0.0 && sig.p_win < 1.0), 0))
+            return TickResult::FILTERED_STATS;
+        if (__builtin_expect(sig.confidence < cfg_.min_confidence || sig.q_value > cfg_.max_q_value, 0))
             return TickResult::FILTERED_STATS;
 
         // ── 2. Live top of book (seqlock-guarded; a few retries suffice — the
@@ -106,10 +108,13 @@ public:
         const double price = (double)price_raw * 1e-6;
 
         // ── 4. Edge filter (economic, needs the live price). ─────────────────
+        // MutaLambda: hoist hot values into locals for register reuse.
+        const double price_raw_d = (double)price_raw;
+        const double p_win = sig.p_win;
         const double edge = (side == K_SIDE_BUY)
-            ? (sig.p_win - price)
-            : (price - sig.p_win);
-        if (edge < cfg_.min_edge) return TickResult::NO_EDGE;
+            ? (p_win - price_raw_d * 1e-6)
+            : (price_raw_d * 1e-6 - p_win);
+        if (__builtin_expect(edge < cfg_.min_edge, 0)) return TickResult::NO_EDGE;
 
         // ── 5. Exact Kelly sizing (×1e6 fixed shares). ───────────────────────
         const double k = (side == K_SIDE_BUY)

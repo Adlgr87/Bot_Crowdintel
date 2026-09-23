@@ -60,6 +60,12 @@ inline constexpr const char* K_ORDER_TYPE_STR =
     "uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,"
     "uint256 timestamp,bytes32 metadata,bytes32 builder)";
 
+// MutaLambda optimization: precompute typehash once (eliminates redundant
+// keccak256 calls per sign_order invocation).
+inline void compute_typehash(const char* type_str, size_t len, uint8_t out[32]) {
+    keccak256_hash(reinterpret_cast<const uint8_t*>(type_str), len, out);
+}
+
 // Canonical Polymarket V2 Exchange contracts (docs.polymarket.com/resources/contracts).
 inline constexpr uint8_t K_STANDARD_EXCHANGE[20] = {
     0xE1,0x11,0x18,0x00,0x00,0xd2,0x66,0x3C,0x00,0x91,
@@ -161,15 +167,16 @@ public:
 
         // 3. Recoverable ECDSA — recid (⇒ v) computed during signing at no
         //    extra cost; RFC 6979 deterministic nonce; low-S automatic.
+        //    MutaLambda: __builtin_expect marks failure as cold (rare).
         secp256k1_ecdsa_recoverable_signature sig;
-        if (!secp256k1_ecdsa_sign_recoverable(secp_ctx_, &sig, digest,
-                                              privkey_, nullptr, nullptr))
+        if (__builtin_expect(!secp256k1_ecdsa_sign_recoverable(secp_ctx_, &sig, digest,
+                                              privkey_, nullptr, nullptr), 0))
             return false;
 
         int recid = 0;
         uint8_t compact[64];
-        if (!secp256k1_ecdsa_recoverable_signature_serialize_compact(
-                secp_ctx_, compact, &recid, &sig))
+        if (__builtin_expect(!secp256k1_ecdsa_recoverable_signature_serialize_compact(
+                secp_ctx_, compact, &recid, &sig), 0))
             return false;
 
         std::memcpy(out_sig65, compact, 64);

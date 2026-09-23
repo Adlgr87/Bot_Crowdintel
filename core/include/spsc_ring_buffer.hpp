@@ -29,9 +29,10 @@ class SPSC_RingBuffer {
 public:
     // Producer: returns false when full. Counters are unbounded (size_t wrap
     // is benign: Capacity is a power of two and wrap is masked consistently).
+    // MutaLambda optimization: __builtin_expect marks rare branch as unlikely.
     inline bool try_push(const T& item) {
         const size_t h = head_.load(std::memory_order_relaxed);
-        if (h - tail_cache_ >= Capacity - 1) {
+        if (__builtin_expect(h - tail_cache_ >= Capacity - 1, 0)) {
             tail_cache_ = tail_.load(std::memory_order_acquire);  // refresh
             if (h - tail_cache_ >= Capacity - 1) return false;    // full
         }
@@ -43,7 +44,7 @@ public:
     // Consumer: returns false when empty; on success copies into `out`.
     inline bool try_pop(T& out) {
         const size_t t = tail_.load(std::memory_order_relaxed);
-        if (t == head_cache_) {
+        if (__builtin_expect(t == head_cache_, 0)) {
             head_cache_ = head_.load(std::memory_order_acquire);  // refresh
             if (t == head_cache_) return false;                   // empty
         }
