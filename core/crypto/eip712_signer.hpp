@@ -46,7 +46,7 @@
 
 #include <cstdlib>
 
-#include "keccak256.hpp"
+#include "keccak256_optimized.hpp"
 #include "fast_random.hpp"
 #include "secure_zero.hpp"
 #include "polymarket_order.hpp"

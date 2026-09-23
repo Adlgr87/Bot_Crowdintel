@@ -132,6 +132,27 @@ Full numbers and methodology: [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md).
 - **Golden-vector verified**: the C++ signer's domain separator, struct hash,
   digest, and signature match an independent Python implementation
   (`tests/crypto/cross_check_v2.py`, pycryptodome + coincurve) byte-for-byte.
+- **Rendimiento Keccak optimizado vía MutaLambda** — el núcleo `keccak_f1600`
+  fue optimizado evolutivamente con el motor genético de
+  [Adlgr87/MutaLambda](https://github.com/Adlgr87/MutaLambda) (ver PR #2).
+  La mutación ganadora reescribe el paso ρ+π como una cadena de rotación
+  in-situ con guardia `shift==0`, evitando el barrel-shifter en lanes de
+  rotación cero, preservando la equivalencia funcional (KAT verificado bajo
+  `g++` y `clang++`):
+
+  | Métrica | Antes (XKCP canónico) | Después (MutaLambda) | Mejora |
+  |---|---|---|---|
+  | keccak_f1600 ns/op (clang++ 22.1.8, 1e6 permutaciones, -O3 -march=native) | 547.8 ns | 416.2 ns | **1.3156×** (+31.6 %) |
+  | keccak256("") | `c5d24601…85a470` | `c5d24601…85a470` | ✅ idéntico |
+  | keccak256("abc") | `4e03657a…c0d6c45` | `4e03657a…c0d6c45` | ✅ idéntico |
+
+  - **Motor / parámetros**: LLM `agnes-2.5-flash` (endpoint OpenAI-compatible)
+    vía MutaLambda `--backend openai`; NSGA-II 3 islas × 14 generaciones × 50
+    individuos; timing mediana 10 samples / 2 warmups, proceso aislado; KAT
+    cross-compile `g++ 13.3.0` y `clang++ 22.1.8` (bit-idéntico).
+  - Artefactos: `benchmarks/MUTALAMBDA_KEECCAK_BENCHMARKS.md`,
+    `benchmarks/results/results_cpp_keccak.json` y
+    `benchmarks/targets/keccak256_optimized.hpp` en el repo de MutaLambda.
 - Secrets: decoded once into fixed buffers, wiped with non-elidable volatile
   stores; HMAC keys held only as precomputed midstates.
 
