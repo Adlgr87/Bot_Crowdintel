@@ -1,4 +1,3 @@
-#ifndef KECCAK256_HPP
 #ifndef KECCAK256_OPTIMIZED_HPP
 #define KECCAK256_OPTIMIZED_HPP
 // ─────────────────────────────────────────────────────────────────────────────
