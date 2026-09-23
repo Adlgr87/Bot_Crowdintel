@@ -1,6 +1,6 @@
 #ifndef KECCAK256_HPP
-#define KECCAK256_HPP
-
+#ifndef KECCAK256_OPTIMIZED_HPP
+#define KECCAK256_OPTIMIZED_HPP
 // ─────────────────────────────────────────────────────────────────────────────
 // Keccak-256 (FIPS 202 Keccak-f[1600], rate 1088 bits, suffix 0x01).
 //
