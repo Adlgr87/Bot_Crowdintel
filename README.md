@@ -134,7 +134,7 @@ Full numbers and methodology: [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md).
   (`tests/crypto/cross_check_v2.py`, pycryptodome + coincurve) byte-for-byte.
 - **Rendimiento Keccak optimizado vía MutaLambda** — el núcleo `keccak_f1600`
   fue optimizado evolutivamente con el motor genético de
-  [Adlgr87/MutaLambda](https://github.com/Adlgr87/MutaLambda) (ver PR #2).
+  [Adlgr87/MutaLambda](https://github.com/Adlgr87/MutaLambda) ([ver PR #2](https://github.com/Adlgr87/Bot_Crowdintel/pull/2)).
   La mutación ganadora reescribe el paso ρ+π como una cadena de rotación
   in-situ con guardia `shift==0`, evitando el barrel-shifter en lanes de
   rotación cero, preservando la equivalencia funcional (KAT verificado bajo
