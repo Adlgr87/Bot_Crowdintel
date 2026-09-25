@@ -17,17 +17,41 @@ The goal is for the total round-trip time from market data receipt to order subm
 
 ---
 
-## 2. Jitter Analysis
+## 2. Baseline Metrics (Regla: línea base antes de remediación)
+
+> **Registros de línea base** — medidos antes de aplicar las fases de remediación de cumplimiento.
+> Build: `cmake -DCMAKE_BUILD_TYPE=Release .. && make -j$(nproc)` (con libsecp256k1 v0.8.0)
+> Benchmark: `latency_bench` (20K ticks, 5K warmup, RDTSC calibrado)
+
+| Métrica | Valor | Evidencia |
+| :--- | :--- | :--- |
+| **CPU frequency calibrated** | 0.372 ns/cycle (~2.69 GHz) | RDTSC + clock_gettime |
+| **Min latency** | 44.4 µs (119,256 cycles) | latency_bench |
+| **P50 latency** | 45.6 µs (122,610 cycles) | latency_bench |
+| **P99 latency** | 101.8 µs (273,542 cycles) | latency_bench |
+| **Hot path P99 target** | < 30 µs | — |
+| **Keccak-256 KAT** | 3/3 PASS | test_signer |
+| **EIP-712 signatures** | 20/20 valid (v=27) | test_signer |
+| **ctest** | 2/2 PASS (1.39s) | ctest --output-on-failure |
+| **Throughput claim** | **Sujeto a rate limits publicados de Polymarket CLOB** | No hardcoded throughput targets |
+
+> ⚠️ **Nota sobre latencia**: El P99 baseline varía (49-102 µs) debido al jitter del sistema.
+> La remediación de cumplimiento (rate limiter, risk checks) añade O(1) checks al hot path.
+> Regla: P50 post-remediación debe estar dentro del +10% de este baseline (≤ 50.2 µs).
+
+---
+
+## 3. Jitter Analysis
 Jitter is the deviation from the median latency. For a high-frequency bot, P99 should be close to P50.
 
-- **Target P99 (Hot Path):** $< 30\mu s$
+- **Target P99 (Hot Path):** $< 30\mu s$ (goal, not currently met)
 - **Target Jitter:** $< 2\mu s$ (99th percentile)
 - **Method:** Measured via `RDTSC` across 100,000 simulated ticks.
 
 ---
 
 ## 3. Throughput
-- **Max Orders/sec (Theoretical):** 10,000 (Limited by CLOB and nonce management)
+- **Max Orders/sec:** Sujeto a rate limits publicados de Polymarket CLOB (no se hardcodea throughput)
 - **Bottleneck:** The `Wire-to-Block` latency on Polygon is the dominant factor for overall strategy profitability.
 
 ---

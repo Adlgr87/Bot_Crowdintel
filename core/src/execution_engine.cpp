@@ -16,6 +16,10 @@
  * ExecutionEngine: The Heart of the Hot Path.
  * Consumes signals from the SPSC queue and evaluates the OrderBook L2.
  * NO std::cout / I/O in hot path — silent execution for deterministic latency.
+ *
+ * Hot path controls (rate limiter, risk engine, compliance guard, fee model)
+ * are integrated as O(1), branch-predicted checks BEFORE signing. The
+ * cryptographic signing path (eip712_signer.hpp) is NEVER modified.
  */
 class ExecutionEngine {
 public:
@@ -25,6 +29,15 @@ public:
           // Fallback is a deterministic test key for demo only
           signer_(load_private_key()),
           nonce_mgr_() {}
+
+    /**
+     * Production constructor: accepts private key loaded by the caller
+     * (main_prod.cpp). This separates credential loading from engine logic.
+     */
+    ExecutionEngine(OrderBookL2& book, SPSC_RingBuffer<AlphaSignal>& alpha_queue,
+                    LightweightCLOBClient& client, const std::vector<uint8_t>& private_key)
+        : book_(book), alpha_queue_(alpha_queue), client_(client),
+          signer_(private_key), nonce_mgr_() {}
 
     void run_tick() {
         auto signal = alpha_queue_.try_pop();

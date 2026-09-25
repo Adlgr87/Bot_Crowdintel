@@ -62,10 +62,22 @@ if(NOT SECP256K1_LIBRARY)
 endif()
 
 # --- Source Files ---
+# Production sources: exclude main_hot_path.cpp (demo entrypoint, not production)
+# main_hot_path.cpp is a demo that requires env vars set at runtime.
+# It is built as a separate optional target below.
 file(GLOB_RECURSE CORE_SOURCES
     "src/*.cpp"
     "../alpha/crowdintel/*.cpp"
 )
+# Remove main_hot_path.cpp from production sources (use main_prod.cpp instead)
+list(FILTER CORE_SOURCES EXCLUDE REGEX ".*main_hot_path\\.cpp$")
+# Ensure main_prod.cpp is included (not always picked up by GLOB if glob cache is stale)
+list(APPEND CORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main_prod.cpp")
+
+# --- Demo / Development Target (not built by default) ---
+# opt-in demo binary that requires env vars (CLOB_API_KEY, CLOB_SECRET,
+# CLOB_PASSPHRASE, BOT_PRIVATE_KEY_HEX) at runtime.
+option(BUILD_DEMO "Build the main_hot_path demo binary (not for production)" OFF)
 
 # Include directories
 include_directories(
@@ -102,6 +114,70 @@ endif()
 set_target_properties(crowdintel_bot PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
+
+# --- Optional Demo Target ---
+# main_hot_path.cpp is a demo entry point. It #includes execution_engine.cpp directly,
+# so it has its own main(). Only built when BUILD_DEMO=ON.
+if(BUILD_DEMO)
+    add_executable(crowdintel_bot_demo src/main_hot_path.cpp)
+    if(SECP256K1_LIBRARY)
+        target_link_libraries(crowdintel_bot_demo
+            ${SECP256K1_LIBRARY}
+            ${CURL_LIBRARY}
+            OpenSSL::Crypto
+            OpenSSL::SSL
+        )
+    else()
+        target_link_libraries(crowdintel_bot_demo
+            ${CURL_LIBRARY}
+            OpenSSL::Crypto
+            OpenSSL::SSL
+        )
+    endif()
+    target_compile_definitions(crowdintel_bot_demo PRIVATE EXECUTION_ENGINE_HEADER_ONLY=1)
+    set_target_properties(crowdintel_bot_demo PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif()
+
+# --- Test Sources ---
+# Collect all test files from tests/ directory (recursively)
+file(GLOB_RECURSE TEST_SOURCES
+    "../tests/test_*.cpp"
+)
+# Build each test as a separate executable
+foreach(TEST_FILE ${TEST_SOURCES})
+    get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
+    add_executable(${TEST_NAME} ${TEST_FILE})
+    if(SECP256K1_LIBRARY)
+        target_link_libraries(${TEST_NAME}
+            ${SECP256K1_LIBRARY}
+            ${CURL_LIBRARY}
+            OpenSSL::Crypto
+            OpenSSL::SSL
+        )
+    else()
+        target_link_libraries(${TEST_NAME}
+            ${CURL_LIBRARY}
+            OpenSSL::Crypto
+            OpenSSL::SSL
+        )
+    endif()
+    target_include_directories(${TEST_NAME} PRIVATE
+        "./include"
+        "./src"
+        "./crypto"
+        "../alpha/crowdintel"
+        "../alpha/strategy"
+        "../tests"
+    )
+    set_target_properties(${TEST_NAME} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    add_test(NAME ${TEST_NAME}
+        COMMAND $<TARGET_FILE:${TEST_NAME}>
+    )
+endforeach()
 
 # --- CTest Integration ---
 enable_testing()

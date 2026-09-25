@@ -1,0 +1,178 @@
+{
+  "team_name": "Team Agent de Workflows — Remediación de Cumplimiento",
+  "project": "Bot_Crowdintel",
+  "repo": "https://github.com/Adlgr87/Bot_Crowdintel",
+  "branch_target": "remediation/compliance",
+  "workflow_source": "WORKFLOW_REMEDIACION_CUMPLIMIENTO.md",
+  "director": "DeepShe Harness",
+  "director_role": "Orquestador inamovible. Aprueba/rechaza todos los entregables. Ejecuta el AGENTE_VERIFICADOR_FINAL al final.",
+  "phase": "Fase 0-7 + Verificación Final",
+  "critical_constraints": [
+    "Nunca modificar eip712_signer.hpp, polymarket_order.hpp (wire body) ni el esquema HMAC sin volver a ejecutar los vectores dorados (KAT).",
+    "Nunca imprimir en logs la clave privada, el secreto API ni firmas completas.",
+    "Las señales de CrowdIntel (webhook externo) son datos no confiables: siempre pasan por filtros estadísticos y por el risk engine; ninguna señal externa puede desactivar el kill switch.",
+    "Toda constante de límite de riesgo debe ser sobreescribible por variable de entorno, con default conservador.",
+    "Todo control nuevo debe ser de costo O(1) y branch-predicted en el hot path.",
+    "ctest completo debe pasar (verde) y no degradar la latencia P50 del hot path más de un 10%."
+  ],
+  "agents": [
+    {
+      "id": "agente_baseline",
+      "name": "AGENTE_BASELINE",
+      "phase": "Fase 0",
+      "role": "Línea base de CI, limpieza, higiene de secretos",
+      "no_debe_toocar": "Lógica de trading",
+      "entregable": "rama remediation/compliance con CI verde",
+      "criterios_aceptacion": [
+        "git check-ignore .env devuelve match",
+        "Build determinista sin referencias rotas",
+        "grep -r 'YOUR_API_KEY_HERE' vacío",
+        "Solo un cliente HTTP en el código de producción",
+        "docs/PERF_METRICS.md con números base registrados"
+      ]
+    },
+    {
+      "id": "agente_api",
+      "name": "AGENTE_API",
+      "phase": "Fase 1",
+      "role": "Cliente HTTP, rate limiter, backoff, pooling",
+      "no_debe_toocar": "Cripto/firma",
+      "dependencia": "Fase 0",
+      "entregable": "core/include/rate_limiter.hpp + cliente HTTP mejorado",
+      "criterios_aceptacion": [
+        "Test unitario: >X req/s bloquea en el cliente antes de salir a red",
+        "Secuencia de 429 → retardos crecientes con backoff exponencial + jitter",
+        "Una sola conexión TLS reutilizada",
+        "Respuesta 429 no se trata como éxito; order_id se captura",
+        "Sin cifras de throughput que incentiven el abuso en README"
+      ]
+    },
+    {
+      "id": "agente_riesgo",
+      "name": "AGENTE_RIESGO",
+      "phase": "Fase 2",
+      "role": "Risk engine, kill switch, límites, balance checks",
+      "no_debe_toocar": "Esquema de auth",
+      "dependencia": "Fase 0",
+      "entregable": "core/include/risk_engine.hpp, core/src/market_config.hpp, core/src/balance_checker.hpp",
+      "criterios_aceptacion": [
+        "Parámetros de riesgo cargados desde env con defaults conservadores",
+        "Order que excede max_order_usd rechazada con TickResult::RISK_BLOCKED",
+        "Kill switch atómico: al activarse, run_tick devuelve KILL_SWITCH y no firma",
+        "Balance USDC/POL bajo mínimo → pre_trade_check bloquea",
+        "Más de N órdenes en 60s → bloqueo hasta resetear ventana"
+      ]
+    },
+    {
+      "id": "agente_ordenes",
+      "name": "AGENTE_ORDENES",
+      "phase": "Fase 3",
+      "role": "Order manager, position tracker, user-channel fills, dedup",
+      "no_debe_toocar": "Fórmula de Kelly",
+      "dependencia": "Fase 1 (necesita order_id real del cliente)",
+      "entregable": "core/include/order_manager.hpp, core/include/position_tracker.hpp, core/src/ws_market_listener.hpp (extendido)",
+      "criterios_aceptacion": [
+        "Toda orden enviada registrada con client_order_id y estado inicial",
+        "Conexión al user-channel fills del CLOB WSS; posición interna actualizada",
+        "Reconciliación periódica: divergencia > max_position_divergence → alerta/kill switch",
+        "Timeout/error de red → consultar estado antes de reenviar (anti-retry ciego)",
+        "Salto de precio > umbral → PresignedOrderPool marcado inválido, órdenes canceladas",
+        "Self-trade: orden propia en el book → orden entrante bloqueada o cancelada primero"
+      ]
+    },
+    {
+      "id": "agente_econ",
+      "name": "AGENTE_ECON",
+      "phase": "Fase 4",
+      "role": "Modelo de comisiones dinámicas, gas, slippage, net-EV",
+      "no_debe_toocar": "Estructura de orden V2",
+      "dependencia": "Fase 0",
+      "entregable": "core/include/fee_model.hpp",
+      "criterios_aceptacion": [
+        "FeeModel: comisión maker/taker base + fórmula dinámica configurable fee = C × 0.25 × (p·(1−p))²",
+        "Estimación de gas/Polygon y slippage esperado por tamaño",
+        "Filtro reemplazado: net_ev = edge - fees - slippage - gas_cost > min_net_ev",
+        "Orden con edge positivo pero net_ev negativo → NOT_PROFITABLE"
+      ]
+    },
+    {
+      "id": "agente_compliance",
+      "name": "AGENTE_COMPLIANCE",
+      "phase": "Fase 5",
+      "role": "Market metadata, estado de mercado, jurisdicción, tick size dinámico",
+      "no_debe_toocar": "Hot path loop",
+      "dependencia": "Fase 0",
+      "entregable": "core/include/market_metadata.hpp, core/include/compliance_guard.hpp",
+      "criterios_aceptacion": [
+        "Fetch de metadata en arranque: tick size dinámico, estado active/closed/resolved",
+        "Mercado cerrado → pre_trade_check bloquea",
+        "token_id en blocklist → rechazo; flag de jurisdicción desactivado → arranque bloqueado",
+        "Mercado inactivo/restringido → MarktResult::MARKET_NOT_TRADABLE"
+      ]
+    },
+    {
+      "id": "agente_obs",
+      "name": "AGENTE_OBS",
+      "phase": "Fase 6",
+      "role": "Auditoría, métricas, alertas",
+      "no_debe_toocar": "Lógica de órdenes",
+      "dependencia": "Fases 2-3",
+      "entregable": "core/src/telemetry.hpp",
+      "criterios_aceptacion": [
+        "Logger asíncrono append-only: orden, fill, cancelación, rechazo, kill-switch con timestamp",
+        "Fichero audit.log con JSON lines; no se puede perder evento en hot path",
+        "Alertas: pérdida diaria, racha de rechazos 429, latencia anómala, divergencia, feed muerto",
+        "Métricas expuestas: contador por TickResult, fills, PnL diario"
+      ]
+    },
+    {
+      "id": "agente_qa",
+      "name": "AGENTE_QA",
+      "phase": "Fase 7",
+      "role": "Tests, regresión de latencia, escanado de secretos, docs",
+      "no_debe_toocar": "— (revisa todo)",
+      "dependencia": "Fases 1-6",
+      "entregable": "ctest verde, docs actualizadas, checklist firmado",
+      "criterios_aceptacion": [
+        "ctest completo verde + tests unitarios para cada módulo",
+        "Hot path P50/P99 dentro del +10% de la línea base",
+        "Sin secretos en commits; git diff limpio",
+        "docs/STATUS.md actualizado; README actualizado",
+        "Checklist adversarial final firmada"
+      ]
+    },
+    {
+      "id": "agente_verificador_final",
+      "name": "AGENTE_VERIFICADOR_FINAL",
+      "phase": "Post-Fase 7",
+      "role": "Verificación extremadamente rigurosa de principio a fin, end-to-end",
+      "no_debe_toocar": "Implementación (solo verifica y reporta)",
+      "es_el_ultimo": true,
+      "es_riguroso": true,
+      "entregable": "VERIFICACION_FINAL_REPORT.md",
+      "criterios_aceptacion": [
+        "Compilación limpia desde cero con CMake",
+        "ctest completo con 100% de tests pasando",
+        "Benchmark de latencia: P50/P99 dentro +10% de línea base registrada",
+        "Escáner de secretos: grep de claves API, private keys, 'YOUR_API_KEY' → cero coincidencias",
+        "Verificación criptográfica: EIP-712 KAT vector a vector, Keccak-256 KAT, HMAC KAT",
+        "Verificación de hot path: cero std::cout, cero alloc en hot path, O(1) en todos los checks",
+        "Verificación de risk engine: kill switch imposibilita firma, todos los límites env-driven",
+        "Verificación de order manager: client_order_id rastreado, anti-retry ciego implementado",
+        "Verificación de compliance: tick size dinámico, mercado inactivo bloqueado",
+        "Verificación de observabilidad: audit log append-only, alertas configurables",
+        "Documentación: README sin cifras fabricadas, STATUS.md alineado con código, notas de comisión dinámica",
+        "Integridad: ninguna modificación a eip712_signer.hpp rompe los vectores KAT"
+      ],
+      "protocolo": "Verifica cada criterio con evidencia (test output, logs, commit hash). Cualquier fallo → AGENTE_DIRECTOR dispara reparación. Itera hasta 100% PASS."
+    }
+  ],
+  "execution_order": [
+    "Fase 0 (agente_baseline)",
+    "Fase 1 (agente_api) | Fase 2 (agente_riesgo) | Fase 4 (agente_econ) | Fase 5 (agente_compliance) — paralelas",
+    "Fase 3 (agente_ordenes) — depende de Fase 1",
+    "Fase 6 (agente_obs) — depende de Fases 2-3",
+    "Fase 7 (agente_qa) — depende de Fases 1-6",
+    "AGENTE_VERIFICADOR_FINAL — post-Fase 7"
+  ]
+}

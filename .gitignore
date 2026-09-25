@@ -1,6 +1,21 @@
+# Build artifacts
 core/build/
+core/build_*/
+*.o
+*.so
+*.a
+
+# Environment / secrets
+.env
+.env*
+secrets/
+*.key
+*.pem
+
+# Dependencies
 MutaLambda/
 __pycache__/
+*.pyc
 
 # Stray Keccak test artifacts (experimental, not part of build system)
 test_keccak
