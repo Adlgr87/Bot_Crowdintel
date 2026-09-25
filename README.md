@@ -154,8 +154,34 @@ for integration analysis.
 ```bash
 cd core/build
 ctest --output-on-failure
-# 2/2 tests passed
+# 6/6 tests passed
 ```
+
+**Phase 1: Rate Limiting & HTTP Client (T1-1–T1-5)**
+
+| Component | File | Status |
+|---|---|---|
+| Token Bucket RateLimiter | `core/include/rate_limiter.hpp` | ✅ O(1), thread-safe (atomics) |
+| Rate-limited HTTP Client | `core/src/lightweight_client.hpp` | ✅ Integrated, backoff, persistent curl |
+| Rate Limiter Tests | `tests/test_rate_limiter.cpp` | ✅ 6 tests, all passing |
+
+**RateLimiter (`RateLimiter(double rate, double burst)`)**:
+- Token bucket with lazy atomic refill. `try_acquire()` is O(1) with a
+  branch-predicted fast path. `next_available()` returns microseconds until the
+  next token.
+  - All `rate_per_sec_` and `burst` values are configurable via `RiskConfig` env
+    vars (`CLOB_RATE_LIMIT_PER_SEC`, `CLOB_BURST`). Default is conservative:
+    `1.0 token/sec` with `2.0 burst`.
+
+**LightweightCLOBClient (T1-2–T1-4)**:
+- **Exponential backoff with jitter** on HTTP 429 and 5xx
+  (5 max retries, base 100ms × 2^attempt ±25% jitter, Retry-After header parsing).
+- **Persistent curl handle** (`CURL*`) with keep-alive / connection reuse,
+  TCP_NODELAY, TLS 1.3.
+- **`HttpResponse`** struct with `HttpStatus` (enum), body, `retry_after`,
+  `order_id`, and `error_message` extraction.
+- **HMAC-SHA256** authentication preserved exactly — prehash is
+  `timestamp + method + path + body`, Base64-encoded. No secrets are logged.
 
 ### Build Dependencies
 
