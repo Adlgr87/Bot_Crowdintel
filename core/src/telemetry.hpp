@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "spsc_ring_buffer.hpp"
+#include "eip712_signer.hpp"  // For OrderParams struct
 #include "tick_result.hpp"  // For TickResult enum (avoids circular dependency)
 
 /**

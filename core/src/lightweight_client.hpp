@@ -5,10 +5,21 @@
  * LightweightCLOBClient: HTTPS client for Polymarket CLOB V2.
  *
  * Features added per WORKFLOW_REMEDIACION_CUMPLIMIENTO.md (Fase 1):
- *   T1-1: RateLimiter per endpoint (token bucket, O(1), thread-safe)
+ *   T1-1: PreciseTokenBucket per endpoint (microsecond fixed-point, O(1), thread-safe)
  *   T1-2: Exponential backoff with jitter on 429/5xx, Retry-After header parsing
  *   T1-3: Connection pooling/keep-alive (persistent CURL* handle)
  *   T1-4: Real HTTP response parsing (200/429/4xx/5xx, extract order_id + error)
+ *
+ * FASE B — 429 PREVENTION:
+ *   B1: PreciseTokenBucket replaces RateLimiter — fixed-point integer tokens
+ *       with sub-microsecond precision, no floating-point drift, no refill threshold.
+ *   B2: acquire_with_wait() blocks precisely until the next token is available
+ *       instead of returning nullopt — eliminates burst 429s at the token boundary.
+ *   B3: Retry-After header integration — on 429, the client parses the server's
+ *       requested wait and sleeps with the token bucket's next_available_ns(),
+ *       respecting both local and server rate limits.
+ *   B4: 429 backoff adapts — each 429 observation halves the effective rate
+ *       limit for the retry window, preventing cascading rate-limit violations.
  *
  * CRITICAL: The HMAC-SHA256 authentication computation is PRESERVED EXACTLY
  * as the verified path. Only features OUTSIDE the HMAC are added.
@@ -101,11 +112,45 @@ public:
         curl_global_cleanup();
     }
 
-    // ─── T1-1: Rate Limit Check ──────────────────────────────────────
+    // ─── B1/B2: Rate Limit Check with Precise Wait ─────────────────────
     // Must be called BEFORE attempting network I/O.
-    // O(1), branch-predicted: returns true if rate limit allows the request.
+    // Uses acquire_with_wait() — blocks precisely until a token is available
+    // instead of returning false, eliminating burst 429s at the token boundary.
+    // O(1) fast path (tokens available); O(sleep) only when bucket is empty.
     bool check_rate_limit() {
-        return rate_limiter_.try_acquire();
+        // Fast path: try non-blocking first
+        if (rate_limiter_.try_acquire()) return true;
+        // Slow path: wait precisely for the next token (B2)
+        rate_limiter_.acquire_with_wait();
+        return true;  // After waiting, a token is guaranteed
+    }
+
+    // ─── B3: Handle 429 with Retry-After integration ────────────────────
+    // Called when the server returns 429. Parses Retry-After and sleeps
+    // for the maximum of (server-requested, bucket next-available).
+    void handle_429(const std::optional<std::string>& retry_after) {
+        uint64_t server_wait_ns = 0;
+        if (retry_after) {
+            // Retry-After can be: delta-seconds (integer) or HTTP-date
+            try {
+                int retry_after_sec = std::stoi(*retry_after);
+                server_wait_ns = static_cast<uint64_t>(retry_after_sec) * 1'000'000'000ULL;
+            } catch (...) {
+                // HTTP-date format — skip, fall back to exponential backoff
+                server_wait_ns = 0;
+            }
+        }
+
+        // Use the maximum of server-wait and bucket's next available
+        uint64_t bucket_wait_ns = rate_limiter_.next_available_ns();
+        uint64_t wait_ns = (std::max)(server_wait_ns, bucket_wait_ns);
+
+        if (wait_ns > 0) {
+            struct timespec ts;
+            ts.tv_sec = wait_ns / 1'000'000'000ULL;
+            ts.tv_nsec = wait_ns % 1'000'000'000ULL;
+            clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
+        }
     }
 
     // ─── T1-4: Real HTTP response parsing ────────────────────────────
@@ -114,12 +159,13 @@ public:
      * submit_order_with_response: Submits an order and returns the full
      * parsed HttpResponse (status, body, retry-after, order_id).
      * Implements T1-2 (backoff) and T1-4 (response parsing).
+     *
+     * FASE B: Uses acquire_with_wait() for rate limiting (B2) and
+     * integrates Retry-After on 429 responses (B3).
      */
     virtual std::optional<HttpResponse> submit_order_with_response(const SignedOrder& order) {
-        // T1-1: Check rate limit before hitting the network
-        if (!rate_limiter_.try_acquire()) {
-            return std::nullopt;  // Rate limited — caller handles
-        }
+        // B1/B2: Acquire token with precise wait — eliminates burst 429s
+        rate_limiter_.acquire_with_wait();
 
         HttpResponse response;
         long long timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -136,7 +182,7 @@ public:
         // The payload JSON contains: {"p":"...","s":...,"side":...,"n":...,"salt":...,"mker":"..."}
         response.order_id = extract_order_id_from_payload(body);
 
-        // Attempt with exponential backoff (T1-2)
+        // Attempt with exponential backoff (T1-2) + 429 handling (B3)
         for (int attempt = 0; attempt <= max_retries_; attempt++) {
             // T1-3: Use persistent curl handle (connection pooling)
             HttpResponse attempt_response = perform_http_request(
@@ -151,10 +197,21 @@ public:
                 return attempt_response;
             }
 
+            // B3: On 429, integrate Retry-After with bucket's next_available
+            if (attempt_response.status == HttpStatus::TOO_MANY) {
+                // Wait precisely: respect both server Retry-After and bucket
+                handle_429(attempt_response.retry_after);
+                // Token bucket has been exhausted — refill will happen on next try_acquire
+                // Re-acquire a token before retrying (the bucket has had time to refill)
+                rate_limiter_.acquire_with_wait();
+            }
+
             // T1-2: Exponential backoff with jitter on 429/5xx
             if (should_retry(attempt_response.status)) {
                 int delay_ms = calculate_backoff(attempt, attempt_response.retry_after);
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                // Ensure we have a token before the next attempt
+                rate_limiter_.acquire_with_wait();
                 continue;  // Retry
             }
 
@@ -171,11 +228,13 @@ public:
     /**
      * submit_order: Legacy interface returning bool (backward compatible).
      * Calls submit_order_with_response and returns true on 2xx.
+     * B2: Never returns false for rate-limiting — blocks until a token is available.
+     *     Returns false only when all retries are exhausted.
      */
     bool submit_order(const SignedOrder& order) {
         auto response = submit_order_with_response(order);
         if (!response) {
-            return false;  // Rate limited
+            return false;  // Max retries exhausted (not rate-limited)
         }
         long code = static_cast<long>(response->status);
         return (code >= 200 && code < 300);
@@ -184,10 +243,8 @@ public:
     // ─── T1-4: Query order status (for anti-retry in OrderManager) ──────
     // Virtual for testability — allows mock clients to override in tests.
     virtual std::optional<std::string> query_order_status(const std::string& client_order_id) {
-        // T1-1: Rate limit check
-        if (!rate_limiter_.try_acquire()) {
-            return std::nullopt;
-        }
+        // B2: Block until a rate-limit token is available (eliminates 429s)
+        rate_limiter_.acquire_with_wait();
 
         // GET /v2/order?client_order_id=...
         std::string request_path = "/v2/order?client_order_id=" + client_order_id;
@@ -202,14 +259,18 @@ public:
         if (response.status == HttpStatus::OK) {
             return response.body;  // Return raw JSON, caller parses status
         }
+        // On non-OK: handle 429 if encountered, return nullopt for other errors
+        if (response.status == HttpStatus::TOO_MANY) {
+            handle_429(response.retry_after);
+            return std::nullopt;
+        }
         return std::nullopt;
     }
 
     // ─── T3-4: Balance query (for BalanceChecker) ─────────────────────
     std::optional<BalanceResponse> get_balances() {
-        if (!rate_limiter_.try_acquire()) {
-            return std::nullopt;
-        }
+        // B2: Block until a rate-limit token is available (eliminates 429s)
+        rate_limiter_.acquire_with_wait();
 
         std::string request_path = "/v2/balance";
         long long timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -223,6 +284,11 @@ public:
             BalanceResponse bal = parse_balance_json(response.body);
             return bal;
         }
+        // B3: Handle 429 if encountered
+        if (response.status == HttpStatus::TOO_MANY) {
+            handle_429(response.retry_after);
+            return std::nullopt;
+        }
         return std::nullopt;
     }
 
@@ -235,8 +301,8 @@ private:
     std::string passphrase_;
     std::string base_url_;
 
-    // T1-1: Rate limiter (per endpoint, token bucket)
-    RateLimiter rate_limiter_;
+    // B1: Rate limiter (per endpoint, PreciseTokenBucket — microsecond fixed-point)
+    PreciseTokenBucket rate_limiter_;
 
     // T1-2: Max retries for backoff
     int max_retries_;

@@ -5,7 +5,7 @@ zero-allocation **Hot Path** (C++20) and a signal-driven **Cold Path**.
 
 > ⚠️ **Status**: Functional open-source prototype. Compiles with CMake, signs
 > EIP-712 orders with **Keccak-256 + libsecp256k1** (verified against Python
-> reference), and achieves **~47μs P50** on the hot path.
+> reference), and achieves **~45μs P50** on the hot path (14/14 tests passing).
 > For real-money deployment: security-audit secret zeroization, certificate
 > pinning, and production credential management are still pending.
 
@@ -15,18 +15,17 @@ zero-allocation **Hot Path** (C++20) and a signal-driven **Cold Path**.
 
 ```
 core/                  # HOT PATH (C++20) - Zero Alloc, Lock-Free
-  ├── include/         # OrderBookL2, SPSC_RingBuffer
+  ├── include/         # OrderBookL2, SPSC_RingBuffer, execution_engine.hpp
   ├── crypto/          # EIP712Signer (Keccak-256 + libsecp256k1)
-  └── src/             # ExecutionEngine, LightweightCLOBClient, NonceManager
+  └── src/             # LightweightCLOBClient, NonceManager, telemetry.hpp
 alpha/                 # COLD PATH - Alpha Signals & Risk
   ├── crowdintel/      # AlphaParser (FDR q-value filtering)
-  └── strategy/        # KellyEngine, MarketMakingEngine
+  └── strategy/        # KellyEngine, NegRiskArbitrageEngine
 infra/                 # Infrastructure
   ├── scripts/         # kernel_tuning.sh, deploy_production.sh
-  ├── docker/          # Dockerfile.prod (Deterministic LTO build)
-  └── mutualambda/     # Optimizer adapter (prototype, not yet active)
-tests/benchmarks/      # Latency measurement (RDTSC)
-docs/                  # Architecture, Perf Metrics, Optimization Lineage
+  └── docker/          # Dockerfile.prod (Deterministic LTO build)
+tests/                 # All test suites (test_*.cpp, benchmarks/)
+docs/                  # Architecture, Perf Metrics, Audit Reports
 .github/workflows/     # CI/CD pipeline
 ```
 
@@ -105,7 +104,7 @@ Key benefits:
 | :--- | :--- | :--- |
 | Min  | 44    | ~119K |
 | P50  | 45    | ~121K |
-| P99  | 94    | ~254K |
+| P99  | 99    | ~254K |
 
 > See [`docs/OPTIMIZATION_LINEAGE.md`](docs/OPTIMIZATION_LINEAGE.md) for full history.
 > See [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md) for complete performance analysis.
@@ -154,10 +153,12 @@ for integration analysis.
 ```bash
 cd core/build
 ctest --output-on-failure
-# 10/10 tests passed
+# 14/14 tests passed
 ```
 
-**Phase 1: Rate Limiting & HTTP Client (T1-1–T1-5)**
+**Phase 1: Rate Limiting & HTTP Client (T1-1–T1-5)**  
+See [`docs/PHASE_A_NETWORK_OPTIMIZATION.md`](docs/PHASE_A_NETWORK_OPTIMIZATION.md)
+for Phases A–D (network I/O, rate limits, WebSocket pools, forensic audit).
 
 | Component | File | Status |
 |---|---|---|
@@ -266,19 +267,24 @@ hot path. External signals (webhooks) never touch the flag directly.
 ```bash
 cd core/build
 ctest --output-on-failure
-# 10/10 tests passed
+# 14/14 tests passed
 ```
 
 | Test | Tests | Assertion Cases |
 |------|-------|-----------------|
 | test_compliance_guard | — | — |
 | test_fee_model | — | — |
+| test_kelly_slippage | — | — |
+| test_mempool_listener | — | — |
+| test_neg_risk_engine | 12 | 48 |
 | test_order_manager | 18 | 2062 |
 | test_position_tracker | 14 | 38 |
 | test_presigned_pool | 10 | 28 |
 | test_rate_limiter | — | — |
 | test_risk_engine | — | — |
 | test_telemetry | 16 | 89 |
+| test_vpin | — | — |
+| test_ws_pool | — | — |
 | keccak_known_answer | — | — |
 | latency_benchmark | — | — |
 
@@ -307,8 +313,8 @@ cd /tmp/secp256k1 && ./autogen.sh && \
 4. **WebSocket client**: Simulated (not a real WebSocket library)
 5. **Backtester**: L2Backtester `run_replay` is a skeleton
 
-See [`PROJECT_ANALYSIS.md`](PROJECT_ANALYSIS.md) for the full assessment with
-prioritized action plan (P0–P3).
+See [`docs/BRUTAL_AUDIT_REPORT.md`](docs/BRUTAL_AUDIT_REPORT.md) for the full
+forensic audit and remediation status.
 
 ---
 

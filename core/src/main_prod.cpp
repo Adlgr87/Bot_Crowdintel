@@ -2,7 +2,7 @@
  * main_prod.cpp — Production entry point for CrowdIntelBot
  *
  * Unlike main_hot_path.cpp (demo), this entrypoint:
- * - Does NOT include execution_engine.cpp (proper header/source separation)
+ * - Includes execution_engine.hpp header (proper header/source separation)
  * - Loads ALL credentials from environment variables (never hardcoded)
  * - Is the default `crowdintel_bot` target
  * - Does NOT print to stdout on the hot path
@@ -23,7 +23,7 @@
 #include "lightweight_client.hpp"
 #include "alpha_receiver.hpp"
 #include "ws_market_listener.hpp"
-#include "execution_engine.cpp"
+#include "execution_engine.hpp"
 #include "tick_result.hpp"
 
 #include <iostream>
@@ -31,10 +31,6 @@
 #include <thread>
 #include <chrono>
 #include <stdexcept>
-
-// Forward declaration: execution_engine.cpp defines ExecutionEngine as a class.
-// We include it here to get the full definition (hot path headers are header-only
-// by design — no separate .cpp compilation for the engine itself).
 
 static std::vector<uint8_t> load_private_key_from_env() {
     const char* env_key = std::getenv("BOT_PRIVATE_KEY_HEX");

@@ -122,7 +122,16 @@ public:
     ~ExecutionEngine() {
         // Signal the background thread to stop
         submit_thread_stop_.store(true, std::memory_order_release);
-        submit_queue_.try_push(SubmitTask{});  // Wake up the thread
+
+        // Try to push sentinel (empty task = stop signal). If the queue is full
+        // (all 4096 slots occupied), drain the oldest task first to make room,
+        // then retry. This prevents the background thread from blocking forever
+        // on try_pop with no wake-up signal (CRITICAL-05 fix).
+        if (!submit_queue_.try_push(SubmitTask{})) {
+            (void)submit_queue_.try_pop();  // Drain oldest to make room
+            submit_queue_.try_push(SubmitTask{});  // Retry push
+        }
+
         if (submit_thread_.joinable()) {
             submit_thread_.join();
         }
@@ -183,15 +192,10 @@ public:
             return TickResult::KILL_SWITCH;
         }
 
-        // ─── Position sizing via Kelly Criterion ─────────────────────────
-        double size = KellyEngine::calculate_position_size(
-            KellyEngine::calculate_fractional_kelly(signal->ev_per_dollar, signal->confidence),
-            10000.0
-        );
-
-        // ─── Fase 4: Net EV Filter (replaces edge > min_edge) ────────────
-        double notional_usd = size;
-        double edge_usd = signal->ev_per_dollar * notional_usd;
+        // ─── FASE B: Depth-Aware Kelly with Slippage/Impact Model ─────────
+        // Integrated position sizing + profitability filter.
+        // KellyEngine now penalizes position size based on order-book depth
+        // (slippage grows with order_size² / available_liquidity).
         double spread_bps = (best_bid.price > 0)
             ? static_cast<double>(best_ask.price - best_bid.price) /
               static_cast<double>(best_bid.price) * 10000.0
@@ -199,15 +203,33 @@ public:
         double available_liquidity = static_cast<double>(best_ask.size) / 1e6;
         double probability = signal->q_value;
 
-        double net_ev = fee_model_.compute_net_ev(
-            edge_usd, notional_usd, true,
-            probability, spread_bps, available_liquidity
+        // Build slippage params from config + order book (O(1), no allocation)
+        KellyEngine::SlippageParams slippage_params;
+        slippage_params.spread_bps = spread_bps;
+        slippage_params.available_liquidity = available_liquidity;
+        slippage_params.gas_cost_usd = config_.gas_cost_usd;
+        slippage_params.maker_fee_rate = config_.maker_fee_rate;
+        slippage_params.taker_fee_rate = config_.taker_fee_rate;
+        slippage_params.base_commission_usd = config_.base_commission_usd;
+        slippage_params.min_net_ev_usd = config_.min_net_ev_usd;
+        slippage_params.probability = probability;
+        slippage_params.dynamic_fees_enabled = config_.dynamic_fees_enabled;
+        slippage_params.dynamic_C = config_.dynamic_C;
+        slippage_params.is_maker = true;  // Preserve existing behavior (maker at tick size)
+
+        // Compute depth-aware position size + profitability in one call
+        auto kelly_result = KellyEngine::calculate_kelly_with_slippage(
+            signal->ev_per_dollar, signal->confidence, 10000.0,
+            slippage_params, 0.1  // 10% fractional Kelly
         );
 
-        if (net_ev < config_.min_net_ev_usd) {
+        if (!kelly_result.is_profitable) {
             telemetry_.record_tick_result(TickResult::NOT_PROFITABLE);
             return TickResult::NOT_PROFITABLE;
         }
+
+        // Use the slippage-adjusted position size
+        double size = kelly_result.position_size_usd;
 
         // ─── Build order parameters ──────────────────────────────────────
         OrderParams params;
