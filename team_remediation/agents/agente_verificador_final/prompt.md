@@ -102,7 +102,7 @@ Verifica cada ítem del Definition of Done:
 
 ## Output Requerido
 
-Genera el archivo: `team_remediation/verification/VERIFICACION_FINAL_REPORT.md`
+Genera el archivo: `team_remediation/verification/AUDIT_FINAL_REPORT.md`
 
 Formato del reporte:
 ```markdown

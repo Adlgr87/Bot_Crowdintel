@@ -149,7 +149,7 @@
       "no_debe_toocar": "Implementación (solo verifica y reporta)",
       "es_el_ultimo": true,
       "es_riguroso": true,
-      "entregable": "VERIFICACION_FINAL_REPORT.md",
+      "entregable": "AUDIT_FINAL_REPORT.md",
       "criterios_aceptacion": [
         "Compilación limpia desde cero con CMake",
         "ctest completo con 100% de tests pasando",
