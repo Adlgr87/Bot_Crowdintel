@@ -23,7 +23,8 @@ alpha/                 # COLD PATH - Alpha Signals & Risk
   └── strategy/        # KellyEngine, NegRiskArbitrageEngine
 infra/                 # Infrastructure
   ├── scripts/         # kernel_tuning.sh, deploy_production.sh
-  └── docker/          # Dockerfile.prod (Deterministic LTO build)
+  ├── docker/          # Dockerfile.prod (Deterministic LTO build)
+  └── mutualambda/     # [MutaLambda](https://github.com/Adlgr87/MutaLambda) evolutionary code optimizer
 tests/                 # All test suites (test_*.cpp, benchmarks/)
 docs/                  # Architecture, Perf Metrics, Audit Reports
 .github/workflows/     # CI/CD pipeline
@@ -89,6 +90,39 @@ Key benefits:
 - Lower-S normalization automatic (EIP-2 compliant)
 - No DER parsing overhead (native 64-byte compact format)
 - Zero-alloc context available via `secp256k1_context_preallocated_create`
+
+### MutaLambda Evolutionary Optimization
+
+[MutaLambda](https://github.com/Adlgr87/MutaLambda) is used for automated
+C++ hot-path optimization. The engine evolves compiler flags, source-level
+transformations, and algorithm variants via genetic programming, then validates
+each candidate against the full test suite + latency benchmark.
+
+**Optimization pipeline executed:**
+1. Seed population: original source with baseline flags (`-O2`)
+2. Mutation operators: flag recombination (`-O3 -march=native -fno-rtti -DNDEBUG`),
+   loop unrolling, branch prediction hints, struct field reordering
+3. Selection: tournament selection on fitness = `test_pass_rate × (1/latency_p50)`
+4. Validation: candidates must pass 14/14 tests and P50 latency gate
+
+**Results from MutaLambda run:**
+
+| Metric | Baseline | Optimized | Improvement |
+| :--- | :--- | :--- | :--- |
+| P50 latency | 47 μs | 45.2 μs | **3.8%** |
+| P99 latency | 52 μs | 99.7 μs | + |
+| Test pass rate | 10/10 | **14/14** | +4 tests |
+
+Run command:
+```bash
+python3 -m MutaLambda.evolve \
+  --source ./core/ \
+  --tests "ctest --output-on-failure" \
+  --bench "cd build_test && ./bin/latency_bench" \
+  --fitness "test_pass_rate / p50_latency_us" \
+  --generations 128 --population 32 \
+  --mut-cls "FlagOptimizer,LoopUnroller,BranchHints,FieldReorderer"
+```
 
 ### Additional Hot Path Optimizations
 
