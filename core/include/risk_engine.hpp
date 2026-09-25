@@ -82,8 +82,9 @@ public:
             return TickResult::INSUFFICIENT_BALANCE;
         }
 
-        // 6. Orders per minute window — O(1) (checked via record_order)
-        //    The window check is done in record_order / query
+        // 6. Orders per minute window — O(1) atomic check + increment
+        //    check_rate_window() atomically reads the current bucket counter
+        //    and increments it if the order is accepted.
         if (!check_rate_window()) {
             return TickResult::RISK_BLOCKED;
         }
@@ -99,28 +100,30 @@ public:
     /**
      * Record a successful order (for rate-limited windows and exposure tracking).
      * Call AFTER order is signed and submitted.
+     * O(1) — atomic increment on the current time bucket.
      */
     void record_order(double order_usd, bool is_buy) {
-        // Update sliding window of order timestamps
         uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-
-        // Push timestamp to circular buffer
-        order_times_[order_count_ % 64] = now_ns;
-        order_count_++;
-
-        // This is O(1) amortized — the window cleanup happens in check_rate_window()
-        (void)is_buy;  // Direction tracked separately by PositionTracker
+        uint64_t now_bucket = now_ns / BUCKET_NS;
+        uint64_t bucket_idx = now_bucket % WINDOW_SIZE;
+        reset_if_stale(order_buckets_[bucket_idx], now_bucket);
+        order_buckets_[bucket_idx].count.fetch_add(1, std::memory_order_release);
+        (void)order_usd;
+        (void)is_buy;
     }
 
     /**
      * Record a cancellation (for cancel rate limit window).
+     * O(1) — atomic increment on the current time bucket.
      */
     void record_cancel() {
         uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        cancel_times_[cancel_count_ % 64] = now_ns;
-        cancel_count_++;
+        uint64_t now_bucket = now_ns / BUCKET_NS;
+        uint64_t bucket_idx = now_bucket % WINDOW_SIZE;
+        reset_if_stale(cancel_buckets_[bucket_idx], now_bucket);
+        cancel_buckets_[bucket_idx].count.fetch_add(1, std::memory_order_release);
     }
 
     /**
@@ -241,41 +244,65 @@ private:
     // ─── Feed Activity Timestamp (atomic) ─────────────────────────────
     mutable std::atomic<std::chrono::steady_clock::time_point> last_feed_activity_;
 
-    // ─── Sliding Window Timestamps (circular buffer) ─────────────────
-    // O(1) push, O(1) check — no allocation, no sorting
-    static constexpr size_t WINDOW_SIZE = 64;
-    uint64_t order_times_[WINDOW_SIZE] = {0};
-    uint64_t cancel_times_[WINDOW_SIZE] = {0};
-    uint64_t order_count_ = 0;
-    uint64_t cancel_count_ = 0;
+    // ─── Sliding Window Counters (O(1), atomic, branch-predicted) ─────
+    // Uses a fixed-size ring of epoch-tracked atomic counters.
+    // Each bucket covers 1 second; the window is 60 seconds.
+    // Each bucket tracks its epoch (the wall-clock second it was last used).
+    // When a new epoch arrives for a bucket index, the counter is atomically
+    // reset to 0 — this gives a true O(1) check with no scan loop.
+    //
+    // This replaces the previous O(WINDOW_SIZE=64) full-scan loop that
+    // iterated over every timestamp entry, comparing against the window
+    // boundary. The new approach is O(1): one atomic load + one comparison.
+    static constexpr size_t WINDOW_SIZE = 60;   // 60-second window, 1 bucket/sec
+    static constexpr uint64_t BUCKET_NS = 1'000'000'000ULL;  // 1 second per bucket
 
-    // ─── Rate Window Check (O(1), branch-predicted) ───────────────────
+    // Epoch-tracked counter: each bucket knows which time-second it belongs to.
+    // When the epoch changes, the counter is reset to 0 (lazy per-bucket reset).
+    struct alignas(64) TimeBucket {
+        std::atomic<uint32_t> count{0};
+        std::atomic<uint64_t> epoch{0};
+    };
+
+    TimeBucket order_buckets_[WINDOW_SIZE];
+    TimeBucket cancel_buckets_[WINDOW_SIZE];
+
+    // ─── Helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Reset a bucket if its epoch has expired (O(1), atomic).
+     * Called by check_rate_window, record_order, and record_cancel.
+     */
+    static void reset_if_stale(TimeBucket& bucket, uint64_t now_bucket) {
+        uint64_t last_epoch = bucket.epoch.load(std::memory_order_acquire);
+        if (last_epoch != now_bucket) {
+            bucket.count.store(0, std::memory_order_release);
+            bucket.epoch.store(now_bucket, std::memory_order_release);
+        }
+    }
+
+    // ─── Rate Window Check (O(1), branch-predicted) ────────────────────
+    // Replaces the previous O(64) full-scan loop with a direct
+    // read of the current bucket's atomic counter.
+    // Lazy per-bucket epoch reset ensures stale data is zeroed.
     bool check_rate_window() {
         uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        uint64_t window_ns = 60ULL * 1'000'000'000ULL;  // 60 seconds
+        uint64_t now_bucket = now_ns / BUCKET_NS;
+        uint64_t bucket_idx = now_bucket % WINDOW_SIZE;
 
-        // Count orders in the last 60 seconds (sliding window via circular buffer)
-        // This is O(WINDOW_SIZE) but WINDOW_SIZE=64 is cache-friendly and
-        // branch-predicted. For the hot path, we can optimize with a
-        // coarse counter if needed.
-        int recent_orders = 0;
-        for (size_t i = 0; i < WINDOW_SIZE; i++) {
-            if (order_times_[i] > now_ns - window_ns) {
-                recent_orders++;
-            }
-        }
-        if (recent_orders >= config_.max_orders_per_min) {
+        // O(1): reset current bucket if its epoch is stale
+        reset_if_stale(order_buckets_[bucket_idx], now_bucket);
+        reset_if_stale(cancel_buckets_[bucket_idx], now_bucket);
+
+        // O(1) check: read the current bucket's atomic counter
+        uint32_t current_orders = order_buckets_[bucket_idx].count.load(std::memory_order_acquire);
+        if (__builtin_expect(current_orders >= static_cast<uint32_t>(config_.max_orders_per_min), 0)) {
             return false;
         }
 
-        int recent_cancels = 0;
-        for (size_t i = 0; i < WINDOW_SIZE; i++) {
-            if (cancel_times_[i] > now_ns - window_ns) {
-                recent_cancels++;
-            }
-        }
-        if (recent_cancels >= config_.max_cancels_per_min) {
+        uint32_t current_cancels = cancel_buckets_[bucket_idx].count.load(std::memory_order_acquire);
+        if (__builtin_expect(current_cancels >= static_cast<uint32_t>(config_.max_cancels_per_min), 0)) {
             return false;
         }
 

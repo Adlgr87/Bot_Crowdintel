@@ -8,12 +8,15 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "eip712_signer.hpp"
 #include "market_config.hpp"
 #include "lightweight_client.hpp"
+#include "transparent_string_hash.hpp"
 
 /**
  * OrderStatus: Estado del ciclo de vida de una orden.
@@ -62,6 +65,7 @@ struct ManagedOrder {
  *
  * Thread-safe: uses shared_mutex for concurrent access.
  * Hot path: register_order() and generate_client_order_id() are O(1) hash operations.
+ * has_open_order() is O(1) via secondary index (market_slug + side → count).
  */
 class OrderManager {
 public:
@@ -89,7 +93,7 @@ public:
     /**
      * Register an order as PENDING (before submission).
      * Returns the generated client_order_id so the caller can track it.
-     * O(1) — hash insert.
+     * O(1) — hash insert + secondary index update.
      */
     std::string register_order(const OrderParams& params, uint64_t nonce,
                                 const std::string& market_slug) {
@@ -108,19 +112,43 @@ public:
         order.created_at = now;
         order.last_update = now;
         order.market_slug = market_slug;
+
+        // Note: secondary index is updated in update_status() when the order
+        // transitions to/from OPEN or PARTIAL states. PENDING is not "open".
         return client_order_id;
     }
 
     /**
      * Update order status (called from fill handler, cancel handler, etc.).
-     * O(1) — hash lookup.
+     * O(1) — hash lookup + secondary index adjustment.
+     * Updates the secondary index when an order transitions between
+     * open and non-open states.
      */
     void update_status(const std::string& client_order_id, OrderStatus new_status) {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         auto it = orders_.find(client_order_id);
         if (it != orders_.end()) {
-            it->second.status = new_status;
-            it->second.last_update = std::chrono::steady_clock::now();
+            auto& order = it->second;
+            bool was_open = order.is_open();
+            order.status = new_status;
+            order.last_update = std::chrono::steady_clock::now();
+            bool is_now_open = order.is_open();
+
+            // Update secondary index on state transition
+            if (was_open && !is_now_open) {
+                std::string idx_key = make_index_key(order.market_slug, order.params.side);
+                auto idx_it = open_order_index_.find(idx_key);
+                if (idx_it != open_order_index_.end() && idx_it->second > 0) {
+                    idx_it->second--;
+                    if (idx_it->second == 0) {
+                        open_order_index_.erase(idx_it);
+                    }
+                }
+            } else if (!was_open && is_now_open) {
+                // Re-opening an order (e.g., PENDING → OPEN)
+                std::string idx_key = make_index_key(order.market_slug, order.params.side);
+                open_order_index_[idx_key]++;
+            }
         }
     }
 
@@ -150,21 +178,20 @@ public:
      * Check if a duplicate order exists for this market.
      * Self-trade prevention: if we have an open order for the same market
      * on the same side, the new order should be blocked or the old cancelled.
+     *
+     * O(1) — uses a secondary index (market_slug + side → open order count).
+     * No iteration over all orders. Zero allocation (string_view lookup).
      */
-    bool has_open_order(const std::string& market_slug, bool is_buy) const {
+    bool has_open_order(std::string_view market_slug, bool is_buy) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
-        for (const auto& [id, order] : orders_) {
-            if (order.market_slug == market_slug &&
-                order.is_open() &&
-                (order.params.side == (is_buy ? 0 : 1))) {
-                return true;
-            }
-        }
-        return false;
+        std::string idx_key = make_index_key(market_slug, is_buy ? 0 : 1);
+        auto it = open_order_index_.find(idx_key);
+        return it != open_order_index_.end() && it->second > 0;
     }
 
     /**
      * Get all open orders (for cancellation).
+     * O(N) — only called from cold path (cancellation sweep).
      */
     std::vector<ManagedOrder*> get_open_orders() {
         std::vector<ManagedOrder*> result;
@@ -178,9 +205,8 @@ public:
     }
 
     /**
-     * Get order by client_order_id. Returns nullptr if not found.
-     * Thread-safe: the pointer is only valid within the lock scope.
-     * Hot path callers should use find_order_copy() instead.
+     * Get order by client_order_id. Returns std::nullopt if not found.
+     * Thread-safe: returns a copy, valid outside lock scope.
      */
     std::optional<ManagedOrder> find_order_copy(const std::string& client_order_id) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -284,7 +310,22 @@ private:
     LightweightCLOBClient& client_;
     mutable std::shared_mutex mutex_;
     std::unordered_map<std::string, ManagedOrder> orders_;
+    std::unordered_map<std::string, size_t> open_order_index_;  // O(1) secondary index
     std::atomic<uint64_t> order_counter_{0};
+
+    /**
+     * Build the secondary index key from market_slug + side.
+     * Used by register_order, update_status, and has_open_order for O(1) lookups.
+     */
+    static std::string make_index_key(std::string_view market_slug, uint8_t side) {
+        // Simple concatenation — side is a single digit (0 or 1), prepended for prefix separation
+        std::string key;
+        key.reserve(market_slug.size() + 4);
+        key += market_slug;
+        key += ':';
+        key += (side == 0) ? '0' : '1';
+        return key;
+    }
 };
 
 #endif // ORDER_MANAGER_HPP

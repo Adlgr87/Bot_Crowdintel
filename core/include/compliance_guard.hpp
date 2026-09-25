@@ -5,12 +5,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_set>
 
 #include "market_metadata.hpp"
 #include "market_config.hpp"
 #include "tick_result.hpp"
+#include "transparent_string_hash.hpp"
 
 /**
  * ComplianceGuard: Verifies market and jurisdiction compliance before trading.
@@ -26,8 +28,8 @@
  */
 struct ComplianceConfig {
     bool jurisdiction_check_enabled;
-    std::unordered_set<std::string> allowed_jurisdictions;
-    std::unordered_set<std::string> restricted_tokens;
+    std::unordered_set<std::string, TransparentStrHash, TransparentStrEq> allowed_jurisdictions;
+    std::unordered_set<std::string, TransparentStrHash, TransparentStrEq> restricted_tokens;
     int resolution_warning_hours;
 
     static ComplianceConfig load_from_env() {
@@ -43,8 +45,8 @@ struct ComplianceConfig {
              std::string(env_juris) == "1");
 
         // Allowed jurisdictions — comma-separated list
-        // COMPLIANCE_ALLOWED_JURISDICTIONS="US,CA,GB" (default: "US")
-        const char* env_allowed = std::getenv("COMPLIANCE_ALLOWED_JURISDICTIONS");
+        // COMPLIANCE_ALLOWED_JURISDICTION="US,CA,GB" (default: "US")
+        const char* env_allowed = std::getenv("COMPLIANCE_ALLOWED_JURISDICTION");
         std::string allowed_str = env_allowed ? env_allowed : "US";
         size_t start = 0, end;
         while ((end = allowed_str.find(',', start)) != std::string::npos) {
@@ -92,7 +94,8 @@ struct ComplianceConfig {
  * ComplianceGuard: Enforces market and jurisdiction compliance.
  *
  * Hot path methods (is_token_allowed, verify_jurisdiction) are O(1)
- * using hash sets. Configuration is set at startup (cold path).
+ * using hash sets with transparent lookup (no allocation). Configuration
+ * is set at startup (cold path).
  */
 class ComplianceGuard {
 public:
@@ -101,12 +104,12 @@ public:
 
     /**
      * Check if a token is allowed for trading.
-     * Hot path — O(1) hash lookup.
+     * Hot path — O(1) hash lookup (transparent, no allocation).
      *
-     * @param token_id  The Polymarket token ID
+     * @param token_id  The Polymarket token ID (string_view — no heap alloc)
      * @return true if the token is NOT in the restricted list
      */
-    bool is_token_allowed(const std::string& token_id) const {
+    bool is_token_allowed(std::string_view token_id) const {
         // Branch-predicted: most tokens are allowed (not in restricted list)
         if (__builtin_expect(config_.restricted_tokens.empty(), 0)) {
             return true;
@@ -117,12 +120,12 @@ public:
 
     /**
      * Verify that the operator's jurisdiction is allowed.
-     * Hot path — O(1) hash lookup.
+     * Hot path — O(1) hash lookup (transparent, no allocation).
      *
-     * @param country_code  ISO 3166-1 alpha-2 country code
+     * @param country_code  ISO 3166-1 alpha-2 country code (string_view — no heap alloc)
      * @return true if jurisdiction is allowed
      */
-    bool verify_jurisdiction(const std::string& country_code) const {
+    bool verify_jurisdiction(std::string_view country_code) const {
         if (!config_.jurisdiction_check_enabled) {
             // Operator explicitly disabled jurisdiction check
             // This is the operator's responsibility — we warn in logs
@@ -141,29 +144,29 @@ public:
      * Check if a market is tradable (active, not resolving soon).
      * Cold path — queries the metadata cache.
      */
-    bool verify_market_active(const std::string& token_id,
+    bool verify_market_active(std::string_view token_id,
                                const MarketMetadataCache& cache) const {
         return cache.is_market_tradable(token_id, config_.resolution_warning_hours);
     }
 
     /**
-     * Comprehensive compliance check.
-     * Returns TickResult (from risk_engine.hpp) indicating compliance status.
+     * Comprehensive compliance check (hot path — O(1), zero allocation).
+     * All parameters are string_view to avoid heap allocation in the hot path.
      */
-    TickResult check_all(const std::string& token_id,
-                          const std::string& country_code,
-                          const MarketMetadataCache& cache) const {
-        // 1. Token not restricted
+    TickResult check_all(std::string_view token_id,
+                           std::string_view country_code,
+                           const MarketMetadataCache& cache) const {
+        // 1. Token not restricted — O(1) transparent hash lookup, no alloc
         if (!is_token_allowed(token_id)) {
             return TickResult::MARKET_NOT_TRADABLE;
         }
 
-        // 2. Jurisdiction allowed
+        // 2. Jurisdiction allowed — O(1) transparent hash lookup, no alloc
         if (!verify_jurisdiction(country_code)) {
             return TickResult::MARKET_NOT_TRADABLE;
         }
 
-        // 3. Market active and not resolving soon
+        // 3. Market active and not resolving soon — O(1) cache lookup
         if (!cache.is_market_tradable(token_id, config_.resolution_warning_hours)) {
             return TickResult::MARKET_NOT_TRADABLE;
         }

@@ -120,7 +120,7 @@ void run_latency_test() {
     uint64_t p50 = pct(latencies, 0.50);
     uint64_t p99 = pct(latencies, 0.99);
 
-    printf("\n--- FINAL LATENCY RESULTS (Post-MutaLambda + Warmup) ---\n");
+    printf("\n--- FINAL LATENCY RESULTS (Post-Optimization + Warmup) ---\n");
     printf("CPU frequency calibrated: %.3f ns/cycle\n", ns_per_cycle);
     printf("Min: \t\t%.3f us (%llu cycles)\n", min_c * ns_per_cycle / 1000.0, min_c);
     printf("P50: \t\t%.3f us (%llu cycles)\n", p50 * ns_per_cycle / 1000.0, p50);

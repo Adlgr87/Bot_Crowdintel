@@ -24,7 +24,7 @@ alpha/                 # COLD PATH - Alpha Signals & Risk
 infra/                 # Infrastructure
   ├── scripts/         # kernel_tuning.sh, deploy_production.sh
   ├── docker/          # Dockerfile.prod (Deterministic LTO build)
-  └── mutualambda/     # MutaLambda optimizer adapter
+  └── mutualambda/     # Optimizer adapter (prototype, not yet active)
 tests/benchmarks/      # Latency measurement (RDTSC)
 docs/                  # Architecture, Perf Metrics, Optimization Lineage
 .github/workflows/     # CI/CD pipeline
@@ -56,7 +56,7 @@ make -j$(nproc)
 ./bin/latency_bench
 
 # Run the hot path demo (requires env vars)
-export BOT_PRIVATE_KEY_HEX=$(python3 -c "print('AA'*32)")
+export BOT_PRIVATE_KEY_HEX=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 export CLOB_API_KEY="your_key"
 export CLOB_SECRET="your_secret"
 export CLOB_PASSPHRASE="your_passphrase"
@@ -104,8 +104,8 @@ Key benefits:
 | Metric | Value (μs) | Value (cycles @ 2.7GHz) |
 | :--- | :--- | :--- |
 | Min  | 44    | ~119K |
-| P50  | 47    | ~127K |
-| P99  | 52    | ~140K |
+| P50  | 45    | ~121K |
+| P99  | 94    | ~254K |
 
 > See [`docs/OPTIMIZATION_LINEAGE.md`](docs/OPTIMIZATION_LINEAGE.md) for full history.
 > See [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md) for complete performance analysis.

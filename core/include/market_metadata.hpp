@@ -5,9 +5,12 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <shared_mutex>
 #include <vector>
+
+#include "transparent_string_hash.hpp"
 
 /**
  * MarketMetadata: Metadata fetched from Polymarket CLOB API at startup (cold path).
@@ -45,7 +48,7 @@ struct MarketMetadata {
 /**
  * MarketMetadataCache: Thread-safe cache of market metadata.
  * Cold path: fetched at startup and updated periodically.
- * Hot path: O(1) lookups via unordered_map.
+ * Hot path: O(1) lookups via unordered_map with transparent hash (no allocation).
  */
 class MarketMetadataCache {
 public:
@@ -84,8 +87,9 @@ public:
     /**
      * Get metadata for a market (hot path — O(1) lookup).
      * Returns nullptr if not found.
+     * Uses transparent hash for string_view lookup — no allocation.
      */
-    const MarketMetadata* get(const std::string& token_id) const {
+    const MarketMetadata* get(std::string_view token_id) const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = cache_.find(token_id);
         if (it != cache_.end()) {
@@ -105,9 +109,9 @@ public:
 
     /**
      * Check if a market is tradable (not closed/resolved, not resolving soon).
-     * Hot path — O(1) lookup + comparisons.
+     * Hot path — O(1) lookup + comparisons. No allocation.
      */
-    bool is_market_tradable(const std::string& token_id, int warning_hours) const {
+    bool is_market_tradable(std::string_view token_id, int warning_hours) const {
         const MarketMetadata* meta = get(token_id);
         if (!meta) return false;  // Unknown market = not tradable (safe default)
         if (!meta->is_active()) return false;
@@ -117,18 +121,18 @@ public:
 
     /**
      * Get tick size for a market (hot path).
-     * Returns 1 (no snapping) if unknown.
+     * Returns 1 (no snapping) if unknown. No allocation.
      */
-    int get_tick_size(const std::string& token_id) const {
+    int get_tick_size(std::string_view token_id) const {
         const MarketMetadata* meta = get(token_id);
         return meta ? meta->tick_size : 1;
     }
 
     /**
      * Get dynamic fees flag for a market.
-     * Hot path.
+     * Hot path. No allocation.
      */
-    bool get_dynamic_fees(const std::string& token_id) const {
+    bool get_dynamic_fees(std::string_view token_id) const {
         const MarketMetadata* meta = get(token_id);
         return meta ? meta->enable_dynamic_fees : false;
     }
@@ -140,7 +144,7 @@ public:
 
 private:
     mutable std::shared_mutex mutex_;
-    std::unordered_map<std::string, MarketMetadata> cache_;
+    std::unordered_map<std::string, MarketMetadata, TransparentStrHash, TransparentStrEq> cache_;
 };
 
 #endif // MARKET_METADATA_HPP
