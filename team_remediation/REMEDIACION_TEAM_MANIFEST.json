@@ -1,5 +1,5 @@
 {
-  "team_name": "Team Agent de Workflows — Remediación de Cumplimiento",
+  "team_name": "Equipo de Remediación — Remediación de Cumplimiento",
   "project": "Bot_Crowdintel",
   "repo": "https://github.com/Adlgr87/Bot_Crowdintel",
   "branch_target": "remediation/compliance",
@@ -15,9 +15,9 @@
     "Todo control nuevo debe ser de costo O(1) y branch-predicted en el hot path.",
     "ctest completo debe pasar (verde) y no degradar la latencia P50 del hot path más de un 10%."
   ],
-  "agents": [
+  "phases": [
     {
-      "id": "agente_baseline",
+      "id": "baseline",
       "name": "Baseline",
       "phase": "Fase 0",
       "role": "Línea base de CI, limpieza, higiene de secretos",
@@ -32,7 +32,7 @@
       ]
     },
     {
-      "id": "agente_api",
+      "id": "api",
       "name": "API",
       "phase": "Fase 1",
       "role": "Cliente HTTP, rate limiter, backoff, pooling",
@@ -48,7 +48,7 @@
       ]
     },
     {
-      "id": "agente_riesgo",
+      "id": "risk",
       "name": "Risk",
       "phase": "Fase 2",
       "role": "Risk engine, kill switch, límites, balance checks",
@@ -64,7 +64,7 @@
       ]
     },
     {
-      "id": "agente_ordenes",
+      "id": "orders",
       "name": "Orders",
       "phase": "Fase 3",
       "role": "Order manager, position tracker, user-channel fills, dedup",
@@ -81,7 +81,7 @@
       ]
     },
     {
-      "id": "agente_econ",
+      "id": "economics",
       "name": "Economics",
       "phase": "Fase 4",
       "role": "Modelo de comisiones dinámicas, gas, slippage, net-EV",
@@ -96,7 +96,7 @@
       ]
     },
     {
-      "id": "agente_compliance",
+      "id": "compliance",
       "name": "Compliance",
       "phase": "Fase 5",
       "role": "Market metadata, estado de mercado, jurisdicción, tick size dinámico",
@@ -111,7 +111,7 @@
       ]
     },
     {
-      "id": "agente_obs",
+      "id": "observability",
       "name": "Observability",
       "phase": "Fase 6",
       "role": "Auditoría, métricas, alertas",
@@ -126,7 +126,7 @@
       ]
     },
     {
-      "id": "agente_qa",
+      "id": "qa",
       "name": "QA",
       "phase": "Fase 7",
       "role": "Tests, regresión de latencia, escanado de secretos, docs",
@@ -142,7 +142,7 @@
       ]
     },
     {
-      "id": "agente_verificador_final",
+      "id": "final_audit",
       "name": "Final Audit",
       "phase": "Post-Fase 7",
       "role": "Verificación extremadamente rigurosa de principio a fin, end-to-end",
@@ -168,11 +168,11 @@
     }
   ],
   "execution_order": [
-    "Fase 0 (agente_baseline)",
-    "Fase 1 (agente_api) | Fase 2 (agente_riesgo) | Fase 4 (agente_econ) | Fase 5 (agente_compliance) — paralelas",
-    "Fase 3 (agente_ordenes) — depende de Fase 1",
-    "Fase 6 (agente_obs) — depende de Fases 2-3",
-    "Fase 7 (agente_qa) — depende de Fases 1-6",
+    "Fase 0 (baseline)",
+    "Fase 1 (api) | Fase 2 (risk) | Fase 4 (economics) | Fase 5 (compliance) — paralelas",
+    "Fase 3 (orders) — depende de Fase 1",
+    "Fase 6 (observability) — depende de Fases 2-3",
+    "Fase 7 (qa) — depende de Fases 1-6",
     "Final Audit — post-Fase 7"
   ]
 }

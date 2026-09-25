@@ -15,8 +15,8 @@
       "status": "active",
       "tools_available": ["subagent", "workflow", "bash", "read", "write", "edit", "glob", "grep", "skill", "present", "goal"]
     },
-    "agent_prime": {
-      "name": "Agent Prime",
+    "architect": {
+      "name": "Arquitecto",
       "role": "Arquitectura, contratos y decisiones técnicas",
       "provider": "openrouter",
       "model": "google/gemini-2.5-pro",
@@ -25,80 +25,80 @@
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "agent_swarm": {
-      "name": "Agent Swarm",
+    "parallelizer": {
+      "name": "Paralelizador",
       "role": "Paralelización y coordinación de subtareas",
       "provider": "openrouter",
       "model": "google/gemini-2.5-flash",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "swe_agent": {
-      "name": "SWE Agent",
+    "implementer": {
+      "name": "Implementador",
       "role": "Implementación principal de código",
       "provider": "openrouter",
       "model": "deepseek/deepseek-chat",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "openhands": {
-      "name": "OpenHands",
+    "builder": {
+      "name": "Builder",
       "role": "Build, CI y Docker",
       "provider": "openrouter",
       "model": "openai/gpt-4o",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "hermes_agent": {
-      "name": "Hermes Agent",
+    "security": {
+      "name": "Seguridad",
       "role": "Seguridad, criptografía y revisión adversarial",
       "provider": "openrouter",
       "model": "google/gemini-2.5-pro",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "poolside_cli": {
-      "name": "Poolside CLI",
+    "benchmark": {
+      "name": "Benchmark",
       "role": "Rendimiento, benchmarks y profiling",
       "provider": "openrouter",
       "model": "meta-llama/llama-4-maverick",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "opencode": {
-      "name": "OpenCode",
+    "tests": {
+      "name": "Tests",
       "role": "Tests, refactors pequeños y mantenimiento",
       "provider": "openrouter",
       "model": "openai/gpt-4o-mini",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "mistral_vibe": {
-      "name": "Mistral Vibe",
+    "researcher": {
+      "name": "Investigador",
       "role": "Investigación técnica y alternativas",
       "provider": "openrouter",
       "model": "google/gemini-2.5-flash",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "openclaw": {
-      "name": "OpenClaw",
+    "integrator": {
+      "name": "Integración",
       "role": "Revisión de integraciones",
       "provider": "openrouter",
       "model": "openai/gpt-4o",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "kilocode": {
-      "name": "KiloCode",
+    "docs": {
+      "name": "Docs",
       "role": "Documentación operativa y runbooks",
       "provider": "openrouter",
       "model": "openai/gpt-4o-mini",
       "status": "verified",
       "verification": "OK - tested via OpenRouter API"
     },
-    "claudecode": {
-      "name": "ClaudeCode",
+    "redteam": {
+      "name": "Red Team",
       "role": "Crítica técnica independiente y revisión de código",
       "provider": "openrouter",
       "model": "google/gemini-2.5-pro",

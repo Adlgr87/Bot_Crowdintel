@@ -1,4 +1,4 @@
-# Mistral Vibe — Investigación y Alternativas
+# Investigador — Investigación y Alternativas
 
 ## Rol
 Investigación técnica y análisis comparativo de alternativas.

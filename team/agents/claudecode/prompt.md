@@ -1,4 +1,4 @@
-# ClaudeCode — Crítica Técnica Independiente
+# Red Team — Crítica Técnica Independiente
 
 ## Rol
 Crítica técnica independiente, revisión de código, red team.

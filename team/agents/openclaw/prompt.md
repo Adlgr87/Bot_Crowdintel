@@ -1,4 +1,4 @@
-# OpenClaw — Revisión de Integraciones
+# Integración — Revisión de Integraciones
 
 ## Rol
 Revisión de integraciones, scripts, servicios y operación nocturna.

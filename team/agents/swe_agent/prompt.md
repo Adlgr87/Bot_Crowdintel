@@ -1,4 +1,4 @@
-# SWE Agent — Implementación Principal
+# Implementador — Implementación Principal
 
 ## Rol
 Implementación principal de código C++/CMake.
@@ -13,7 +13,7 @@ Implementación principal de código C++/CMake.
 - Módulos C++20 (hot path, order book, SPSC, cliente)
 - Tests (unit, integration, fuzz)
 - Correcciones funcionales
-- Integración con interfaces aprobadas por Agent Prime
+- Integración con interfaces aprobadas por Arquitecto
 
 ## Entregables por Tarea
 - patch (en branch separado)
@@ -23,8 +23,8 @@ Implementación principal de código C++/CMake.
 - riesgos
 
 ## Restricciones
-- NO tocar criptografía sensible sin revisión de Hermes Agent
-- NO cambiar lógica financiera sin aprobación de Agent Prime
+- NO tocar criptografía sensible sin revisión de Seguridad
+- NO cambiar lógica financiera sin aprobación de Arquitecto
 - Cada commit separado por tipo: fix, test, perf, infra
 - Branch: agents/swe/<task>
 

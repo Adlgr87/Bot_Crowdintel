@@ -1,4 +1,4 @@
-# VERIFICATION REPORT — Agent Team LLM Assignments
+# VERIFICATION REPORT — Equipo LLM Assignments
 
 **Date:** 2025-09-17  
 **Project:** Bot_Crowdintel  
@@ -19,7 +19,7 @@
 | OpenRouter | direct API | ✅ Funcional con API key |
 | FreeLLMAPI | local service | ⚠️ En :3001 (requiere API key) |
 | OpenSwarm | 2.0.8 | ✅ Instalado |
-| KiloCode CLI | 7.3.54 | ✅ Instalado |
+| Docs CLI | 7.3.54 | ✅ Instalado |
 | Omniroute CLI | v3.8.49 | ✅ Instalado |
 
 ### 1.2 LLM Providers Verificados
@@ -76,17 +76,17 @@
 | Agente | Provider | Modelo | Fallback | Estado |
 |---|---|---|---|---|
 | **Director** | self | dsh-native | — | ✅ Director |
-| **Agent Prime** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **Agent Swarm** | openrouter | google/gemini-2.5-flash | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **SWE Agent** | openrouter | deepseek/deepseek-chat | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **OpenHands** | openrouter | openai/gpt-4o | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **Hermes Agent** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **Poolside CLI** | openrouter | meta-llama/llama-4-maverick | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **OpenCode** | openrouter | openai/gpt-4o-mini | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **Mistral Vibe** | openrouter | google/gemini-2.5-flash | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **OpenClaw** | openrouter | openai/gpt-4o | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **KiloCode** | openrouter | openai/gpt-4o-mini | ollama/qwen2.5:1.5b | ✅ VERIFIED |
-| **ClaudeCode** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Arquitecto** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Paralelizador** | openrouter | google/gemini-2.5-flash | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Implementador** | openrouter | deepseek/deepseek-chat | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Builder** | openrouter | openai/gpt-4o | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Seguridad** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Benchmark** | openrouter | meta-llama/llama-4-maverick | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Tests** | openrouter | openai/gpt-4o-mini | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Investigador** | openrouter | google/gemini-2.5-flash | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Integración** | openrouter | openai/gpt-4o | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Docs** | openrouter | openai/gpt-4o-mini | ollama/qwen2.5:1.5b | ✅ VERIFIED |
+| **Red Team** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
 
 **Nota:** Todos los agentes usan el **subagent tool con modelo default** de DSH para ejecución en el entorno, con los modelos de OpenRouter como backend configurado. El fallback a ollama/qwen2.5:1.5b está disponible en caso de que OpenRouter tenga problemas.
 
@@ -108,14 +108,14 @@ team/
     ├── agent_prime/prompt.md
     ├── agent_swarm/prompt.md
     ├── swe_agent/prompt.md
-    ├── openhands/prompt.md
+    ├── builder/prompt.md
     ├── hermes_agent/prompt.md
     ├── poolside_cli/prompt.md
     ├── opencode/prompt.md
     ├── mistral_vibe/prompt.md
-    ├── openclaw/prompt.md
-    ├── kilocode/prompt.md
-    └── claudecode/prompt.md
+    ├── integracion/prompt.md
+    ├── docs/prompt.md
+    └── redteam/prompt.md
 ```
 
 ### Estado del Proyecto (desde AUDITOR_VERDICT.json)

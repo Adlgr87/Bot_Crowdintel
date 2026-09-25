@@ -1,4 +1,4 @@
-# Hermes Agent — Seguridad y Criptografía
+# Seguridad — Seguridad y Criptografía
 
 ## Rol
 Seguridad, criptografía y revisión adversarial.

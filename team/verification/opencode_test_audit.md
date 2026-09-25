@@ -1,9 +1,9 @@
-# OpenCode Test Audit — Bot CrowdIntel
+# Tests Test Audit — Bot CrowdIntel
 
 ## Metadata
 | Field | Value |
 |---|---|
-| **Auditor** | OpenCode (opencode/openai-gpt-4o-mini) |
+| **Auditor** | Tests (opencode/openai-gpt-4o-mini) |
 | **Repository** | `/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel` |
 | **Commit (HEAD)** | `6fbfb06` — "fix: resolve Adversary audit — real Keccak-256, real build system, real benchmarks, real MutaLambda integration" |
 | **Date** | 2025-09-17 |
@@ -604,5 +604,5 @@ El repositorio tiene **potencial** de testing pero **falla completamente en ejec
 
 ---
 
-*Audit performed by OpenCode (opencode/openai-gpt-4o-mini) on 2025-09-17.*
+*Audit performed by Tests (opencode/openai-gpt-4o-mini) on 2025-09-17.*
 *Repository: Bot_Crowdintel, HEAD commit 6fbfb06*

@@ -1,57 +1,57 @@
 {
   "timestamp": "2026-09-18T03:21:06Z",
   "results": {
-    "Agent Prime": {
+    "Arquitecto": {
       "status": "FAIL",
       "model": "aug/opus4.8",
       "detail": "HTTP 502: {\"error\":{\"message\":\"Stream ended before producing a non-ping SSE event\",\"type\":\"stream_early_eof\",\"code\":\"STREAM_EARLY_EOF\"}}"
     },
-    "Agent Swarm": {
+    "Paralelizador": {
       "status": "FAIL",
       "model": "auto/best-reasoning",
       "detail": "HTTP 429: {\"error\":{\"message\":\"[429]: Felo thread creation failed with HTTP 429 [oc/deepseek-v4-flash-free (403), felo/felo-scholar (400), felo/felo-social (400)]\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_e"
     },
-    "SWE Agent": {
+    "Implementador": {
       "status": "FAIL",
       "model": "aug/gpt5.5",
       "detail": "HTTP 502: {\"error\":{\"message\":\"Stream ended before producing a non-ping SSE event\",\"type\":\"stream_early_eof\",\"code\":\"STREAM_EARLY_EOF\"}}"
     },
-    "OpenHands": {
+    "Builder": {
       "status": "FAIL",
       "model": "tllm/claude_sonnet_4",
       "detail": "HTTP 403: {\"error\":{\"message\":\"[403]: The Old LLM is blocked by Vercel for this server egress IP. Configure a residential provider or global proxy for 'theoldllm' and retry.\",\"type\":\"permission_error\",\"code\":\"i"
     },
-    "Hermes Agent": {
+    "Seguridad": {
       "status": "FAIL",
       "model": "aug/opus4.8",
       "detail": "HTTP 502: {\"error\":{\"message\":\"Stream ended before producing a non-ping SSE event\",\"type\":\"stream_early_eof\",\"code\":\"STREAM_EARLY_EOF\"}}"
     },
-    "Poolside CLI": {
+    "Benchmark": {
       "status": "FAIL",
       "model": "poolside/perf-3",
       "detail": "HTTP 404: {\"error\":{\"message\":\"No active credentials for provider: poolside\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\"}}"
     },
-    "OpenCode": {
+    "Tests": {
       "status": "FAIL",
       "model": "auto/best-coding",
       "detail": "HTTP 429: {\"error\":{\"message\":\"[429]: Felo thread creation failed with HTTP 429 [oc/big-pickle (403)]\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"},\"diagnostics\":{\"poolSize\":11,\"attempted\":1,\"exclude"
     },
-    "Mistral Vibe": {
+    "Investigador": {
       "status": "FAIL",
       "model": "aug/gemini-3.1-pro-preview",
       "detail": "HTTP 502: {\"error\":{\"message\":\"Stream ended before producing a non-ping SSE event\",\"type\":\"stream_early_eof\",\"code\":\"STREAM_EARLY_EOF\"}}"
     },
-    "OpenClaw": {
+    "Integración": {
       "status": "FAIL",
       "model": "tllm/GPT_5",
       "detail": "HTTP 403: {\"error\":{\"message\":\"[403]: The Old LLM is blocked by Vercel for this server egress IP. Configure a residential provider or global proxy for 'theoldllm' and retry.\",\"type\":\"permission_error\",\"code\":\"i"
     },
-    "KiloCode": {
+    "Docs": {
       "status": "FAIL",
       "model": "oc/nemotron-3-ultra-free",
       "detail": "HTTP 403: {\"error\":{\"message\":\"[403]: <!doctype html>\",\"type\":\"permission_error\",\"code\":\"insufficient_quota\"}}"
     },
-    "ClaudeCode": {
+    "Red Team": {
       "status": "FAIL",
       "model": "aug/sonnet4.8",
       "detail": "HTTP 502: {\"error\":{\"message\":\"Stream ended before producing a non-ping SSE event\",\"type\":\"stream_early_eof\",\"code\":\"STREAM_EARLY_EOF\"}}"

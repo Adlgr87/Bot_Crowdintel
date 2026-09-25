@@ -1,4 +1,4 @@
-# Agent Prime — Arquitectura y Contratos
+# Arquitecto — Arquitectura y Contratos
 
 ## Rol
 Arquitectura, contratos y decisiones técnicas para Bot_Crowdintel.

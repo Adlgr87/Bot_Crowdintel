@@ -1,4 +1,4 @@
-# Poolside CLI — Performance y Benchmarks
+# Benchmark — Performance y Benchmarks
 
 ## Rol
 Rendimiento, benchmarks y profiling.

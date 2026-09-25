@@ -1,4 +1,4 @@
-# OpenHands — Build, CI y Docker
+# Builder — Build, CI y Docker
 
 ## Rol
 Build desde checkout limpio, CI/CD, Docker, sanitizers.

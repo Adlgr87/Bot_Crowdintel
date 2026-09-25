@@ -1,25 +1,26 @@
-# Protocolo de Coordinacion del Agent Team
+# Protocolo de Coordinación del Proyecto
 
-> **Bot_Crowdintel — Director Director**
+> **Bot_Crowdintel — Proyecto de Código Abierto**
 
 ---
 
 ## 1. Regla de Oro
 
-> **Un agente propone, otro implementa, otro prueba, otro critica y un supervisor independiente decide si se acepta.**
+> **Quien propone, otro implementa; quien implementa, otro prueba; quien prueba,
+> otro critica; y un supervisor independiente decide si se acepta.**
 
-Ningun agente se autocertifica. Cada entregable requiere validacion cruzada.
+Ningún entregable se autocertifica. Cada uno requiere validación cruzada.
 
 ---
 
-## 2. Director: Director (Inamovible)
+## 2. Supervisor (Inamovible)
 
 **NO acepta** frases como:
 - "parece correcto"
 - "compila en mi entorno"
 - "mejoró el promedio"
-- "el benchmark dice 20 ciclos"
-- "el agente anterior lo revisó"
+- "el benchmark dice X ciclos"
+- "el revisor anterior lo revisó"
 
 **Exige siempre:**
 - comando ejecutado
@@ -35,64 +36,58 @@ Ningun agente se autocertifica. Cada entregable requiere validacion cruzada.
 ## 3. Estructura del Equipo
 
 ```
-Director (Director)
+Supervisor
     |
-    +-- Agent Prime       -- Arquitectura, contratos, ADR
-    +-- Agent Swarm       -- Paralelizacion, grafo de dependencias
-    +-- SWE Agent         -- Implementacion C++/CMake
-    +-- OpenHands         -- Build, CI, Docker, sanitizers
-    +-- Hermes Agent      -- Seguridad, criptografia, adversarial
-    +-- Poolside CLI      -- Benchmarks, profiling, TSC
-    +-- OpenCode          -- Tests, refactors
-    +-- Mistral Vibe      -- Investigacion, alternativas
-    +-- OpenClaw          -- Integracion, secretos, operacion nocturna
-    +-- KiloCode          -- Runbooks, documentacion
-    +-- ClaudeCode        -- Critica independiente, red team
+    +-- Arquitectura          — Contratos, ADR
+    +-- Paralelización         — Grafo de dependencias
+    +-- Implementación         — C++/CMake
+    +-- Build & CI            — Build, CI, Docker, sanitizers
+    +-- Seguridad             — Criptografía, seguridad adversarial
+    +-- Benchmarking          — Benchmarks, profiling, TSC
+    +-- Tests                 — Tests, refactors
+    +-- Investigación         — Alternativas, análisis
+    +-- Integración           — Integración, secretos, operación
+    +-- Documentación         — Runbooks, documentación
+    +-- Red Team             — Crítica independiente
 ```
 
 ---
 
 ## 4. Workflow por Fases
 
-### Fase 0 — Baseline y congelacion
-**Agentes:** Director, Agent Prime, ClaudeCode, OpenHands
-**Salida:** BASELINE.md, RISK_REGISTER.md, ACCEPTANCE_GATES.md
+### Fase 0 — Baseline
+**Salida:** BASELINE.md, RISK_REGISTER.md
 
 ### Fase 1 — Build reproducible
-**Gate:** cmake configure PASS, build limpio PASS, ctest PASS, ASan PASS, UBSan PASS, Docker build PASS
+**Gate:** cmake configure PASS, build limpio PASS, ctest PASS, ASan PASS, UBSan PASS
 
-### Fase 2 — Seguridad y criptografia
-**Gate:** vectores conocidos PASS, verificacion cruzada PASS, fuzzing PASS, secrets scan PASS, security review PASS
+### Fase 2 — Seguridad y criptografía
+**Gate:** vectores conocidos PASS, verificación cruzada PASS, secrets scan PASS
 
 ### Fase 3 — Motor de riesgo y estado
-**Gate:** replay normal/corrupto PASS, desconexion PASS, reinicio PASS, duplicados PASS, fuera de orden PASS
+**Gate:** replay normal/corrupto PASS, reconexión PASS, reinicio PASS, duplicados PASS
 
 ### Fase 4 — Cliente CLOB
-**Gate:** no ordenes duplicadas, no payloads inconsistentes, no bloqueo indefinido, no secretos en logs
+**Gate:** no órdenes duplicadas, no payloads inconsistentes, no bloqueo indefinido
 
 ### Fase 5 — Replay y paper trading
-**Agentes:** OpenCode, Mistral Vibe, Poolside CLI, Agent Prime
+**Salida:** resultados de validación en ambiente de prueba
 
-### Fase 6 — Benchmark serio
-**Gate:** benchmark reproducible, mismo resultado estadistico, sin cola vacia dominante, sin errores ignorados
+### Fase 6 — Benchmark
+**Gate:** benchmark reproducible, mismo resultado estadístico, sin errores ignorados
 
-### Fase 7 — AF_XDP
-**Agentes:** Agent Prime, SWE Agent, Poolside CLI, OpenHands, OpenClaw
+### Fase 7 — Optimización
+**Targets bloqueados:** EIP-712, Keccak, riesgo, nonce, reconciliación
 
-### Fase 8 — MutaLambda
-**Agentes:** Poolside CLI, Mistral Vibe, SWE Agent, ClaudeCode
-**Targets bloqueados:** EIP-712, Keccak, riesgo, nonce, reconciliacion, cancelacion, secretos
-
-### Fase 9 — Revision adversarial total
-**Agentes:** ClaudeCode, Hermes Agent, OpenClaw
+### Fase 8 — Revisión adversarial
 **Salida:** FINAL_RED_TEAM_REPORT.md
 
-### Fase 10 — Certificacion y despliegue
-**Salida:** release candidate, SBOM, hash de binario, configuracion versionada, runbook, plan de rollback
+### Fase 9 — Certificación y despliegue
+**Salida:** release candidate, SBOM, hash de binario, configuración versionada
 
 ---
 
-## 5. Reglas de Coordinacion
+## 5. Reglas de Coordinación
 
 ### 5.1 No editar sobre cambios no validados
 Cada tarea debe tener:
@@ -111,14 +106,14 @@ infra: add AF_XDP backend
 ```
 
 ### 5.3 No aceptar afirmaciones sin artefacto
-Cada claim debe apuntar a: test, log, benchmark, commit, dataset, configuracion, o hash.
+Cada claim debe apuntar a: test, log, benchmark, commit, dataset, configuración, o hash.
 
-### 5.4 Dos revisores para cambios criticos
-Areas: criptografia, riesgo, cliente de ordenes, reconciliacion, secretos, transporte, apagado de emergencia.
+### 5.4 Dos revisores para cambios críticos
+Áreas: criptografía, riesgo, cliente de órdenes, reconciliación, secretos, transporte, apagado de emergencia.
 
-Requiere: implementador + Hermes Agent + supervisor.
+Requiere: implementador + Supervisor independiente.
 
 ### 5.5 Branches aisladas
-- Cada agente trabaja en su propia rama: `agents/<agent-name>/<task>`
-- Director controla merge a `main`
-- ClaudeCode hace review de PRs antes de merge
+- Cada fase trabaja en su propia rama
+- Supervisor controla merge a `main`
+- Revisión de PRs antes de merge

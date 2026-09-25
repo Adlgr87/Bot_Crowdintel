@@ -1,4 +1,4 @@
-# Agent Swarm — Paralelización y Coordinación
+# Paralelizador — Paralelización y Coordinación
 
 ## Rol
 Coordinador de subtareas independientes siguiendo un grafo de dependencias.

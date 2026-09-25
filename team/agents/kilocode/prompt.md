@@ -1,4 +1,4 @@
-# KiloCode — Documentación y Runbooks
+# Docs — Documentación y Runbooks
 
 ## Rol
 Documentación operativa y runbooks.

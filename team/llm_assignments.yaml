@@ -1,5 +1,5 @@
 # ============================================================
-# Agent Team LLM Assignments (VERIFIED)
+# Equipo del Proyecto LLM Assignments (VERIFIED)
 # Bot_Crowdintel — Ultra-Low Latency Polymarket Trading Bot
 # Director: Director (inamovible)
 # Fecha de verificación: 2025 (reconocimiento completado)
@@ -51,7 +51,7 @@ deepseek_harness:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# Agent Prime — Arquitectura, contratos y decisiones técnicas
+# Arquitecto — Arquitectura, contratos y decisiones técnicas
 # ------------------------------------------------------------
 agent_prime:
   role: "Arquitectura, contratos y decisiones técnicas"
@@ -72,7 +72,7 @@ agent_prime:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# Agent Swarm — Paralelización y coordinación de tareas
+# Paralelizador — Paralelización y coordinación de tareas
 # ------------------------------------------------------------
 agent_swarm:
   role: "Paralelización y coordinación de subtareas"
@@ -97,7 +97,7 @@ agent_swarm:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# SWE Agent — Implementación principal de código
+# Implementador — Implementación principal de código
 # ------------------------------------------------------------
 swe_agent:
   role: "Implementación principal de código C++/CMake"
@@ -119,9 +119,9 @@ swe_agent:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# OpenHands — Build, CI y Docker
+# Builder — Build, CI y Docker
 # ------------------------------------------------------------
-openhands:
+builder:
   role: "Build, CI, Docker e integración de repositorio"
   provider: openrouter
   model: openai/gpt-4o
@@ -141,7 +141,7 @@ openhands:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# Hermes Agent — Seguridad, criptografía y revisión adversarial
+# Seguridad — Seguridad, criptografía y revisión adversarial
 # ------------------------------------------------------------
 hermes_agent:
   role: "Seguridad, criptografía y revisión adversarial"
@@ -152,7 +152,7 @@ hermes_agent:
   capabilities: [keccak, EIP-712, secp256k1, adversarial, threat_modeling]
   rationale: >
     Gemini 2.5 Pro para profundidad de seguridad. Debe intentar ROMPER
-    el sistema, no solo leerlo. Doble verificación con Agent Prime.
+    el sistema, no solo leerlo. Doble verificación con Arquitecto.
   deliverables:
     - SECURITY_REVIEW.md
     - CRYPTO_TEST_VECTORS.md
@@ -162,7 +162,7 @@ hermes_agent:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# Poolside CLI — Rendimiento, benchmarks y profiling
+# Benchmark — Rendimiento, benchmarks y profiling
 # ------------------------------------------------------------
 poolside_cli:
   role: "Performance, benchmarks y profiling"
@@ -183,7 +183,7 @@ poolside_cli:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# OpenCode — Tests, refactors pequeños y mantenimiento
+# Tests — Tests, refactors pequeños y mantenimiento
 # ------------------------------------------------------------
 opencode:
   role: "Tests, refactoring y mantenimiento"
@@ -196,12 +196,12 @@ opencode:
     GPT-4o-mini es eficiente para escribir tests y refactors pequeños.
     Ideal para unit tests, integration tests y fuzzing.
   note: >
-    No cambia lógica financiera sin aprobación de Agent Prime y Hermes Agent.
+    No cambia lógica financiera sin aprobación de Arquitecto y Seguridad.
   verification: "OK - tested via OpenRouter API"
   status: VERIFIED
 
 # ------------------------------------------------------------
-# Mistral Vibe — Investigación técnica y alternativas
+# Investigador — Investigación técnica y alternativas
 # ------------------------------------------------------------
 mistral_vibe:
   role: "Investigación técnica y alternativas"
@@ -224,9 +224,9 @@ mistral_vibe:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# OpenClaw — Revisión de integraciones
+# Integración — Revisión de integraciones
 # ------------------------------------------------------------
-openclaw:
+integracion:
   role: "Revisión de integraciones y operación nocturna"
   provider: openrouter
   model: openai/gpt-4o
@@ -241,9 +241,9 @@ openclaw:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# KiloCode — Documentación operativa y runbooks
+# Docs — Documentación operativa y runbooks
 # ------------------------------------------------------------
-kilocode:
+docs:
   role: "Documentación operativa y runbooks"
   provider: openrouter
   model: openai/gpt-4o-mini
@@ -257,9 +257,9 @@ kilocode:
   status: VERIFIED
 
 # ------------------------------------------------------------
-# ClaudeCode — Crítica técnica independiente (Red Team)
+# Red Team — Crítica técnica independiente (Red Team)
 # ------------------------------------------------------------
-claudecode:
+redteam:
   role: "Crítica técnica independiente y revisión de código"
   provider: openrouter
   model: google/gemini-2.5-pro

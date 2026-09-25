@@ -13,17 +13,17 @@ OMNIRoute_URL = "http://localhost:20128/v1/chat/completions"
 
 # Agent -> LLM assignments
 AGENT_ASSIGNMENTS = {
-    "Agent Prime":        {"provider": "auggie",     "model": "aug/opus4.8"},
-    "Agent Swarm":        {"provider": "combo",      "model": "auto/best-reasoning"},
-    "SWE Agent":          {"provider": "auggie",     "model": "aug/gpt5.5"},
-    "OpenHands":          {"provider": "theoldllm",  "model": "tllm/claude_sonnet_4"},
-    "Hermes Agent":       {"provider": "auggie",     "model": "aug/opus4.8"},
-    "Poolside CLI":       {"provider": "poolside",   "model": "poolside/perf-3"},
-    "OpenCode":           {"provider": "combo",      "model": "auto/best-coding"},
-    "Mistral Vibe":       {"provider": "auggie",     "model": "aug/gemini-3.1-pro-preview"},
-    "OpenClaw":           {"provider": "theoldllm",  "model": "tllm/GPT_5"},
-    "KiloCode":           {"provider": "opencode",   "model": "oc/nemotron-3-ultra-free"},
-    "ClaudeCode":         {"provider": "auggie",     "model": "aug/sonnet4.8"},
+    "Arquitecto":        {"provider": "auggie",     "model": "aug/opus4.8"},
+    "Paralelizador":        {"provider": "combo",      "model": "auto/best-reasoning"},
+    "Implementador":          {"provider": "auggie",     "model": "aug/gpt5.5"},
+    "Builder":          {"provider": "theoldllm",  "model": "tllm/claude_sonnet_4"},
+    "Seguridad":       {"provider": "auggie",     "model": "aug/opus4.8"},
+    "Benchmark":       {"provider": "poolside",   "model": "poolside/perf-3"},
+    "Tests":           {"provider": "combo",      "model": "auto/best-coding"},
+    "Investigador":       {"provider": "auggie",     "model": "aug/gemini-3.1-pro-preview"},
+    "Integración":           {"provider": "theoldllm",  "model": "tllm/GPT_5"},
+    "Docs":           {"provider": "opencode",   "model": "oc/nemotron-3-ultra-free"},
+    "Red Team":         {"provider": "auggie",     "model": "aug/sonnet4.8"},
 }
 
 TEST_PROMPT = "Confirma que estas operativo respondiendo exactamente: OK - Modelo funcional"

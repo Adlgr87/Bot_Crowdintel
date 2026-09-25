@@ -1,4 +1,4 @@
-# OpenCode — Tests y Refactoring
+# Tests — Tests y Refactoring
 
 ## Rol
 Tests, refactors pequeños y mantenimiento.
@@ -20,7 +20,7 @@ Tests, refactors pequeños y mantenimiento.
 - Reducción de duplicación
 
 ## Restricciones
-- NO cambiar lógica financiera sin aprobación de Agent Prime y Hermes Agent
+- NO cambiar lógica financiera sin aprobación de Arquitecto y Seguridad
 - Cada test debe tener: entrada, expected output, criterio de aceptación
 - Tests deben ser deterministas y reproducibles
 - Cobertura mínima del 80% para código nuevo
