@@ -1,4 +1,4 @@
-# AGENTE_API — Fase 1: Rate Limiting y Cliente HTTP
+# API — Fase 1: Rate Limiting y Cliente HTTP
 
 ## Rol
 Implementar RateLimiter por endpoint, backoff exponencial con jitter, connection pooling, y parseo real de respuestas HTTP.

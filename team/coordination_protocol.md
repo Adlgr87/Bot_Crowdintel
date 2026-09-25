@@ -1,6 +1,6 @@
 # Protocolo de Coordinacion del Agent Team
 
-> **Bot_Crowdintel — DeepShe Harness Director**
+> **Bot_Crowdintel — Director Director**
 
 ---
 
@@ -12,7 +12,7 @@ Ningun agente se autocertifica. Cada entregable requiere validacion cruzada.
 
 ---
 
-## 2. Director: DeepShe Harness (Inamovible)
+## 2. Director: Director (Inamovible)
 
 **NO acepta** frases como:
 - "parece correcto"
@@ -35,7 +35,7 @@ Ningun agente se autocertifica. Cada entregable requiere validacion cruzada.
 ## 3. Estructura del Equipo
 
 ```
-DeepShe Harness (Director)
+Director (Director)
     |
     +-- Agent Prime       -- Arquitectura, contratos, ADR
     +-- Agent Swarm       -- Paralelizacion, grafo de dependencias
@@ -55,7 +55,7 @@ DeepShe Harness (Director)
 ## 4. Workflow por Fases
 
 ### Fase 0 — Baseline y congelacion
-**Agentes:** DeepShe Harness, Agent Prime, ClaudeCode, OpenHands
+**Agentes:** Director, Agent Prime, ClaudeCode, OpenHands
 **Salida:** BASELINE.md, RISK_REGISTER.md, ACCEPTANCE_GATES.md
 
 ### Fase 1 — Build reproducible
@@ -120,5 +120,5 @@ Requiere: implementador + Hermes Agent + supervisor.
 
 ### 5.5 Branches aisladas
 - Cada agente trabaja en su propia rama: `agents/<agent-name>/<task>`
-- DeepShe Harness controla merge a `main`
+- Director controla merge a `main`
 - ClaudeCode hace review de PRs antes de merge

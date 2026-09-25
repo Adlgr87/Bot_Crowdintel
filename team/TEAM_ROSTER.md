@@ -3,7 +3,7 @@
 ## Director
 | Agente | Provider | Modelo | Estado |
 |---|---|---|---|
-| **DeepShe Harness** | self | dsh-native | ✅ Active |
+| **Director** | self | dsh-native | ✅ Active |
 
 ## Equipo de Trabajo
 | # | Agente | Rol | Provider | Modelo | Fallback | Estado |

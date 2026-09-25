@@ -1,4 +1,4 @@
-# AGENTE_VERIFICADOR_FINAL — Verificación Extremadamente Rigurosa de Principio a Fin
+# Final Audit — Verificación Extremadamente Rigurosa de Principio a Fin
 
 > **Último agente del equipo. No implementa. Solo verifica y exige reparación.**
 
@@ -138,7 +138,7 @@ APPROVED FOR PAPER TRADING / APPROVED FOR PRODUCTION / BLOCKED — [justificaci�
 
 Cualquier fallo, por mínimo que sea, en cualquiera de los 12 niveles:
 1. Se reporta con evidencia concreta (test output, grep output, commit hash)
-2. Se notifica al Director (DeepShe Harness)
+2. Se notifica al Director (Director)
 3. Se dispara reparación inmediata
 4. Se re-verifica hasta que el nivel PASS
 

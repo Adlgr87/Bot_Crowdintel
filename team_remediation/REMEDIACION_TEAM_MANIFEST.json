@@ -4,8 +4,8 @@
   "repo": "https://github.com/Adlgr87/Bot_Crowdintel",
   "branch_target": "remediation/compliance",
   "workflow_source": "WORKFLOW_REMEDIACION_CUMPLIMIENTO.md",
-  "director": "DeepShe Harness",
-  "director_role": "Orquestador inamovible. Aprueba/rechaza todos los entregables. Ejecuta el AGENTE_VERIFICADOR_FINAL al final.",
+  "director": "Director",
+  "director_role": "Orquestador inamovible. Aprueba/rechaza todos los entregables. Ejecuta el Final Audit al final.",
   "phase": "Fase 0-7 + Verificación Final",
   "critical_constraints": [
     "Nunca modificar eip712_signer.hpp, polymarket_order.hpp (wire body) ni el esquema HMAC sin volver a ejecutar los vectores dorados (KAT).",
@@ -18,7 +18,7 @@
   "agents": [
     {
       "id": "agente_baseline",
-      "name": "AGENTE_BASELINE",
+      "name": "Baseline",
       "phase": "Fase 0",
       "role": "Línea base de CI, limpieza, higiene de secretos",
       "no_debe_toocar": "Lógica de trading",
@@ -33,7 +33,7 @@
     },
     {
       "id": "agente_api",
-      "name": "AGENTE_API",
+      "name": "API",
       "phase": "Fase 1",
       "role": "Cliente HTTP, rate limiter, backoff, pooling",
       "no_debe_toocar": "Cripto/firma",
@@ -49,7 +49,7 @@
     },
     {
       "id": "agente_riesgo",
-      "name": "AGENTE_RIESGO",
+      "name": "Risk",
       "phase": "Fase 2",
       "role": "Risk engine, kill switch, límites, balance checks",
       "no_debe_toocar": "Esquema de auth",
@@ -65,7 +65,7 @@
     },
     {
       "id": "agente_ordenes",
-      "name": "AGENTE_ORDENES",
+      "name": "Orders",
       "phase": "Fase 3",
       "role": "Order manager, position tracker, user-channel fills, dedup",
       "no_debe_toocar": "Fórmula de Kelly",
@@ -82,7 +82,7 @@
     },
     {
       "id": "agente_econ",
-      "name": "AGENTE_ECON",
+      "name": "Economics",
       "phase": "Fase 4",
       "role": "Modelo de comisiones dinámicas, gas, slippage, net-EV",
       "no_debe_toocar": "Estructura de orden V2",
@@ -97,7 +97,7 @@
     },
     {
       "id": "agente_compliance",
-      "name": "AGENTE_COMPLIANCE",
+      "name": "Compliance",
       "phase": "Fase 5",
       "role": "Market metadata, estado de mercado, jurisdicción, tick size dinámico",
       "no_debe_toocar": "Hot path loop",
@@ -112,7 +112,7 @@
     },
     {
       "id": "agente_obs",
-      "name": "AGENTE_OBS",
+      "name": "Observability",
       "phase": "Fase 6",
       "role": "Auditoría, métricas, alertas",
       "no_debe_toocar": "Lógica de órdenes",
@@ -127,7 +127,7 @@
     },
     {
       "id": "agente_qa",
-      "name": "AGENTE_QA",
+      "name": "QA",
       "phase": "Fase 7",
       "role": "Tests, regresión de latencia, escanado de secretos, docs",
       "no_debe_toocar": "— (revisa todo)",
@@ -143,7 +143,7 @@
     },
     {
       "id": "agente_verificador_final",
-      "name": "AGENTE_VERIFICADOR_FINAL",
+      "name": "Final Audit",
       "phase": "Post-Fase 7",
       "role": "Verificación extremadamente rigurosa de principio a fin, end-to-end",
       "no_debe_toocar": "Implementación (solo verifica y reporta)",
@@ -164,7 +164,7 @@
         "Documentación: README sin cifras fabricadas, STATUS.md alineado con código, notas de comisión dinámica",
         "Integridad: ninguna modificación a eip712_signer.hpp rompe los vectores KAT"
       ],
-      "protocolo": "Verifica cada criterio con evidencia (test output, logs, commit hash). Cualquier fallo → AGENTE_DIRECTOR dispara reparación. Itera hasta 100% PASS."
+      "protocolo": "Verifica cada criterio con evidencia (test output, logs, commit hash). Cualquier fallo → Director dispara reparación. Itera hasta 100% PASS."
     }
   ],
   "execution_order": [
@@ -173,6 +173,6 @@
     "Fase 3 (agente_ordenes) — depende de Fase 1",
     "Fase 6 (agente_obs) — depende de Fases 2-3",
     "Fase 7 (agente_qa) — depende de Fases 1-6",
-    "AGENTE_VERIFICADOR_FINAL — post-Fase 7"
+    "Final Audit — post-Fase 7"
   ]
 }

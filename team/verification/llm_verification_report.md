@@ -3,7 +3,7 @@
 **Date:** 2025-09-17  
 **Project:** Bot_Crowdintel  
 **Repo:** https://github.com/Adlgr87/Bot_Crowdintel  
-**Director:** DeepShe Harness v0.1.5-rc.1
+**Director:** Director v0.1.5-rc.1
 
 ---
 
@@ -13,7 +13,7 @@
 
 | Componente | Versión | Estado |
 |---|---|---|
-| DeepShe Harness | 0.1.5-rc.1 | ✅ Activo (Director) |
+| Director | 0.1.5-rc.1 | ✅ Activo (Director) |
 | Omniroute API | v3.8.49 | ✅ Corriendo en :20128 (sin credenciales) |
 | Ollama | local | ✅ Corriendo en :11434 |
 | OpenRouter | direct API | ✅ Funcional con API key |
@@ -75,7 +75,7 @@
 
 | Agente | Provider | Modelo | Fallback | Estado |
 |---|---|---|---|---|
-| **DeepShe Harness** | self | dsh-native | — | ✅ Director |
+| **Director** | self | dsh-native | — | ✅ Director |
 | **Agent Prime** | openrouter | google/gemini-2.5-pro | ollama/qwen2.5:1.5b | ✅ VERIFIED |
 | **Agent Swarm** | openrouter | google/gemini-2.5-flash | ollama/qwen2.5:1.5b | ✅ VERIFIED |
 | **SWE Agent** | openrouter | deepseek/deepseek-chat | ollama/qwen2.5:1.5b | ✅ VERIFIED |

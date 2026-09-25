@@ -1,7 +1,7 @@
 # ============================================================
 # Agent Team LLM Assignments (VERIFIED)
 # Bot_Crowdintel — Ultra-Low Latency Polymarket Trading Bot
-# Director: DeepShe Harness (inamovible)
+# Director: Director (inamovible)
 # Fecha de verificación: 2025 (reconocimiento completado)
 # ============================================================
 
@@ -47,7 +47,7 @@ deepseek_harness:
   provider: self
   model: dsh-native
   capabilities: [orquestacion, asignacion, control_de_dependencias, decision]
-  notes: "DeepShe Harness es el director — utiliza el agente que ejecuta este prompt"
+  notes: "Director es el director — utiliza el agente que ejecuta este prompt"
   status: VERIFIED
 
 # ------------------------------------------------------------

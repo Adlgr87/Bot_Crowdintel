@@ -1,6 +1,6 @@
-# Protocolo de Coordinación — Team Remedión Cumplimiento
+# Protocolo de Coordinación — Remediación Cumplimiento
 
-> **Bot_Crowdintel — DeepShe Harness Director**
+> **Bot_Crowdintel**
 > Workflow origen: `WORKFLOW_REMEDIACION_CUMPLIMIENTO.md`
 > Brama objetivo: `remediation/compliance`
 
@@ -8,20 +8,20 @@
 
 ## 1. Regla de Oro
 
-> **Un agente implementa, otro prueba, el AGENTE_VERIFICADOR_FINAL revisa de principio a fin, y el Director (DeepShe Harness) aprueba o exige reparación.**
+> **Un implementador escribe el código, otro prueba, la auditoría final verifica de principio a fin, y el Director aprueba o exige reparación.**
 
-Ningún agente se autocertifica. Cada entregable requiere validación cruzada y evidencia reproducible.
+Ningún entregable se autocertifica. Cada uno requiere validación cruzada y evidencia reproducible.
 
 ---
 
-## 2. Director: DeepShe Harness (Inamovible)
+## 2. Director (Inamovible)
 
 El Director **NO acepta** frases como:
 - "parece correcto"
 - "compila en mi entorno"
 - "mejoró el promedio"
 - "el benchmark dice X ciclos"
-- "el agente anterior lo revisó"
+- "el revisor anterior lo revisó"
 
 Exige siempre:
 - Comando ejecutado
@@ -36,17 +36,17 @@ Exige siempre:
 ## 3. Orden de Ejecución y Dependencias
 
 ```
-Fase 0 (AGENTE_BASELINE)
-  ├─> Fase 1 (AGENTE_API) ──┐
-  ├─> Fase 2 (AGENTE_RIESGO) ├┼> Fase 3 (AGENTE_ORDENES) ─┐
-  ├─> Fase 4 (AGENTE_ECON) │ ─┘                           ├─> Fase 6 (AGENTE_OBS) ─> Fase 7 (AGENTE_QA)
-  └─> Fase 5 (AGENTE_COMPLIANCE) ──────────────────────────┘
-                                                    │
-                                                    v
-                                        AGENTE_VERIFICADOR_FINAL
-                                                    │
-                                                    ▼
-                                          (Itera hasta 100% PASS)
+Fase 0 (Baseline)
+   ├─> Fase 1 (API) ──┐
+   ├─> Fase 2 (Risk)  ├┼> Fase 3 (Orders) ─┐
+   ├─> Fase 4 (Econ)  │ ─┘                  ├─> Fase 6 (Observability) ─> Fase 7 (QA)
+   └─> Fase 5 (Compliance) ─────────────────┘
+                            │
+                            v
+                      Auditoría Final
+                            │
+                            ▼
+                   (Itera hasta 100% PASS)
 ```
 
 ### Paralelismo permitido
@@ -55,7 +55,7 @@ Fase 0 (AGENTE_BASELINE)
 - **Fase 3** → requiere Fase 1 completa (necesita order_id real)
 - **Fase 6** → requiere Fases 2 y 3 (métricas de riesgo y fills)
 - **Fase 7** → requiere Fases 1-6 todas completas
-- **AGENTE_VERIFICADOR_FINAL** → post-Fase 7, iterativo hasta 100% PASS
+- **Auditoría Final** → post-Fase 7, iterativo hasta 100% PASS
 
 ---
 
@@ -85,12 +85,12 @@ Cada claim debe apuntar a: test, log, benchmark, commit, dataset, configuración
 
 ### 4.4 Dos revisores para cambios críticos
 Áreas críticas: criptografía, riesgo, cliente de órdenes, reconciliación, secretos, transporte, apagado de emergencia.
-Requiere: implementador + AGENTE_VERIFICADOR_FINAL + Director.
+Requiere: implementador + Auditoría Final + Director.
 
 ### 4.5 Branches aisladas
-- Cada agente trabaja en su propia rama: `remediation/<fase>/<agente>`
+- Cada fase trabaja en su propia rama: `remediation/<fase>`
 - El Director controla merge a `remediation/compliance`
-- AGENTE_VERIFICADOR_FINAL hace review antes de cada merge
+- La Auditoría Final hace review antes de cada merge
 
 ---
 
@@ -117,13 +117,13 @@ Requiere: implementador + AGENTE_VERIFICADOR_FINAL + Director.
 | 5 | Market metadata, compliance guard, tick size | Unit test + ctest |
 | 6 | Telemetry, alertas, métricas | Unit test + ctest |
 | 7 | ctest verde, latencia +10%, secretos limpios, docs | ctest + benchmark + grep + review |
-| Final | Todo end-to-end | VERIFICACION_FINAL_REPORT.md |
+| Final | Todo end-to-end | `AUDIT_FINAL_REPORT.md` |
 
 ---
 
-## 7. Protocolo de Verificación del AGENTE_VERIFICADOR_FINAL
+## 7. Protocolo de Auditoría Final
 
-El AGENTE_VERIFICADOR_FINAL es el último agente del equipo y actúa como **quality gate absoluto**. Su protocolo:
+La auditoría final es el quality gate absoluto. Su protocolo:
 
 1. **Compilación desde cero**: Limpia `build/`, recompila con `cmake --build`, verifica cero warnings.
 2. **ctest completo**: Ejecuta `ctest --output-on-failure`, requiere 100% PASS.
@@ -134,6 +134,8 @@ El AGENTE_VERIFICADOR_FINAL es el último agente del equipo y actúa como **qual
 7. **Risk engine audit**: Verifica que `kill_switch` imposibilite cualquier firma.
 8. **Order lifecycle audit**: Verifica que `client_order_id` se rastree end-to-end.
 9. **Compliance audit**: Verifica tick size dinámico y market state.
-10. **Documentation audit**: Verifica README sin cifras fabricadas, STATUS.md alineado.
+10. **Documentation audit**: Verifica README sin cifras fabricadas, docs alineadas.
+11. **Observability audit**: Verifica audit log append-only, alertas configurables.
+12. **Integridad audit**: Verifica eip712_signer.hpp no modificado.
 
 **Resultado**: Cualquier fallo → reporta con evidencia → Director dispara reparación → itera.

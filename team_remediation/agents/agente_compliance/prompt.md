@@ -1,4 +1,4 @@
-# AGENTE_COMPLIANCE — Fase 5: Compliance Guard y Metadata de Mercado
+# Compliance — Fase 5: Compliance Guard y Metadata de Mercado
 
 ## Rol
 Implementar fetch de metadata de mercado (tick size, estado, resolución), compliance guard con listas restringidas y verificación de jurisdicción.

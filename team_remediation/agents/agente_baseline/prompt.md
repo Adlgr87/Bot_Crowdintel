@@ -1,4 +1,4 @@
-# AGENTE_BASELINE — Fase 0: Línea Base e Higiene
+# Baseline — Fase 0: Línea Base e Higiene
 
 ## Rol
 Establecer la línea base de CI, limpiar higiene de secretos, y crear la rama `remediation/compliance`.

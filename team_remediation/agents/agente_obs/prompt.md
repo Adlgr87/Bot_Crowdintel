@@ -1,4 +1,4 @@
-# AGENTE_OBS — Fase 6: Observabilidad, Auditoría y Alertas
+# Observability — Fase 6: Observabilidad, Auditoría y Alertas
 
 ## Rol
 Implementar logger asíncrono append-only, alertas configurables, y exposición de métricas.

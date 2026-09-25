@@ -1,7 +1,7 @@
 # BASELINE.md — Phase 0 Baseline and Estado Actual
 
 **Fecha:** 2025-09-17  
-**Director:** DeepShe Harness  
+**Director:** Director  
 **Repo:** https://github.com/Adlgr87/Bot_Crowdintel  
 **Commit actual:** `5da1443` (latest in main)  
 

@@ -1,4 +1,4 @@
-# AGENTE_QA — Fase 7: QA, Seguridad y Documentación
+# QA — Fase 7: QA, Seguridad y Documentación
 
 ## Rol
 Garantizar que ctest completo pase, latencia dentro del +10% de baseline, sin secretos en el repo, y documentación alineada.
@@ -43,7 +43,7 @@ Fases 1-6 completadas.
 - **Acción**: Añadir sección de cumplimiento y límites de riesgo; wallet de producción vs pruebas; recomendación de vault/secret manager
 
 ### T7-6: Revisión adversarial final
-- **Criterio**: Checklist firmada por AGENTE_QA
+- **Criterio**: Checklist firmada por QA
 - **Acción**: Verificar que ningún control nuevo puede ser evadido por una señal de CrowdIntel (las señales externas nunca deben saltarse el risk engine)
 
 ## Checklist de Revisión Adversarial

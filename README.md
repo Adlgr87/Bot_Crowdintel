@@ -154,7 +154,7 @@ for integration analysis.
 ```bash
 cd core/build
 ctest --output-on-failure
-# 6/6 tests passed
+# 10/10 tests passed
 ```
 
 **Phase 1: Rate Limiting & HTTP Client (T1-1–T1-5)**
@@ -182,6 +182,105 @@ ctest --output-on-failure
   `order_id`, and `error_message` extraction.
 - **HMAC-SHA256** authentication preserved exactly — prehash is
   `timestamp + method + path + body`, Base64-encoded. No secrets are logged.
+
+---
+
+## 🛡️ Compliance & Risk Framework
+
+The bot implements a multi-layer compliance framework (Phases 0–7) that runs
+**before** cryptographic signing in the hot path. All controls are O(1) and
+branch-predicted.
+
+### Phase 2: Risk Engine & Kill Switch
+
+| Component | File | Status |
+|---|---|---|
+| RiskEngine | `core/include/risk_engine.hpp` | ✅ Atomic kill switch, pre_trade_check |
+| RiskConfig | `core/src/market_config.hpp` | ✅ All limits env-driven with conservative defaults |
+| BalanceChecker | `core/src/balance_checker.hpp` | ✅ Background refresh thread |
+
+**Risk limits** (all configurable via env vars):
+
+| Parameter | Default | Env Var |
+|-----------|---------|---------|
+| max_daily_loss_usd | 500.0 | `RISK_MAX_DAILY_LOSS_USD` |
+| max_order_usd | 500.0 | `RISK_MAX_ORDER_USD` |
+| max_exposure_per_market | 5000.0 | `RISK_MAX_EXPOSURE_PER_MARKET` |
+| min_usdc_balance | 100.0 | `RISK_MIN_USDC_BALANCE` |
+| max_orders_per_min | 10 | `RISK_MAX_ORDERS_PER_MIN` |
+
+The kill switch is `std::atomic<bool>` and is checked **before** signing in the
+hot path. External signals (webhooks) never touch the flag directly.
+
+### Phase 3: Order Manager & Position Tracker
+
+| Component | File | Status |
+|---|---|---|
+| OrderManager | `core/include/order_manager.hpp` | ✅ client_order_id tracking, anti-retry |
+| PositionTracker | `core/include/position_tracker.hpp` | ✅ Fill reconciliation, PnL tracking |
+| PresignedOrderPool | `core/src/presigned_pool.hpp` | ✅ Price deviation invalidation |
+
+- **client_order_id**: Generated once, tracked end-to-end through submission
+- **Anti-retry**: On 429/5xx/nullopt, queries exchange before resubmitting
+- **Self-trade prevention**: `has_open_order()` blocks duplicate market/side orders
+
+### Phase 4: Fee Model
+
+| Component | File | Status |
+|---|---|---|
+| FeeModel | `core/include/fee_model.hpp` | ✅ Dynamic fees, net-EV filter |
+
+- Dynamic fee formula: `fee = C × 0.25 × (p·(1−p))²`
+  - `C` = base commission rate (configurable via `FEE_COMMISSION_RATE`)
+  - `p` = market probability (max fee at p=0.5, zero at p=0 or p=1)
+- **net_ev filter**: `edge - fees - slippage - gas_cost > min_net_ev`
+  - Positive edge but negative net_ev → `NOT_PROFITABLE`
+
+### Phase 5: Compliance Guard & Market Metadata
+
+| Component | File | Status |
+|---|---|---|
+| ComplianceGuard | `core/include/compliance_guard.hpp` | ✅ Fail-closed, env-driven |
+| MarketMetadataCache | `core/include/market_metadata.hpp` | ✅ Tick size, market state |
+
+- **Token blocklist**: Restricted tokens rejected (O(1) hash lookup)
+- **Jurisdiction check**: Fail-closed if not in allowed list
+- **Tick size**: Dynamic snapping applied before signing
+- **Market state**: Closed/resolved markets blocked (`MARKET_NOT_TRADABLE`)
+
+### Phase 6: Telemetry & Observability
+
+| Component | File | Status |
+|---|---|---|
+| Telemetry | `core/src/telemetry.hpp` | ✅ Async JSON Lines audit log |
+| SPSC_RingBuffer | `core/include/spsc_ring_buffer.hpp` | ✅ Lock-free, 8192 capacity |
+
+- **Audit log**: Append-only JSON Lines (`std::ios::app`)
+- **Hot path**: No I/O — events pushed to SPSC ring buffer, async writer thread
+- **Alerts** (6 configurable env vars): daily loss, 429 streak, latency spike,
+  position divergence, feed-dead detection, webhook URL
+- **No secrets in logs**: `log_risk_block` only logs `order_size` + `reason`
+
+### Test Suite
+
+```bash
+cd core/build
+ctest --output-on-failure
+# 10/10 tests passed
+```
+
+| Test | Tests | Assertion Cases |
+|------|-------|-----------------|
+| test_compliance_guard | — | — |
+| test_fee_model | — | — |
+| test_order_manager | 18 | 2062 |
+| test_position_tracker | 14 | 38 |
+| test_presigned_pool | 10 | 28 |
+| test_rate_limiter | — | — |
+| test_risk_engine | — | — |
+| test_telemetry | 16 | 89 |
+| keccak_known_answer | — | — |
+| latency_benchmark | — | — |
 
 ### Build Dependencies
 

@@ -1,4 +1,4 @@
-# AGENTE_ORDENES — Fase 3: Order Manager, Reconciliación y Positions
+# Orders — Fase 3: Order Manager, Reconciliación y Positions
 
 ## Rol
 Implementar order manager con client_order_id tracking, position tracker, user-channel fills feed, anti-retry, y self-trade detection.

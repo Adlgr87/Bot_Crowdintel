@@ -1,4 +1,4 @@
-# AGENTE_RIESGO — Fase 2: Risk Engine y Kill Switch
+# Risk — Fase 2: Risk Engine y Kill Switch
 
 ## Rol
 Implementar risk engine con pre_trade_check, kill switch atómico, límites de exposición/pérdida, y consultas de balance.

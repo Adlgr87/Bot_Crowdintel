@@ -2,13 +2,13 @@
   "project": "Bot_Crowdintel",
   "description": "Ultra-low latency Polymarket trading bot with CLOB V2 integration",
   "github_repo": "https://github.com/Adlgr87/Bot_Crowdintel",
-  "director": "DeepShe Harness",
+  "director": "Director",
   "phase": "Phase 0 - Baseline y congelación",
   "verification_date": "2025-09-17",
   "llm_backend": "OpenRouter (direct API) + Ollama (local fallback)",
   "team": {
     "deepseek_harness": {
-      "name": "DeepShe Harness",
+      "name": "Director",
       "role": "Director técnico y orquestador inamovible",
       "provider": "self",
       "model": "dsh-native",

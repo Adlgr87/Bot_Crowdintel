@@ -18,7 +18,7 @@ Elevar el bot de "técnicamente correcto pero desprotegido" a "operable con capi
 
 ---
 
-## FASE 0 — Línea base e higiene (AGENTE_BASELINE)
+## FASE 0 — Línea base e higiene (Baseline)
 
 **Entregable**: rama `remediation/compliance` con CI verde.
 
@@ -42,7 +42,7 @@ remediation/00-baseline
 
 ---
 
-## FASE 1 — Rate limiting y cliente HTTP (AGENTE_API)
+## FASE 1 — Rate limiting y cliente HTTP (API)
 
 **Dependencia: Fase 0. Prioridad máxima.**
 
@@ -97,7 +97,7 @@ struct HttpResponse {
 
 ---
 
-## FASE 2 — Risk engine y kill switch (AGENTE_RIESGO)
+## FASE 2 — Risk engine y kill switch (Risk)
 
 **Dependencia: Fase 0.**
 
@@ -145,7 +145,7 @@ enum class TickResult {
 
 ---
 
-## FASE 3 — Order manager, reconciliación y positions (AGENTE_ORDENES)
+## FASE 3 — Order manager, reconciliación y positions (Orders)
 
 **Dependencia: Fase 1.**
 
@@ -165,7 +165,7 @@ remediation/30-order-manager
 
 ---
 
-## FASE 4 — Modelo de comisiones, gas y slippage (AGENTE_ECON)
+## FASE 4 — Modelo de comisiones, gas y slippage (Economics)
 
 **Dependencia: Fase 0.**
 
@@ -192,7 +192,7 @@ Donde:
 
 ---
 
-## FASE 5 — Compliance guard y metadata de mercado (AGENTE_COMPLIANCE)
+## FASE 5 — Compliance guard y metadata de mercado (Compliance)
 
 **Dependencia: Fase 0.**
 
@@ -210,7 +210,7 @@ remediation/50-compliance-guard
 
 ---
 
-## FASE 6 — Observabilidad, auditoría y alertas (AGENTE_OBS)
+## FASE 6 — Observabilidad, auditoría y alertas (Observability)
 
 **Dependencia: Fases 2-3.**
 
@@ -227,7 +227,7 @@ remediation/60-telemetry
 
 ---
 
-## FASE 7 — QA, seguridad y docs (AGENTE_QA)
+## FASE 7 — QA, seguridad y docs (QA)
 
 **Dependencia: Fases 1-6.**
 
@@ -238,7 +238,7 @@ remediation/60-telemetry
 | T7-3 | Escaneo de secretos | Sin secretos en commits; git diff limpio |
 | T7-4 | Actualizar docs/STATUS.md | Open items resueltos marcados |
 | T7-5 | Actualizar README | Sección cumplimiento + límites de riesgo |
-| T7-6 | Revisión adversarial final | Checklist firmada por AGENTE_QA |
+| T7-6 | Revisión adversarial final | Checklist firmada por QA |
 
 ### Branch
 ```
@@ -247,9 +247,9 @@ remediation/70-qa-docs
 
 ---
 
-## 🔒 AGENTE_VERIFICADOR_FINAL (Post-Fase 7)
+## 🔒 Auditoría Final (Post-Fase 7)
 
-**Rol**: Agente extremadamente riguroso. Verifica de principio a fin.
+**Rol**: Verificación extremadamente rigurosa de principio a fin.
 
 **Protocolo**:
 1. Compilación desde cero → 0 warnings
@@ -262,10 +262,12 @@ remediation/70-qa-docs
 8. Order lifecycle audit → client_order_id rastreado end-to-end
 9. Compliance audit → tick size dinámico, mercado bloqueado
 10. Documentation audit → README sin cifras fabricadas
+11. Observabilidad audit → audit log append-only, alertas configurables
+12. Integridad audit → eip712_signer.hpp no modificado
 
-**Output**: `team_remediation/verification/VERIFICACION_FINAL_REPORT.md`
+**Output**: `team_remediation/verification/AUDIT_FINAL_REPORT.md`
 
 **Regla**: Cualquier fallo → reporta con evidencia → reparación iterativa → re-verifica.
 ```
-STATUS: PASS (requiere 100% de ítems)
+STATUS: PASS (12/12 ítems)
 ```

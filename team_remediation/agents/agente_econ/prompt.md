@@ -1,4 +1,4 @@
-# AGENTE_ECON — Fase 4: Modelo de Comisiones, Gas y Slippage
+# Economics — Fase 4: Modelo de Comisiones, Gas y Slippage
 
 ## Rol
 Implementar FeeModel con comisión maker/taker base + fórmula dinámica configurable, estimación de gas y slippage, y reemplazar el filtro de edge por net-EV.
