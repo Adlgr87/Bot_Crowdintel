@@ -1,14 +1,14 @@
 name: CI/CD & Evolutive Optimization
-
+ 
 # Runs on every push and daily at midnight
 on:
   push:
-    branches: [ main ]
+    branches: [ main, remediation/compliance ]
   schedule:
     - cron: '0 0 * * *'
 
 jobs:
-  # --- Job 1: Deterministic Build & Smoke Test ---
+  # --- Job 1: Deterministic Build, Crypto Tests, Latency Gate ---
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -36,43 +36,35 @@ jobs:
           -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" \
           -DSECP256K1_LIBRARY=/tmp/secp256k1/.libs/libsecp256k1.a \
           -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
+          -DBUILD_DEMO=OFF \
           ..
         make -j$(nproc)
+
+    - name: Run ctest (all tests)
+      run: |
+        cd core/build
+        ctest --output-on-failure
 
     - name: Run Crypto Tests (Keccak-256 known-answer vectors)
       run: |
         cd core/build
         ./bin/test_signer
 
-    - name: Run Latency Benchmark
+    - name: Run Latency Benchmark & Enforce Gate
       run: |
         cd core/build
-        ./bin/latency_bench
+        OUTPUT=$(./bin/latency_bench)
+        echo "$OUTPUT"
+        P50=$(echo "$OUTPUT" | grep "P50:" | head -1 | sed 's/.*P50:.*\t//; s/ us.*//')
+        P99=$(echo "$OUTPUT" | grep "P99:" | head -1 | sed 's/.*P99:.*\t//; s/ us.*//')
+        echo "P50: $P50 us, P99: $P99 us"
+        if (( $(echo "$P50 >= 100" | bc -l) )); then
+          echo "FAIL: P50 latency ${P50}us exceeds 100us threshold"
+          exit 1
+        fi
+        if (( $(echo "$P99 >= 200" | bc -l) )); then
+          echo "FAIL: P99 latency ${P99}us exceeds 200us threshold"
+          exit 1
+        fi
+        echo "OK: Latency gates passed (P50=${P50}us < 100us, P99=${P99}us < 200us)"
 
-  # --- Job 2: Evolutive Optimization with MutaLambda ---
-  mutate-and-optimize:
-    needs: build-and-test # Only run if tests pass
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Setup Python & Dependencies
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-      run: |
-        pip install numpy scipy click rich pyyaml pydantic msgpack requests pycryptodome
-
-    - name: Checkout MutaLambda Framework
-      uses: actions/checkout@v4
-      with:
-        repository: Adlgr87/MutaLambda
-        path: MutaLambda
-
-    - name: Execute MutaLambda Evolution on Hot Path Functions
-      run: |
-        echo "🧬 Triggering MutaLambda evolutionary cycle..."
-        export MUTALAMBDA_PATH="$PWD/MutaLambda"
-        export PYTHONPATH="$PWD/MutaLambda:$PYTHONPATH"
-        python infra/mutalambda/adapter/mutalambda_adapter.py
