@@ -473,7 +473,7 @@ private:
      * Build order payload using fixed buffer — ZERO ALLOCATION.
      * Uses std::to_chars for integer-to-string conversion (no std::to_string).
      *
-     * Output format: {"p":"<price>","s":<size>,"side":<0|1>,"n":<nonce>,"salt":<salt>,"mker":"<hex_maker>"}
+     * Output format: {"p":"<price>","s":<size>,"side":<0|1>,"n":<nonce>,"salt":<salt>,"mker":"<hex_maker>","expiration":"<expiry>","t":<order_type>}
      */
     static size_t build_order_payload_fixed(const OrderParams& params, char* buf) {
         size_t offset = 0;
@@ -500,7 +500,7 @@ private:
             buf[offset++] = HEX[val & 0xF];
         };
 
-        // Build: {"p":"<price>","s":<size>,"side":<side>,"n":<nonce>,"salt":<salt>,"mker":"<hex>"}
+        // Build: {"p":"<price>","s":<size>,"side":<side>,"n":<nonce>,"salt":<salt>,"mker":"<hex>","exp":"<expiry>","t":<type>}
         append_str("{\"p\":\"", 5);
         append_uint(params.price);
         append_str("\",\"s\":", 5);
@@ -513,7 +513,22 @@ private:
         append_uint(params.salt);
         append_str(",\"mker\":\"", 9);
         for (int i = 0; i < 20; i++) append_hex(params.maker[i]);
-        append_str("\"}", 2);
+        // FIX C-05: Added expiration + order_type fields to payload.
+        // "exp":"0" means no expiration (GTC). For GTD, use epoch seconds as string.
+        // "t":0 = GTC (Good-Til-Cancelled). "t":1 = GTD (Good-Til-Date).
+        //
+        // CONSTRAINT: OrderParams struct in eip712_signer.hpp does NOT include
+        // expiration/order_type fields (file is marked NEVER MODIFY). These fields
+        // are added to the payload JSON for the exchange API, but are NOT part of
+        // the EIP-712 signed data. This means:
+        // - The exchange may not verify expiration against the signature
+        // - GTD orders must use a separate signing path (not currently implemented)
+        // - For production: expiration should be added to OrderParams (requires
+        //   signer modification + re-verification of KAT vectors)
+        //
+        // For now: GTC orders (exp="0") are safe since they don't require
+        // expiration validation.
+        append_str("\",\"exp\":\"0\",\"t\":0}", 14);
 
         buf[offset] = '\0';
         return offset;
