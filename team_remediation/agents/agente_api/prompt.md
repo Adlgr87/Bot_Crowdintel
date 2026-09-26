@@ -46,7 +46,7 @@ Fase 0 completada (baseline registrada).
 - **Archivo**: `core/src/lightweight_client.hpp`
 - **Criterio**: Una sola conexión TLS reutilizada; benchmark sin overhead de handshake
 - **Acción**:
-  - Reemplazar `curl_easy_init()/cleanup()` por llamada con `CURLOPT_CONNECTTIMEOUT`
+  - Inicializar el handle `CURL*` persistente una sola vez en el constructor (`curl_easy_init()`) y liberarlo en el destructor; aplicar `CURLOPT_CONNECTTIMEOUT` junto con el resto de opciones del handle
   - Usar `CURL* easy` persistente como miembro de la clase
   - `CURLOPT_FRESH_CONNECT = 0`, `CURLOPT_FORBID_REUSE = 0`
   - `Connection: keep-alive` (default de libcurl)
