@@ -104,8 +104,14 @@ Key benefits:
 | Metric | Value (μs) | Value (cycles @ 2.7GHz) |
 | :--- | :--- | :--- |
 | Min  | 44    | ~119K |
-| P50  | 47    | ~127K |
-| P99  | 52    | ~140K |
+| P50  | 45.3  | ~121K |
+| P99  | 94.5  | ~254K |
+
+> **Note**: The P99 latency (94.5μs) is significantly higher than P50 due to
+> occasional cache misses and branch mispredictions under load. The "hot path
+> core logic only" benchmark measures signing + book evaluation, excluding
+> network I/O. See `HOT_PATH_AUDIT_REPORT.md` for the full audit and `docs/PERF_METRICS.md`
+> for detailed analysis.
 
 > See [`docs/OPTIMIZATION_LINEAGE.md`](docs/OPTIMIZATION_LINEAGE.md) for full history.
 > See [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md) for complete performance analysis.

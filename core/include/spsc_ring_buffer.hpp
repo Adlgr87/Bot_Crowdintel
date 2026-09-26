@@ -50,7 +50,7 @@ public:
     SPSC_RingBuffer(const SPSC_RingBuffer&) = delete;
     SPSC_RingBuffer& operator=(const SPSC_RingBuffer&) = delete;
 
-    // Producer: Push an item into the queue
+    // Producer: Push an item into the queue (copy)
     bool try_push(const T& item) {
         const size_t current_head = head_.load(std::memory_order_relaxed);
         const size_t next_head = (current_head + 1) & mask_;
@@ -60,6 +60,20 @@ public:
         }
 
         new (&buffer_[current_head]) T(item);  // Placement new, no allocation
+        head_.store(next_head, std::memory_order_release);
+        return true;
+    }
+
+    // Producer: Push an item into the queue (move — avoids copy for types with heap data)
+    bool try_push(T&& item) {
+        const size_t current_head = head_.load(std::memory_order_relaxed);
+        const size_t next_head = (current_head + 1) & mask_;
+
+        if (next_head == tail_.load(std::memory_order_acquire)) {
+            return false; // Queue Full
+        }
+
+        new (&buffer_[current_head]) T(std::move(item));  // Move, no copy
         head_.store(next_head, std::memory_order_release);
         return true;
     }

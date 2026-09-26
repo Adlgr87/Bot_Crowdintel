@@ -14,6 +14,12 @@
 /**
  * BenchExecutionEngine: A variant of ExecutionEngine that uses MockCLOBClient
  * to avoid network I/O during latency benchmarking.
+ *
+ * ⚠️ WARNING: This file uses HARDCODED DUMMY KEYS (0xAA) for benchmarking purposes ONLY.
+ * These keys are NOT real and MUST NEVER be used with real funds or on a live exchange.
+ * The salt 0xCAFEBABE is also a benchmark-only test value, not cryptographically random.
+ * This file is excluded from the production binary (crowdintel_bot) and only compiled
+ * when BUILD_BENCH is enabled. See CMakeLists.txt.
  */
 class BenchExecutionEngine {
 public:
