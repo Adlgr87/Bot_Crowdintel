@@ -1,270 +1,440 @@
 # 🔥 Hot Path Audit Report — Detailed Findings
 
 > **Author**: AGENTE_AUDITOR (independent verification)  
-> **Date**: 2025-09-25  
+> **Date**: 2025-01-23  
 > **Repo**: `Adlgr87/Bot_Crowdintel` (rama `remediation/compliance`)  
-> **Commit**: `e48e68cd22e6e8f65a95633bfd3d1f3a61a2bc99`
+> **Scope**: Hot path determinism, zero-allocation claims, build integrity, cryptographic correctness, documentation accuracy.  
+> **Verdict**: **CRITICAL FAIL — NOT APPROVED FOR PRODUCTION**
 
 ---
 
 ## Summary
 
 | Category | Count | Status |
-|---------|-------|--------|
-| ✅ Resolved (from remediation claims) | 3 | Claims string_view + async submit |
-| ❌ NOT Actually Fixed | 8 | Still present in code |
-| 📝 Documented Constraint | 1 | eip712_signer.hpp std::vector alloc |
-| ⚠️ Partially Fixed | 3 | Some allocations moved, others remain |
+|---|---|---|
+| ✅ Resolved (from prior audit) | 3 | SPSC async submit, O(1) rate window (current bucket), EIP-712 Keccak-256 KAT |
+| ❌ NOT Actually Fixed | 12 | Still present in current code |
+| 📝 Documented Constraint | 1 | `eip712_signer.hpp` `std::vector` alloc (NEVER MODIFY) |
+| ⚠️ Partially Fixed | 3 | Some allocations moved, but hot path still allocates |
+| 🆕 Newly Discovered Critical | 5 | Build-breaking, deadlock, domain separator, index bug, payload truncation |
 
 ---
 
-## 🔴 NOT Fixed — Hot Path Allocations Before Signing
+## 🔴 CRITICAL — Build Integrity
 
-### Issue 1: `std::string(market_slug)` at line 294
-**File**: `core/include/execution_engine.hpp`  
-**Line 294**: `std::string client_order_id = order_mgr_.register_order(params, params.nonce, std::string(market_slug));`
+### Issue 1 (New): Missing `transparent_string_hash.hpp`
+**File**: `core/include/order_manager.hpp:17`
+**Code**: `#include "transparent_string_hash.hpp"`
 
-**Problem**: Although `market_slug` at line 178 is a `std::string_view`, it is converted to `std::string` when passed to `register_order()`. The `market_slug` parameter of `register_order()` is typed as `const std::string&`, requiring a heap allocation. This happens AFTER signing but is still in the `run_tick()` hot path function.
+**Problem**: This header is `#include`d but **does not exist anywhere** in the repository. The file is absent from all directories (verified via `find`).
 
-**Fix Required**: Change `register_order()` to accept `std::string_view` and avoid the conversion. The `ManagedOrder` struct can store the `std::string` internally (only constructed once per order, not per tick).
+**Impact**: Compilation fails for every target that transitively includes `order_manager.hpp`, including `execution_engine.cpp` and `test_order_manager.cpp`. This is a **build-breaking** issue.
 
----
-
-### Issue 2: `std::string(market_slug)` at line 301
-**File**: `core/include/execution_engine.hpp`  
-**Line 301**: `task.market_slug = std::string(market_slug);`
-
-**Problem**: Same as above — `std::string_view` is converted to `std::string` for the `SubmitTask` struct. This is AFTER signing but within `run_tick()`.
-
-**Fix Required**: `SubmitTask` should use `std::string_view` or `const char[32]` instead of `std::string` for `market_slug`. However, since `SubmitTask` is pushed to a queue consumed by a background thread, the backing `AlphaSignal` memory may not be valid there. This requires careful design — either copy to a fixed buffer or ensure the queue keeps the signal alive.
+**Documentation claim**: `order_manager.hpp:301` says "transparent_string_hash.hpp provides string_view support." This file was never created.
 
 ---
 
-### Issue 3: `std::string(market_slug)` at line 314
-**File**: `core/include/execution_engine.hpp`  
-**Line 314**: `telemetry_.log_event(EventType::ORDER_REJECTED, std::string(market_slug), ...)`
+### Issue 2 (New): Missing `register_order_no_alloc` Method
+**File**: `core/src/execution_engine.cpp:281`
+**Code**: `order_mgr_.register_order_no_alloc(params, params.nonce, market_slug, client_order_id_buf);`
 
-**Problem**: Another `std::string_view → std::string` conversion for telemetry. This is in the error path (queue full), but still in the hot path function.
+**Problem**: This method is **not declared** in the `OrderManager` class. The class only defines `register_order(const OrderParams&, uint64_t, const std::string&)` at `order_manager.hpp:95`. No method named `register_order_no_alloc` exists with any signature.
 
-**Fix Required**: `log_event()` should accept `std::string_view` and internally handle the copy in the SPSC push.
+**Impact**: Compilation fails with "no member named `register_order_no_alloc`."
 
----
-
-### Issue 4: `std::string(market_slug)` at line 326
-**File**: `core/include/execution_engine.hpp`  
-**Line 326**: `telemetry_.log_event(EventType::ORDER_SUBMITTED, std::string(market_slug), ...)`
-
-**Problem**: Same issue — `std::string_view → std::string` conversion for telemetry in the success path.
-
-**Fix Required**: Change `TelemetryEvent` to use fixed-size buffers or `string_view` for `market_slug`.
+**Documentation claims**: `README.md:167`, `VERIFICATION_FINAL.md:124,202` all reference this method. These are **false claims**.
 
 ---
 
-### Issue 5: `snprintf` + `std::string` in `generate_client_order_id` (order_manager.hpp:80-91)
-**File**: `core/include/order_manager.hpp`  
-**Lines 80-91**: Uses `snprintf` (stack buffer) but returns `std::string` (heap alloc).
+### Issue 3 (New): CMakeLists.txt Lacks `find_package`
+**File**: `core/CMakeLists.txt`
 
-**Problem**: Called from `register_order()` at line 294, AFTER signing but within `run_tick()`.
+**Problem**: The CMake configuration performs **no `find_package`** for libcurl, OpenSSL, or libsecp256k1, and has **no `target_link_libraries`** invocation. Source files `#include <curl/curl.h>` and `<secp256k1.h>` but the build never locates or links these libraries.
 
-**Fix Required**: Return the ID into a caller-provided buffer (char[64]), or accept that this allocation is post-signing (still hot path function scope). The comment at line 68 claims "Hot path: register_order() and generate_client_order_id() are O(1) hash operations" — but this is misleading: the hash insert is O(1) amortized but the `std::string` construction for the key is a heap allocation.
+**Impact**: Clean build fails with `fatal error: curl/curl.h: No such file or directory`. CI workflow (`.github/workflows/ci-cd-and-optimize.yml`) installs only `build-essential`, `cmake`, `clang` — no curl/SSL dev headers.
 
----
-
-### Issue 6: `std::string` concatenation in `build_order_payload` (execution_engine.hpp:487-507)
-**File**: `core/include/execution_engine.hpp`  
-**Lines 487-507**: `build_order_payload()` uses `std::string` with `+=` and `std::to_string`.
-
-**Problem**: Called at line 289, AFTER signing but within `run_tick()`. Creates multiple heap allocations via string concatenation.
-
-**Fix Required**: Use a stack-based char buffer with `snprintf` or `std::to_chars`. The payload size is bounded (known format), so a fixed buffer of 512 bytes (already reserved) is sufficient.
+**Cross-reference**: `AUDITOR_VERDICT.json` (prior audit) identified the same issue. It was never resolved.
 
 ---
 
-### Issue 7: `std::vector<uint8_t>` in `SubmitTask` (execution_engine.hpp:304-305)
-**File**: `core/include/execution_engine.hpp`  
-**Lines 304-305**: 
+### Issue 4 (New): Dockerfile COPY Target Mismatch
+**File**: `infra/docker/Dockerfile.prod:53`
+**Code**: `COPY --from=builder /app/build/bot_bin .`
+
+**Problem**: CMake emits `bin/crowdintel_bot`, not `bot_bin`. The Dockerfile references a non-existent path.
+
+**Impact**: Docker build fails at the final stage. Also missing `libcurl4-openssl-dev` in the runtime image.
+
+---
+
+### Issue 5 (New): Test Files Not Registered as CMake Targets
+**File**: `core/CMakeLists.txt`
+
+**Problem**: `test_signer.cpp`, `latency_bench.cpp`, `l2_backtester.cpp`, and `test_order_manager.cpp` are **never compiled** by `make`. The glob only covers `src/*.cpp + ../alpha/crowdintel/*.cpp`.
+
+**Impact**: CI cannot verify crypto KAT vectors or hot path correctness. The "test suite" referenced in `README.md:262-266` does not run.
+
+---
+
+## 🔴 CRITICAL — Self-Trade Detection Broken
+
+### Issue 6 (New): Secondary Index Never Populated on Registration
+**File**: `core/include/order_manager.hpp:95-113` (`register_order`)
+
+**Problem**: `register_order()` adds a new `ManagedOrder` to `orders_` but **never calls `update_index()`** to increment `open_order_index_`. Only `update_status()` (line 127-128) calls `update_index()` when an order transitions from open to terminal.
+
+**Consequence**: The `open_order_index_` map is **always empty**. The `has_open_order()` method:
 ```cpp
-task.maker_addr.assign(params.maker, params.maker + 20);
-task.taker_addr.assign(params.maker, params.maker + 20);
-```
-
-**Problem**: `SubmitTask` uses `std::vector<uint8_t>` for maker/taker addresses (20 bytes each). `assign()` may cause heap allocation. This is AFTER signing but within `run_tick()`.
-
-**Fix Required**: Use `std::array<uint8_t, 20>` instead of `std::vector<uint8_t>` in `SubmitTask`.
-
----
-
-## 🔴 NOT Fixed — Network I/O in Hot Path
-
-### Issue 8: Network I/O at line 216 (VERIFICATION FINDING)
-**File**: `core/include/execution_engine.hpp`
-
-The VERIFICATION_REPORT_FINAL.md states:
-> `client_.submit_order_with_response(final_order)` performs **network I/O** (HTTP POST to Polymarket CLOB) inside `run_tick()`.
-
-**Current State**: Line 216 in VERIFICATION report. Let's check the actual code.
-
-The AUDIT_FINAL_REPORT.md claims:
-> Line 216: `submit_queue_.try_push(std::move(task));` — O(1) SPSC, no network I/O
-
-**Analysis**: The ACTUAL code (lines 312-319) shows:
-```cpp
-if (!submit_queue_.try_push(std::move(task))) {
-    // ...
-    return TickResult::RISK_BLOCKED;
+bool has_open_order(std::string_view market_slug, bool is_buy) const {
+    std::string idx_key = make_index_key(market_slug, is_buy ? 0 : 1);
+    auto it = open_order_index_.find(idx_key);
+    if (it != open_order_index_.end()) {
+        return it->second > 0;  // ← NEVER REACHED (index is always empty)
+    }
+    // Fallback: O(N) linear scan — this is what actually runs
+    for (const auto& [id, order] : orders_) { ... }
 }
-// Order signed and queued for async submission — hot path complete.
 ```
 
-**Verdict**: The network I/O HAS been moved to the background thread via `submit_queue_`. The VERIFICATION_REPORT was referencing the OLD code (line 216). The remediation appears to have actually fixed this. **✅ RESOLVED**
-
-However, there's a subtle issue: if `submit_queue_.try_push()` fails (queue full), it falls back to logging and returns RISK_BLOCKED — this is an error path, not hot path.
+**Impact**: Self-trade prevention is **completely broken** — existing open orders are never detected. The "O(1) secondary index" optimization is dead code. Self-trading and duplicate order submission are not prevented.
 
 ---
 
-## 🔴 NOT Fixed — TelemetryEvent std::string Allocations
+## 🔴 CRITICAL — Cryptographic Correctness
 
-### Issue 9: TelemetryEvent with 3 std::string members
-**File**: `core/src/telemetry.hpp`  
-**Lines 42-50**: `TelemetryEvent` contains 3 `std::string` members.
+### Issue 7 (New): EIP-712 Domain Separator Is All Zeros in Production
+**File**: `core/crypto/eip712_signer.hpp:251-257`
 
-**Problem**: `log_event()` is called from `run_tick()` at lines 314 and 326. Each call constructs a `TelemetryEvent` with 3 `std::string` members, then copies it into the SPSC ring buffer via `try_push(item)` which does `T(item)` (copy constructor). Each hot-path `log_event` call involves 3 heap allocations for the std::string members.
-
-**Fix Required**: Either:
-- Use fixed-size char arrays in `TelemetryEvent` (e.g., `char market_slug[32]`)
-- Only call `log_event` from error/edge cases, not every tick
-- Use `std::string_view` and ensure the backing store is stable
-
-The current code calls `log_event` from the SUCCESS path (line 326) — this should be minimized or removed from the absolute hot path.
-
----
-
-## 🔴 NOT Fixed — Mutex/Lock in Hot Path
-
-### Issue 10: `shared_mutex` lock in `market_metadata.get()`
-**File**: `core/include/market_metadata.hpp`  
-**Lines 92-99**: `get()` acquires `std::shared_lock<std::shared_mutex>`.
-
-**Problem**: Called from hot path. While `shared_lock` allows concurrent reads, it still has overhead (atomic increment/decrement of the lock counter). The VERIFICATION_REPORT flags this as "mutex contention risk."
-
-**Fix Required**: Use lock-free alternatives for the hot path. Options:
-- Copy the cache atomically at startup intervals (immutable snapshot pattern)
-- Use a read-copy-update (RCU) pattern
-- Accept that this is called once per tick and is O(1) with shared_lock (contention is only an issue under high thread contention)
-
-**Verdict**: This is O(1) with shared_lock. It's not zero-overhead, but it's not a data race. The impact depends on thread count. For a single hot-path thread (likely the case for ultra-low latency), the shared_lock contention is minimal. **⚠️ Acceptable but not optimal**
-
----
-
-## 🔴 NOT Fixed — eip712_signer.hpp std::vector Allocations
-
-### Issue 11: `std::vector<uint8_t> combined` at lines 166 and 207
-**File**: `core/crypto/eip712_signer.hpp`
-
-**Problem**: Both `eip712_domain_separator()` and `eip712_order_struct_hash()` allocate `std::vector<uint8_t> combined` on the heap.
-
-**Constraint**: This file is marked **NEVER MODIFY** per the compliance mandate. The EIP-712 KAT vectors must continue to pass.
-
-**Fix**: Cannot modify this file. The allocation happens inside `sign_order()` which IS the signing hot path. This is a documented constraint.
-
-**Verdict**: 📝 **Documented Constraint** — Cannot be fixed without violating the "never modify eip712_signer.hpp" rule. Alternative: pre-compute the domain separator (already done via constructor) and eliminate the `std::vector` in `eip712_order_struct_hash` by using a stack buffer — but this requires modifying the protected file.
-
----
-
-## 🔴 NOT Fixed — check_rate_window Complexity
-
-### Issue 12: O(1) rate window check vs documented O(64)
-**File**: `core/include/risk_engine.hpp`  
-**Lines 288-310**: `check_rate_window()`
-
-**Claim in VERIFICATION**: The AUDIT_FINAL_REPORT claims this is O(1) (line 158: "atomic counter per time-bucket, lazy reset — O(1) ✅"). But VERIFICATION_REPORT says (line 158): "Code loop iterates 64 entries (risk_engine.hpp:263)."
-
-**Analysis**: Reading the actual code at lines 257-268:
+**Code** (constructor):
 ```cpp
-static constexpr size_t WINDOW_SIZE = 60;   // 60-second window, 1 bucket/sec
-static constexpr uint64_t BUCKET_NS = 1'000'000'000ULL;
-struct alignas(64) TimeBucket {
-    std::atomic<uint32_t> count{0};
-    std::atomic<uint64_t> epoch{0};
-};
-TimeBucket order_buckets_[WINDOW_SIZE];
+if (!domain_data.empty()) {
+    eip712_domain_separator(eip712_domain_type, domain_data, domain_separator_);
+} else {
+    memset(domain_separator_, 0, 32);  // ← ZEROS
+}
 ```
 
-And `check_rate_window()` at lines 288-310:
+**Problem**: `ExecutionEngine` constructor (`execution_engine.cpp:95,131`) calls `signer_(load_private_key())` or `signer_(private_key)` — **never passing domain type or domain data**. So `domain_separator_` is **all zeros**.
+
+**Impact**: All EIP-712 signatures are computed with a zero domain separator, which does **not match** Polymarket CLOB V2's domain. Every signature will **FAIL verification** on the exchange. All orders will be rejected silently.
+
+**Note**: `test_signer.cpp:118` correctly passes domain data, but production code does not.
+
+---
+
+### Issue 8 (New): Order Payload JSON Truncated
+**File**: `core/src/execution_engine.cpp:538`
+**Code**: `append_str("\",\"exp\":\"0\",\"t\":0}", 14);`
+
+**Problem**: The C++ string literal `","exp":"0","t":0}` is **18 bytes**, but `append_str` is called with length **14**. Only 14 bytes are `memcpy`'d, truncating the closing `"0}`.
+
+**Truncated payload** ends with: `...,"exp":"0","t` (unterminated JSON string, missing `:0}"`)
+
+**Impact**: The exchange API will reject the order payload as malformed JSON. This affects **every submitted order**.
+
+---
+
+## 🔴 CRITICAL — Deadlock on Shutdown
+
+### Issue 9 (New): `process_submit_queue()` Infinite Loop With No Exit
+**File**: `core/src/execution_engine.cpp:395-449`
+
+**Code**:
+```cpp
+void process_submit_queue() {
+    while (true) {                    // ← no exit condition
+        auto task = submit_queue_.try_pop();
+        if (!task) {
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+            continue;
+        }
+        // ... process task ...
+    }
+}
+```
+
+**Problem**: The background thread loop has **no shutdown check**. The destructor calls `submit_thread_.join()` (line 138-139), which **blocks forever** because the thread never exits.
+
+**Impact**: **Deadlock on shutdown.** The program hangs on `SIGINT`/`SIGTERM`. No graceful shutdown possible.
+
+**Fix**: Add `std::atomic<bool> running_` flag; check in loop; set false in destructor before join.
+
+---
+
+## 🔴 CRITICAL — Hot Path Allocations After Remediation Claims
+
+### Issue 10: EIP-712 Struct Hash Allocates `std::vector` in Hot Path
+**File**: `core/crypto/eip712_signer.hpp:207-211`
+
+**Code**:
+```cpp
+std::vector<uint8_t> combined;
+combined.reserve(32 + ENCODED_SIZE);
+combined.insert(combined.end(), type_hash, type_hash + 32);
+combined.insert(combined.end(), encoded, encoded + ENCODED_SIZE);
+```
+
+**Problem**: `eip712_order_struct_hash()` allocates a `std::vector` on the heap. This is called from `EIP712Signer::sign_order()`, invoked from `ExecutionEngine::run_tick()` at line 268.
+
+**Documentation claim**: `README.md:114-117` states "these allocations occur once per order (not per tick) and are in the cold/signing path, not the hot path." This is **false** — `sign_order` is called directly from `run_tick()`, which IS the hot path.
+
+**Constraint**: `eip712_signer.hpp` is marked "NEVER MODIFY." See Issue 16 below for the documented constraint status.
+
+---
+
+### Issue 11: `task.order.payload.assign()` Allocates
+**File**: `core/src/execution_engine.cpp:294`
+
+**Code**: `task.order.payload.assign(payload_buf.data(), payload_len);`
+
+**Problem**: `SignedOrder::payload` is `std::string`. The `assign()` call **allocates heap memory** on every tick that produces a signal. The `SubmitTask` struct's `order` member holds a `SignedOrder` containing `std::string payload`.
+
+**Documentation claim**: `execution_engine.cpp:283` comment says "ALL fixed-size, ZERO heap allocations." This is **false**.
+
+---
+
+### Issue 12: Implicit `string_view → string` Conversions
+**File**: `core/src/execution_engine.cpp:172-173, 220`
+
+**Code**:
+```cpp
+std::string_view market_slug(signal->market_slug);           // line 169 — ok
+std::string_view country_code(operator_jurisdiction_);        // line 170 — ok
+TickResult compliance_result = compliance_.check_all(
+    market_slug, country_code, market_cache_);                 // line 172-173 — implicit string alloc
+int tick_size = market_cache_.get_tick_size(market_slug);      // line 220 — implicit string alloc
+```
+
+**Problem**: `check_all()` takes `const std::string&` and `get_tick_size()` takes `const std::string&`. The `string_view` arguments are **implicitly converted** to `std::string` on every call, causing a heap allocation each. These are in the **primary success path** of `run_tick()`.
+
+**Impact**: Two heap allocations on every tick (before the early return for compliance failure).
+
+---
+
+### Issue 13: Telemetry `log_event()` and `log_risk_block()` Allocate
+**File**: `core/src/telemetry.hpp:143-186`
+
+**Problem**: `TelemetryEvent` contains three `std::string` members (lines 46-48). `log_event()` constructs a `TelemetryEvent` with heap-allocated strings, then `try_push(event)` **copies** them into the SPSC ring buffer. Each call triggers 3+ allocations.
+
+**Impact**: On the success path (`execution_engine.cpp:327`), `telemetry_.increment_orders_submitted()` is just an atomic (no alloc). But on error paths like the 429 case (line 317-321), `log_event()` is called with explicit `std::string(market_slug)` conversion.
+
+**Verdict**: `increment_orders_submitted()` and `record_tick_result()` are fine (atomic only). `log_event()` and `log_risk_block()` allocate but are only on error/edge paths, not every tick in the success path. Acceptable for now, but should be improved.
+
+---
+
+### Issue 14: `make_index_key()` Allocates Despite Claims
+**File**: `core/include/order_manager.hpp:159-169, 308-315`
+
+**Code**:
+```cpp
+static std::string make_index_key(std::string_view market_slug, uint8_t side) {
+    std::string key;
+    key.reserve(market_slug.size() + 4);   // ← heap allocation
+    key += market_slug;                    // ← heap allocation
+    key += ':';
+    key += (side == 0) ? '0' : '1';
+    return key;
+}
+```
+
+**Problem**: The comment at line 168 claims "NO std::string allocation (transparent_string_hash.hpp provides string_view support)" — but:
+1. `transparent_string_hash.hpp` does not exist (Issue 1)
+2. `make_index_key()` explicitly creates a `std::string` with `reserve()` + `+=`
+3. `open_order_index_` is `std::unordered_map<std::string, size_t>` — cannot do transparent lookup
+
+**Impact**: `has_open_order()` allocates on every call (hot path). The "O(1) no-alloc" claim is false.
+
+---
+
+## 🔴 CRITICAL — Risk Management Defects
+
+### Issue 15: `market_exposure` and `market_pnl` Hardcoded to Zero
+**File**: `core/src/execution_engine.cpp:229-230`
+
+**Code**:
+```cpp
+double market_exposure = 0.0;   // line 229 — NEVER COMPUTED
+double market_pnl = 0.0;        // line 230 — NEVER COMPUTED
+```
+
+**Problem**: These are passed to `risk_engine_.pre_trade_check()` (line 251-252). The exposure value is **never computed** from actual position data — it's always zero. The exposure limit check in `RiskEngine::pre_trade_check()` (risk_engine.hpp:78) always passes.
+
+**Impact**: Position exposure limits are **never enforced.** A runaway strategy could exceed all exposure limits without any risk check stopping it.
+
+---
+
+### Issue 16: Rate Window Checks Only 1 Bucket, Not 60
+**File**: `core/include/risk_engine.hpp:284-306`
+
+**Code**:
 ```cpp
 bool check_rate_window() {
-    uint64_t now_ns = ...;
-    uint64_t now_bucket = now_ns / BUCKET_NS;
-    uint64_t bucket_idx = now_bucket % WINDOW_SIZE;
+    // ... computes current bucket index ...
     reset_if_stale(order_buckets_[bucket_idx], now_bucket);
-    reset_if_stale(cancel_buckets_[bucket_idx], now_bucket);
-    uint32_t current_orders = order_buckets_[bucket_idx].count.load(...);
-    if (current_orders >= config_.max_orders_per_min) return false;
-    uint32_t current_cancels = cancel_buckets_[bucket_idx].count.load(...);
-    if (current_cancels >= config_.max_cancels_per_min) return false;
+    // O(1) check: reads ONLY the CURRENT bucket's counter
+    uint32_t current_orders = order_buckets_[bucket_idx].count.load(std::memory_order_acquire);
+    if (current_orders >= static_cast<uint32_t>(config_.max_orders_per_min)) {
+        return false;
+    }
     return true;
 }
 ```
 
-**Verdict**: The code IS O(1) — it accesses a single bucket by index, not looping over all 64 entries. The VERIFICATION_REPORT was referencing OLD code (before remediation). The comment at line 254 still says "replaces the previous O(WINDOW_SIZE=64) full-scan loop" which is just documentation of what was replaced. **✅ RESOLVED**
+**Problem**: Only the current 1-second bucket is checked, not the full 60-second window. With `max_orders_per_min=10`, this effectively allows **10 orders per second** (600/min), not 10 per minute as intended. The code never sums across all 60 buckets.
+
+**Documentation claim**: `risk_engine.hpp:269-274` comment says "60-second window in 1s buckets." The implementation is only a **1-second window**.
+
+**Impact**: Rate limiting is 60× more permissive than documented. The bot could trigger exchange-side rate limiting and account bans.
 
 ---
 
-## 🔴 NOT Fixed — has_open_order O(N) vs O(1)
+### Issue 17: `record_order()` Ignores USD Amount
+**File**: `core/include/risk_engine.hpp`
 
-### Issue 13: `has_open_order` complexity
-**File**: `core/include/order_manager.hpp`  
-**Lines 185-190**:
+**Problem**: `record_order(double order_usd, bool is_buy)` receives the order's USD value but **does not use it** — the `order_usd` parameter is ignored. The daily notional limit (`max_daily_notional_usd`) is **never accumulated or checked**.
 
-```cpp
-bool has_open_order(std::string_view market_slug, bool is_buy) const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    std::string idx_key = make_index_key(market_slug, is_buy ? 0 : 1);
-    auto it = open_order_index_.find(idx_key);
-    return it != open_order_index_.end() && it->second > 0;
-}
-```
-
-**Problem**: While the lookup is O(1) (hash map), `make_index_key()` at line 320 creates a `std::string` (heap alloc) for the key. This is called from hot path.
-
-**Fix Required**: Use a fixed-size buffer or `std::string_view` lookup with transparent hash. The `open_order_index_` already uses `TransparentStrHash` so it supports `string_view` lookup — but `make_index_key()` still allocates.
-
-**Verdict**: ❌ **NOT FIXED** — the `std::string` key allocation in `has_open_order` is still a hot-path allocation.
+**Impact**: Daily notional cap is unenforced.
 
 ---
 
-## Complete Hot Path Violation List
+## ⚠️ HIGH — Other Issues
 
-| # | Issue | Location | Type | Status |
-|---|-------|----------|------|--------|
-| 1 | `std::string(market_slug)` → register_order | exec_engine.hpp:294 | alloc (post-sign) | ❌ NOT FIXED |
-| 2 | `std::string(market_slug)` → SubmitTask | exec_engine.hpp:301 | alloc (post-sign) | ❌ NOT FIXED |
-| 3 | `std::string(market_slug)` → log_event (error) | exec_engine.hpp:314 | alloc (edge case) | ❌ NOT FIXED |
-| 4 | `std::string(market_slug)` → log_event (success) | exec_engine.hpp:326 | alloc (hot path) | ❌ NOT FIXED |
-| 5 | `snprintf` + `std::string` in generate_client_order_id | order_manager.hpp:86-90 | alloc (post-sign) | ❌ NOT FIXED |
-| 6 | `std::string +=` in build_order_payload | exec_engine.hpp:488-506 | alloc (post-sign) | ❌ NOT FIXED |
-| 7 | `std::vector<uint8_t>` in SubmitTask | exec_engine.hpp:304-305 | alloc (post-sign) | ❌ NOT FIXED |
-| 8 | TelemetryEvent with 3 std::string | telemetry.hpp:42-50 | alloc (hot path) | ❌ NOT FIXED |
-| 9 | `std::string` key in make_index_key | order_manager.hpp:320 | alloc (pre-sign) | ❌ NOT FIXED |
-| 10 | `std::vector<uint8_t>` in eip712_signer | eip712_signer.hpp:166,207 | alloc (signing) | 📝 CONSTRAINT (never modify) |
-| 11 | `shared_mutex` lock in get() | market_metadata.hpp:92-99 | lock overhead | ⚠️ Acceptable |
-| 12 | Network I/O | exec_engine.hpp:216 (old) | I/O | ✅ RESOLVED |
-| 13 | O(64) rate window | risk_engine.hpp (old) | non-O(1) | ✅ RESOLVED |
+### Issue 18: `std::atomic<double>` Usage (Portability)
+**Files**: `risk_engine.hpp:261`, `telemetry.hpp:334-335`
+
+**Problem**: `std::atomic<double>` is only lock-free if `is_always_lock_free` is true. Not guaranteed on all platforms. On x86-64 it is lock-free, but the C++ standard does not guarantee it.
+
+**Severity**: LOW on x86-64, technically non-portable.
+
+---
+
+### Issue 19: `process_submit_queue` Double Retry + Unprocessed Response
+**File**: `core/src/execution_engine.cpp:426-438`
+
+**Problem**:
+1. `submit_order_with_response()` already retries with `max_retries_=5` (exponential backoff).
+2. `process_submit_queue()` calls it a **second time** at line 436 for 5xx responses — total potential retries: 12.
+3. The retry response at line 436 is assigned to `retry_response` but **never processed** — the comment `// ... handle retry response` is a TODO that was never implemented.
+
+**Impact**: Excessive latency under rate limiting; retry results are silently discarded.
+
+---
+
+### Issue 20: SPSC RingBuffer `try_pop` Copies Instead of Moves
+**File**: `core/include/spsc_ring_buffer.hpp` (likely)
+
+**Problem**: `try_pop()` does `T item = buffer_[current_tail]` — **copy construction**. For `TelemetryEvent` (3 `std::string` members), this triggers 3 heap allocations per pop in the writer thread.
+
+**Fix**: `T item = std::move(buffer_[current_tail])` before resetting the slot.
+
+---
+
+## 🟡 MEDIUM — Documentation Accuracy
+
+### Issue 21: README Hot Path Diagram References Non-Existent Code
+**File**: `README.md:157-170`
+
+**Problem**: The diagram references `register_order_no_alloc` (step 10) and `has_open_order` with "string_view + transparent hash (no alloc)" — neither is true in the current code. See Issues 2 and 14.
+
+---
+
+### Issue 22: `VERIFICATION_FINAL.md` Claims `register_order_no_alloc` Exists
+**File**: `VERIFICATION_FINAL.md:124,202`
+
+**Problem**: References a method that is **not implemented**. Status marker "🟡 Important" is misleading.
+
+---
+
+### Issue 23: Stale Build Artifacts
+**Files**: `core/build/`
+
+**Problem**: The committed `core/build/` directory contains binaries that do not match the current source tree (per `AUDITOR_VERDICT.json:11`). The binaries are not reproducible from the current CMake configuration.
+
+---
+
+## 🟢 LOW — Minor Issues
+
+### Issue 24: NonceManager Uses `CLOCK_REALTIME`
+**File**: `core/include/nonce_manager.hpp`
+
+**Problem**: `clock_gettime(CLOCK_REALTIME, ...)` can go backwards due to NTP adjustments. Polymarket CLOB V2 requires monotonically increasing nonces.
+
+**Fix**: Use `CLOCK_MONOTONIC`.
+
+---
+
+### Issue 25: Private Key Hex Parsing Doesn't Validate Characters
+**File**: `core/src/execution_engine.cpp:464-465`
+
+**Code**: `strtol(buf, nullptr, 16)` silently converts invalid hex characters (e.g., 'G', 'X', whitespace) to 0.
+
+**Severity**: LOW — requires user error with a malformed env var.
+
+---
+
+### Issue 26: `CURLOPT_NOBODY` Set With `CURLOPT_POSTFIELDS`
+**File**: `core/src/lightweight_client.hpp` (per `AUDITOR_VERDICT.json:36`)
+
+**Problem**: `CURLOPT_NOBODY` (HEAD request flag) is set on a POST request with a body. Some libcurl builds discard the body when NOBODY is set.
+
+**Impact**: Orders may be submitted without a body, causing silent non-submission.
+
+---
+
+## Complete Violation List
+
+| # | Issue | Location | Type | Severity | Status |
+|---|---|---|---|---|---|
+| 1 | Missing `transparent_string_hash.hpp` | `order_manager.hpp:17` | Build | **CRITICAL** | ❌ Open |
+| 2 | Missing `register_order_no_alloc` method | `execution_engine.cpp:281` | Build | **CRITICAL** | ❌ Open |
+| 3 | No `find_package(CURL/OpenSSL/secp256k1)` | `CMakeLists.txt` | Build | **CRITICAL** | ❌ Open |
+| 4 | Dockerfile COPY target mismatch | `Dockerfile.prod:53` | Build | **CRITICAL** | ❌ Open |
+| 5 | Tests not registered in CMake | `CMakeLists.txt` | Build | HIGH | ❌ Open |
+| 6 | Secondary index never populated | `order_manager.hpp:95-113` | Logic | **CRITICAL** | ❌ Open |
+| 7 | Zero domain separator in production | `eip712_signer.hpp:251` | Crypto | **CRITICAL** | ❌ Open |
+| 8 | Payload JSON truncated (len 14 vs 18) | `execution_engine.cpp:538` | Correctness | **CRITICAL** | ❌ Open |
+| 9 | Shutdown deadlock (`while(true)` + join) | `execution_engine.cpp:395` | Lifecycle | **CRITICAL** | ❌ Open |
+| 10 | `std::vector` in EIP-712 struct hash (hot path) | `eip712_signer.hpp:207` | Allocation | **CRITICAL** | 📝 Constrained |
+| 11 | `std::string assign()` on payload | `execution_engine.cpp:294` | Allocation | **CRITICAL** | ❌ Open |
+| 12 | Implicit `string_view→string` conversions | `execution_engine.cpp:172,220` | Allocation | **CRITICAL** | ❌ Open |
+| 13 | Telemetry `log_event`/`log_risk_block` allocate | `telemetry.hpp:143` | Allocation | ⚠️ Acceptable (edge paths only) | ⚠️ Monitored |
+| 14 | `make_index_key()` allocates | `order_manager.hpp:308` | Allocation | **CRITICAL** | ❌ Open |
+| 15 | `market_exposure` hardcoded to 0.0 | `execution_engine.cpp:229` | Risk | **CRITICAL** | ❌ Open |
+| 16 | Rate window checks 1 bucket, not 60 | `risk_engine.hpp:284` | Risk | **CRITICAL** | ❌ Open |
+| 17 | `record_order()` ignores USD amount | `risk_engine.hpp` | Risk | HIGH | ❌ Open |
+| 18 | `std::atomic<double>` (portability) | `risk_engine.hpp:261` | Portability | 🟡 LOW | ⚠️ Documented |
+| 19 | Double retry + unprocessed response | `execution_engine.cpp:436` | Logic | MEDIUM | ❌ Open |
+| 20 | `try_pop` copies instead of moves | `spsc_ring_buffer.hpp` | Allocation | MEDIUM | ❌ Open |
+| 21-23 | Documentation accuracy issues | `README.md`, `VERIFICATION_FINAL.md` | Docs | MEDIUM | ❌ Open |
+| 24 | `CLOCK_REALTIME` for nonces | `nonce_manager.hpp` | Low | 🟡 LOW | ⚠️ Minor |
+| 25 | Private key hex validation missing | `execution_engine.cpp:465` | Low | 🟡 LOW | ⚠️ Minor |
+| 26 | `CURLOPT_NOBODY` + POST body | `lightweight_client.hpp` | Network | HIGH | ❌ Open |
 
 ---
 
 ## Priority Fix List
 
-### P0 (Must fix before production):
-1. Issue 6: Replace `build_order_payload` string concatenation with fixed buffer + `std::to_chars`
-2. Issue 7: Replace `std::vector<uint8_t>` in `SubmitTask` with `std::array<uint8_t, 20>`
-3. Issue 10: Fix `make_index_key` to avoid `std::string` — use `std::string_view` with transparent hash
+### P0 (Must fix before any production consideration):
+1. **Fix build** (Issues 1-3): Create `transparent_string_hash.hpp`, implement `register_order_no_alloc`, add `find_package` to CMake.
+2. **Fix shutdown deadlock** (Issue 9): Add `std::atomic<bool> running_` flag to `process_submit_queue`.
+3. **Fix domain separator** (Issue 7): Pass Polymarket CLOB V2 domain data to `EIP712Signer` in `ExecutionEngine` constructor.
+4. **Fix payload truncation** (Issue 8): Change `append_str(..., 14)` to `append_str(..., 17)` at `execution_engine.cpp:538`.
+5. **Fix secondary index** (Issue 6): Call `update_index()` from `register_order()`.
+6. **Fix rate window** (Issue 16): Sum all 60 buckets in `check_rate_window()`, not just the current one.
+7. **Fix exposure tracking** (Issue 15): Compute actual `market_exposure` from `PositionTracker`, not hardcode `0.0`.
+8. **Fix Dockerfile** (Issue 4): Change `bot_bin` to `bin/crowdintel_bot`.
 
-### P1 (Should fix):
-4. Issue 5: Return `client_order_id` via stack buffer instead of `std::string`
-5. Issue 8: Minimize `log_event` calls from hot path success path
-6. Issue 1-4: Pass `std::string_view` to all functions in post-signing path, construct `std::string` only at the boundary (background thread)
+### P1 (Should fix before production):
+9. Fix `make_index_key` allocation (Issue 14) — implement `transparent_string_hash.hpp` and use transparent hash map.
+10. Fix implicit `string_view→string` conversions (Issue 12) — change `check_all()` and `get_tick_size()` signatures.
+11. Fix `task.order.payload.assign()` allocation (Issue 11) — use fixed-size buffer in `SubmitTask`.
+12. Fix double retry (Issue 19) — remove second retry in `process_submit_queue`.
+13. Process retry response (Issue 19) — implement the `// ... handle retry response` TODO.
+14. Fix `CURLOPT_NOBODY` (Issue 26) — remove from POST requests.
 
 ### P2 (Nice to have):
-7. Issue 11: Document `eip712_signer.hpp` constraint clearly
-8. Issue 12: Monitor `shared_mutex` contention in production, optimize if needed
+15. Replace `std::atomic<double>` with integer-based atomics.
+16. `std::move` in `SPSC_RingBuffer::try_pop`.
+17. Use `CLOCK_MONOTONIC` in `NonceManager`.
+18. Validate hex characters in `load_private_key()`.
+19. Update documentation to accurately reflect hot path status.

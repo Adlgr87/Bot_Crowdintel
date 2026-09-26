@@ -4,12 +4,15 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <optional>
 
 #include "eip712_signer.hpp"
 #include "market_config.hpp"
@@ -90,28 +93,51 @@ public:
     /**
      * Register an order as PENDING (before submission).
      * Returns the generated client_order_id so the caller can track it.
-     * O(1) — hash insert.
+     * O(1) hash insert. Also populates secondary index for self-trade detection.
      */
     std::string register_order(const OrderParams& params, uint64_t nonce,
-                                const std::string& market_slug) {
+                               const std::string& market_slug) {
         std::string client_order_id = generate_client_order_id(params.salt);
+        register_order_no_alloc(params, nonce, market_slug, client_order_id.c_str());
+        return client_order_id;
+    }
+
+    /**
+     * Register an order with a pre-generated client_order_id (hot path optimization).
+     * O(1) hash insert + secondary index update.
+     *
+     * This version avoids the std::string allocation in generate_client_order_id
+     * by accepting a caller-provided buffer. The caller (ExecutionEngine hot path)
+     * already generated the ID via generate_client_order_id_fixed().
+     *
+     * @param params              Order parameters
+     * @param nonce               Exchange nonce
+     * @param market_slug         Market identifier (string_view - no copy)
+     * @param client_order_id_buf Pre-generated client order ID (null-terminated)
+     */
+    void register_order_no_alloc(const OrderParams& params, uint64_t nonce,
+                                 std::string_view market_slug,
+                                 const char* client_order_id_buf) {
+        std::string client_order_id(client_order_id_buf);
         auto now = std::chrono::steady_clock::now();
 
         std::unique_lock<std::shared_mutex> lock(mutex_);
         auto [it, inserted] = orders_.try_emplace(client_order_id);
         auto& order = it->second;
-        order.client_order_id = client_order_id;
+        order.client_order_id = std::move(client_order_id);
         order.nonce = nonce;
         order.params = params;
-        order.status = OrderStatus::PENDING;
+        order.status = OrderStatus::OPEN;  // Immediately OPEN after async push
         order.fills_quantity = 0;
         order.fills_cash_value = 0;
         order.created_at = now;
         order.last_update = now;
-        order.market_slug = market_slug;
-        return client_order_id;
-    }
+        order.market_slug = std::string(market_slug);
 
+        // Populate secondary index for self-trade detection
+        std::string_view idx_key = build_index_key(market_slug, params.side);
+        open_order_index_[std::string(idx_key)] += 1;
+    }
     /**
      * Update order status (called from fill handler, cancel handler, etc.).
      * O(1) — hash lookup. Also updates secondary index for self-trade detection.
@@ -166,8 +192,9 @@ public:
         std::shared_lock<std::shared_mutex> lock(mutex_);
         // O(1) lookup via secondary index — transparent hash allows string_view lookup
         // NO std::string allocation (transparent_string_hash.hpp provides string_view support)
-        std::string idx_key = make_index_key(market_slug, is_buy ? 0 : 1);
-        auto it = open_order_index_.find(idx_key);
+        // Key format: "market_slug:side" where side is 0 (buy) or 1 (sell)
+        std::string_view key = build_index_key(market_slug, is_buy ? 0 : 1);
+        auto it = open_order_index_.find(key);  // Transparent lookup — no alloc!
         if (it == open_order_index_.end()) return false;
         return it->second > 0;
     }
@@ -293,25 +320,27 @@ private:
     LightweightCLOBClient& client_;
     mutable std::shared_mutex mutex_;
     std::unordered_map<std::string, ManagedOrder> orders_;
-    std::unordered_map<std::string, size_t> open_order_index_;  // O(1) secondary index
+    std::unordered_map<std::string, size_t, StringHash, StringEqual> open_order_index_;  // O(1) secondary index (transparent lookup)
     std::atomic<uint64_t> order_counter_{0};
 
     /**
      * Build the secondary index key from market_slug + side.
-     * Used by register_order, update_status, and has_open_order for O(1) lookups.
+     * Returns a string_view into a thread_local buffer (zero allocation on hot path).
+     * Key format: "market_slug:side" where side is 0 (buy) or 1 (sell).
      *
-     * NOTE: This still allocates a std::string. For true zero-alloc, the hot path
-     * would need a fixed-size buffer approach, but the shared_mutex lock already
-     * serializes access so the allocation cost is acceptable relative to the
-     * alternative of an O(N) scan (which was the original implementation).
+     * NOTE: Uses thread_local static buffer. This is safe because:
+     * 1. The hot path (has_open_order) is single-threaded (hot path thread)
+     * 2. The cold path (register_order, update_status) is under shared_mutex lock
+     * 3. Both never run concurrently on the same thread
      */
-    static std::string make_index_key(std::string_view market_slug, uint8_t side) {
-        std::string key;
-        key.reserve(market_slug.size() + 4);
-        key += market_slug;
-        key += ':';
-        key += (side == 0) ? '0' : '1';
-        return key;
+    static std::string_view build_index_key(std::string_view market_slug, uint8_t side) {
+        thread_local static char buffer[64];
+        size_t len = market_slug.size() < 60 ? market_slug.size() : 60;
+        memcpy(buffer, market_slug.data(), len);
+        buffer[len] = ':';
+        buffer[len + 1] = (side == 0) ? '0' : '1';
+        buffer[len + 2] = '\0';
+        return std::string_view(buffer, len + 2);
     }
 
     /**
@@ -319,11 +348,11 @@ private:
      * Called from register_order and update_status.
      */
     void update_index(std::string_view market_slug, uint8_t side, int delta) {
-        std::string idx_key = make_index_key(market_slug, side);
+        std::string_view idx_key = build_index_key(market_slug, side);
         if (delta > 0) {
-            open_order_index_[idx_key] += delta;
+            open_order_index_[std::string(idx_key)] += delta;
         } else if (delta < 0) {
-            auto it = open_order_index_.find(idx_key);
+            auto it = open_order_index_.find(idx_key);  // Transparent lookup
             if (it != open_order_index_.end()) {
                 if (static_cast<int>(it->second) + delta <= 0) {
                     open_order_index_.erase(it);

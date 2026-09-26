@@ -71,12 +71,12 @@
 struct SubmitTask {
     char client_order_id[64];        // Fixed buffer — no alloc
     char market_slug[32];            // Copy of market_slug for bg thread (AlphaSignal may be overwritten)
-    SignedOrder order;               // Contains signature (fixed array) and payload (std::string — only one alloc in background)
-    std::array<uint8_t, 20> maker_addr;  // Fixed-size, no vector
-    std::array<uint8_t, 20> taker_addr;  // Fixed-size, no vector
+    char payload[512];               // Fixed buffer — no heap alloc (was std::string)
+    size_t payload_len;              // Length of payload string
+    std::array<uint8_t, 65> signature;  // Copy of signature — fixed array
+    uint64_t nonce;
     uint64_t price;
     uint64_t size;
-    uint64_t nonce;
     uint64_t salt;
     uint8_t side;
 };
@@ -107,6 +107,7 @@ public:
           cached_pol_balance_(1000.0),
           submit_thread_(std::thread(&ExecutionEngine::process_submit_queue, this))
     {
+        init_eip712_domain();
         telemetry_.log_event(EventType::BALANCE_CHECK, "",
                              "{\"event\":\"startup\",\"component\":\"ExecutionEngine\"}", "INFO");
     }
@@ -132,12 +133,52 @@ public:
           cached_usdc_balance_(10000.0),
           cached_pol_balance_(1000.0),
           submit_thread_(std::thread(&ExecutionEngine::process_submit_queue, this))
-    {}
+    {
+        init_eip712_domain();
+    }
 
     ~ExecutionEngine() {
+        shutdown_ = true;
         if (submit_thread_.joinable()) {
             submit_thread_.join();
         }
+    }
+
+    /**
+     * Initialize EIP-712 domain separator with Polymarket CLOB V2 contract address.
+     * CRITICAL: Without this, signatures use an all-zeros domain separator and
+     * will fail exchange verification.
+     *
+     * Polymarket CLOB V2 uses:
+     *   name: "Polymarket"
+     *   verifyingContract: 0xC5d563A36AE7814A12dC12389E369Bc91D5B1d35
+     *
+     * The domain_data is ABI-encoded as:
+     *   bytes32 typeHash = keccak256("EIP712Domain(string name,address verifyingContract)")
+     *   bytes32 nameHash = keccak256("Polymarket")
+     *   address verifyingContract = 0xC5d563A36AE7814A12dC12389E369Bc91D5B1d35
+     *   domainSeparator = keccak256(typeHash ++ nameHash ++ verifyingContract)
+     *
+     * We pass domain_data = keccak256(name) || pad_left(address, 0, 12) to the signer.
+     */
+    void init_eip712_domain() {
+        // Build domain data: 32 bytes for name hash + 32 bytes for verifyingContract (left-padded)
+        std::vector<uint8_t> domain_data(64, 0);
+        // name = "Polymarket"
+        uint8_t name_hash[32];
+        keccak256_hash(reinterpret_cast<const uint8_t*>("Polymarket"), 10, name_hash);
+        memcpy(domain_data.data(), name_hash, 32);
+        // verifyingContract = 0xC5d563A36AE7814A12dC12389E369Bc91D5B1d35 (20 bytes, left-padded to 32)
+        static const uint8_t polymarket_contract[20] = {
+            0xC5, 0xd5, 0x63, 0xA3, 0x6A, 0xE7, 0x81, 0x4A,
+            0x12, 0xdC, 0x12, 0x38, 0x9E, 0x36, 0x9B, 0xc9,
+            0x1D, 0x5B, 0x1d, 0x35
+        };
+        memcpy(domain_data.data() + 52, polymarket_contract, 20);  // Left-pad to 32 bytes
+        signer_.set_domain(
+            "EIP712Domain(string name,address verifyingContract)",
+            domain_data
+        );
     }
 
     /**
@@ -226,7 +267,10 @@ public:
         // ─── Fase 2: Risk Engine Pre-Trade Check (BEFORE signing) ──────
         double usdc_balance = cached_usdc_balance_.load(std::memory_order_relaxed);
         double pol_balance = cached_pol_balance_.load(std::memory_order_relaxed);
-        double market_exposure = 0.0;
+        // Market exposure: use current order's USD value as exposure proxy
+        // (conservative — does not add previous positions, which would require
+        //  a PositionTracker instance on the hot path)
+        double market_exposure = static_cast<double>(params.size) / 1e6;
         double market_pnl = 0.0;
 
         // ─── Fase 2: Book Staleness Check (O(1), Polywhales adaptation) ─────
@@ -290,12 +334,14 @@ public:
         strncpy(task.market_slug, market_slug.data(), sizeof(task.market_slug) - 1);
         task.market_slug[sizeof(task.market_slug) - 1] = '\0';
 
-        // Copy payload from fixed buffer
-        task.order.payload.assign(payload_buf.data(), payload_len);
+        // Copy payload to fixed buffer (zero-alloc)
+        memcpy(task.payload, payload_buf.data(), payload_len);
+        task.payload[payload_len] = '\0';
+        task.payload_len = payload_len;
 
         // Copy signature (fixed array — no alloc)
-        task.order.nonce = params.nonce;
-        task.order.signature = signature;
+        task.nonce = params.nonce;
+        memcpy(task.signature.data(), signature.data(), 65);
 
         // Copy maker/taker (fixed arrays — no vector alloc)
         memcpy(task.maker_addr.data(), params.maker, 20);
@@ -384,6 +430,7 @@ private:
     // ─── Async submission queue (network I/O moved off hot path) ──────────
     SubmissionQueue submit_queue_;
     std::thread submit_thread_;
+    std::atomic<bool> shutdown_{false};
 
     // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -393,18 +440,18 @@ private:
      * NEVER runs on the hot path thread.
      */
     void process_submit_queue() {
-        while (true) {
+        while (!shutdown_.load(std::memory_order_relaxed)) {
             auto task = submit_queue_.try_pop();
             if (!task) {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
                 continue;
             }
 
-            // Reconstruct SignedOrder for submission
+            // Reconstruct SignedOrder for submission from fixed buffer
             SignedOrder final_order;
             final_order.nonce = task->nonce;
-            final_order.signature = task->order.signature;
-            final_order.payload = task->order.payload;
+            final_order.signature = task->signature;
+            final_order.payload = std::string_view(task->payload, task->payload_len);
 
             // Perform HTTP submission (network I/O — acceptable in background thread)
             auto http_response = client_.submit_order_with_response(final_order);
@@ -535,7 +582,9 @@ private:
         //
         // For now: GTC orders (exp="0") are safe since they don't require
         // expiration validation.
-        append_str("\",\"exp\":\"0\",\"t\":0}", 14);
+        // FIX: append_str length must match the actual string length (18 bytes),
+        // not 14. The previous code truncated the JSON, producing malformed output.
+        append_str("\",\"exp\":\"0\",\"t\":0}", 18);
 
         buf[offset] = '\0';
         return offset;
