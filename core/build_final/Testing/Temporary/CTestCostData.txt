@@ -1,0 +1,11 @@
+test_compliance_guard 1 0.00789617
+test_fee_model 1 0.00783707
+test_order_manager 1 0.0152609
+test_position_tracker 1 0.00918773
+test_presigned_pool 1 0.00884938
+test_rate_limiter 1 0.0351005
+test_risk_engine 1 0.00487666
+test_telemetry 1 1.18004
+keccak_known_answer 1 0.00856518
+latency_benchmark 1 1.86537
+---

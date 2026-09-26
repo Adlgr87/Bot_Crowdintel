@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -flto -Wl,--dependency-file=CMakeFiles/latency_bench.dir/link.d CMakeFiles/latency_bench.dir/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/tests/benchmarks/latency_bench.cpp.o -o bin/latency_bench  /tmp/secp256k1/.libs/libsecp256k1.a /usr/lib64/libcrypto.so /usr/lib64/libssl.so /usr/lib64/libcrypto.so

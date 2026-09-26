@@ -1,0 +1,3 @@
+keccak_known_answer 5 0.000609903
+latency_benchmark 5 0.145826
+---

@@ -1,0 +1,15 @@
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/crowdintel_bot.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_compliance_guard.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_fee_model.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_order_manager.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_position_tracker.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_presigned_pool.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_rate_limiter.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_risk_engine.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_telemetry.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test_signer.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/latency_bench.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/l2_backtester.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/test.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/edit_cache.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_verify_final/CMakeFiles/rebuild_cache.dir

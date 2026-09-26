@@ -1,0 +1,591 @@
+Start testing: Sep 25 00:34 CST
+----------------------------------------------------------
+1/10 Testing: test_compliance_guard
+1/10 Test: test_compliance_guard
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_compliance_guard"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_compliance_guard" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+🛡️  ComplianceGuard & MarketMetadataCache — Test Suite
+══════════════════════════════════════════════════════════
+
+▶ T1: token_blocklist_rejected ... ✅ PASS
+▶ T2: market_closed_blocks_trading ... ✅ PASS
+▶ T3: tick_size_snap ... ✅ PASS
+▶ T4: jurisdiction_not_configured ... ✅ PASS
+▶ T5: jurisdiction_allowlist ... ✅ PASS
+▶ T6: check_all_integration ... ✅ PASS
+▶ T7: metadata_dynamic_fees_fields ... ✅ PASS
+▶ T8: market_resolving_soon ... ✅ PASS
+▶ T9: jurisdiction_disabled ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+Results: 9/9 passed ✅
+
+✅ All compliance guard tests PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_compliance_guard" end time: Sep 25 00:34 CST
+"test_compliance_guard" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/10 Testing: test_fee_model
+2/10 Test: test_fee_model
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_fee_model"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_fee_model" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+========================================
+ FeeModel — Phase 4 Test Suite
+ Formula: fee = C × 0.25 × (p·(1−p))²
+========================================
+
+    p=0.30 → 0.0826875000  |  p=0.50 → 0.1171875000 (expected max: 0.1171875000)  |  p=0.70 → 0.0826875000
+    p=0.00 → 0.0000000000  |  p=1.00 → 0.0000000000  |  p=0.50 → 0.1171875000
+    fee($100, maker) = 2.222187  |  fee($1000, maker) = 21.276875
+    maker=$50 + fees → 21.171875  |  taker=$85 + fees → 36.171875
+    slippage @10bps=$0.100020  |  slippage @50bps=$0.500100
+    slippage @size=$100=$0.200040  |  slippage @size=$2500=$5.625000
+    slippage @no-liquidity (1% fallback) =$1.000000
+    edge=$1.00  notional=$100.00  spread=500bps  liquidity=$100
+    net_ev=$-8.7272  min_net_ev=$0.50
+    dynamic_C=0.075 → $0.1171875000  |  dynamic_C=0.150 → $0.2343750000
+    fee with dynamic  =$2.222187  |  fee without dynamic=$2.105000
+    gas(1 tx)=$0.005000  |  gas(5 tx)=$0.025000
+
+========================================
+  ✅ dynamic_fee(0.5) > dynamic_fee(0.3)
+  ✅ dynamic_fee(0.5) > dynamic_fee(0.7)
+  ✅ dynamic_fee(0.5) ≈ expected C×0.25×(0.25)²×N
+  ✅ dynamic_fee(0.3) == dynamic_fee(0.7) (symmetry)
+  ✅ dynamic_fee(0.0) == 0
+  ✅ dynamic_fee(1.0) == 0
+  ✅ dynamic_fee(0.0) < dynamic_fee(0.5)
+  ✅ dynamic_fee(1.0) < dynamic_fee(0.5)
+  ✅ fee increases with notional (maker)
+  ✅ taker fee rate > maker fee rate (0.035 > 0.020)
+  ✅ slippage increases with spread
+  ✅ slippage increases with order size
+  ✅ zero liquidity → 1% fallback slippage
+  ✅ edge > 0
+  ✅ net_ev < edge (costs are deducted)
+  ✅ net_ev < 0 (deeply negative)
+  ✅ net_ev < min → NOT_PROFITABLE
+  ✅ NOT_PROFITABLE != OK
+  ✅ fee scales linearly with C
+  ✅ fee with dynamic > fee without (when p=0.5)
+  ✅ gas cost = base × n_txs
+  ✅ gas scales linearly with tx count
+========================================
+ Summary: 22 cases run, 22 passed, 0 failed
+========================================
+
+✅ All 22 cases PASSED
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_fee_model" end time: Sep 25 00:34 CST
+"test_fee_model" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/10 Testing: test_order_manager
+3/10 Test: test_order_manager
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_order_manager"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_order_manager" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+📋 OrderManager — Phase 3 Test Suite
+══════════════════════════════════════════════════════════
+
+▶ T3-1: generate_client_order_id_unique ...
+<end of output>
+Test time =   0.12 sec
+----------------------------------------------------------
+Test Failed.
+"test_order_manager" end time: Sep 25 00:34 CST
+"test_order_manager" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/10 Testing: test_position_tracker
+4/10 Test: test_position_tracker
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_position_tracker"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_position_tracker" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+📊 PositionTracker — Phase 3 Test Suite
+══════════════════════════════════════════════════════════
+
+▶ T3-2: apply_fill_buy ... ✅ PASS
+▶ T3-2: apply_fill_sell ... ✅ PASS
+▶ T3-2: apply_fill_full_close ... ✅ PASS
+▶ T3-2: apply_fill_weighted_avg ... ✅ PASS
+▶ T3-2: apply_fill_cross_zero ... ✅ PASS
+▶ T3-2: parse_fill_event_pipeline ... ✅ PASS
+▶ T3-2: handle_fill_event_pipeline ... ✅ PASS
+▶ T3-3: reconcile_detects_divergence ... ✅ PASS
+▶ T3-3: reconcile_edge_cases ... ✅ PASS
+▶ T3-2: get_net_position_empty ... ✅ PASS
+▶ T3-3: get_total_pnl ... ✅ PASS
+▶ T3-2: get_unrealized_pnl ... ✅ PASS
+▶ T3-2: get_daily_loss ... ✅ PASS
+▶ T3-2: cross_market_independence ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+
+  ❌ apply_fill buy: net position = 100
+  ✅ apply_fill buy: realized PnL = 0 (no close yet)
+  ✅ apply_fill buy: market_count = 1
+  ❌ apply_fill sell: net position = 50
+  ❌ apply_fill sell: realized PnL = $5.00
+  ❌ apply_fill close: net position = 0
+  ❌ apply_fill close: realized PnL = $20.00
+  ❌ apply_fill multi-buy: net position = 200
+  ❌ apply_fill weighted avg: realized PnL after sell = $10.00
+  ❌ apply_fill weighted avg: remaining position = 100
+  ✅ apply_fill cross-zero: net position = -50
+  ❌ apply_fill cross-zero: realized PnL = $10.00
+  ❌ parse_fill_event pipeline: position = 100
+  ❌ handle_fill_event pipeline: position = 50
+  ❌ handle_fill_event pipeline: realized PnL = $5
+  ❌ concurrent apply_fill: position = 100
+  ❌ reconcile: exact match → false (no divergence)
+  ❌ reconcile: 1% diff at 1% tolerance → false (not exceeding)
+  ✅ reconcile: 2% diff at 1% tolerance → true (divergence detected)
+  ✅ reconcile: 100% diff → true (divergence detected)
+  ✅ reconcile: both zero → false
+  ✅ reconcile: internal=0, api=10 → true (divergence)
+  ❌ reconcile: 5% diff at 0.1 tolerance → false
+  ✅ reconcile: 10% diff at 0.05 tolerance → true
+  ✅ get_net_position for unknown market → 0
+  ✅ get_realized_pnl for unknown market → 0
+  ✅ get_unrealized_pnl for unknown market → 0
+  ✅ get_market_count starts at 0
+  ❌ get_total_pnl = $25 ($20 + $5)
+  ❌ get_unrealized_pnl @ $0.60 = $10.00
+  ❌ get_unrealized_pnl @ $0.40 = -$10.00
+  ✅ get_unrealized_pnl @ $0.50 = $0
+  ❌ get_daily_loss after losing trade = $10
+  ✅ get_daily_loss after winning trade = 0
+  ❌ cross-market: MARKET-A position = 100
+  ❌ cross-market: MARKET-B position = 200
+  ✅ cross-market: MARKET-A ≠ MARKET-B
+  ✅ cross-market: market_count = 2
+
+══════════════════════════════════════════════════════════
+Tests:  14/14 passed
+Cases:  16/38 passed (22 failed)
+══════════════════════════════════════════════════════════
+❌ 0 test(s) failed, 22 case(s) failed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Failed.
+"test_position_tracker" end time: Sep 25 00:34 CST
+"test_position_tracker" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/10 Testing: test_presigned_pool
+5/10 Test: test_presigned_pool
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_presigned_pool"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_presigned_pool" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+📜 PresignedOrderPool — Phase 3 Test Suite (T3-5)
+══════════════════════════════════════════════════════════
+
+▶ T3-5: add_and_query ... ✅ PASS
+▶ T3-5: check_and_invalidate_within_tolerance ... ✅ PASS
+▶ T3-5: check_and_invalidate_exceeds_tolerance ... ✅ PASS
+▶ T3-5: check_and_invalidate_sell_side ... ✅ PASS
+▶ T3-5: invalidate_all ... ✅ PASS
+▶ T3-5: remove_order ... ✅ PASS
+▶ T3-5: check_and_invalidate_selective ... ✅ PASS
+▶ T3-5: check_and_invalidate_skip_invalid ... ✅ PASS
+▶ T3-5: configurable_deviation ... ✅ PASS
+▶ T3-5: zero_price_edge_case ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+
+  ✅ pool starts empty (size=0)
+  ✅ pool starts with 0 valid orders
+  ✅ pool size = 1 after add
+  ✅ valid_count = 1 after add
+  ✅ get_valid_order_ids returns 1 order
+  ✅ get_valid_order_ids contains our order
+  ✅ price within tolerance → order still valid
+  ✅ price exceeds tolerance → order invalidated
+  ✅ no valid orders after invalidation
+  ✅ sell order, price within tolerance → still valid
+  ✅ sell order, price exceeds tolerance → invalidated
+  ✅ 5 orders added, valid_count = 5
+  ✅ invalidate_all → valid_count = 0
+  ✅ invalidate_all → size still = 5 (orders not removed)
+  ✅ invalidate_all → get_valid_order_ids empty
+  ✅ 3 orders added
+  ✅ after remove: size = 2
+  ✅ after remove: valid_count = 2
+  ✅ remove nonexistent order is safe (size still 2)
+  ✅ selective invalidation: order at $0.50 still valid
+  ✅ selective invalidation: only $0.50 order remains valid
+  ✅ 2 orders added (1 valid, 1 invalid)
+  ✅ valid_count = 1
+  ✅ already-invalid order stays invalid
+  ✅ valid order stays valid (no price move)
+  ✅ strict pool: 100bps deviation at 100bps limit → still valid
+  ✅ strict pool: 400bps deviation at 100bps limit → invalidated
+  ✅ zero-price order not invalidated (division guard)
+
+══════════════════════════════════════════════════════════
+Tests:  10/10 passed
+Cases:  28/28 passed (0 failed)
+══════════════════════════════════════════════════════════
+✅ All 10/10 tests passed (28 assertion cases)
+✅ PresignedOrderPool: price deviation invalidation, invalidate_all, remove_order all verified.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_presigned_pool" end time: Sep 25 00:34 CST
+"test_presigned_pool" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/10 Testing: test_rate_limiter
+6/10 Test: test_rate_limiter
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_rate_limiter"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_rate_limiter" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+🚀 RateLimiter Token Bucket — Unit Tests
+=========================================
+
+  ⏳ ["burst_consumption"] ...   ✅ [test_burst_consumption] PASSED
+  ⏳ ["exhaustion_blocks"] ...   ✅ [test_exhaustion_blocks] PASSED
+  ⏳ ["next_available_timing"] ...   ✅ [test_next_available_timing] PASSED
+  ⏳ ["thread_safety"] ...   ✅ [thread_safety] PASSED (acquired exactly 200 = burst)
+  ⏳ ["refill_after_wait"] ...   ✅ [test_refill_after_wait] PASSED
+  ⏳ ["next_available_zero"] ...   ✅ [test_next_available_zero] PASSED
+
+=========================================
+📊 Results: 6/6 passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_rate_limiter" end time: Sep 25 00:34 CST
+"test_rate_limiter" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/10 Testing: test_risk_engine
+7/10 Test: test_risk_engine
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_risk_engine"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_risk_engine" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+🛡️  RiskEngine & Kill Switch — Phase 2 Test Suite
+══════════════════════════════════════════════════════════
+
+Config (conservative defaults):
+  max_daily_loss_usd      = 500.0
+  max_order_usd           = 500.0
+  min_usdc_balance        = 100.0
+  min_pol_balance         = 10.0
+  max_orders_per_min      = 10
+  max_cancels_per_min     = 20
+  max_exposure_per_market = 5000.0
+  kill_switch_enabled     = true
+
+▶ T1: order_exceeds_max_usd_blocked ... ✅ PASS
+▶ T2: kill_switch_active_blocks ... ✅ PASS
+▶ T3: order_rate_window_exceeded ... ✅ PASS
+▶ T4: insufficient_balance_blocked ... ✅ PASS
+▶ T5: daily_loss_triggers_kill_switch ... ✅ PASS
+▶ T6: exposure_limit_enforced ... ✅ PASS
+▶ T7: kill_switch_deactivation ... ✅ PASS
+▶ T8: cancel_rate_window_exceeded ... ✅ PASS
+▶ T9: valid_order_passes ... ✅ PASS
+▶ T10: configurable_limits ... ✅ PASS
+▶ T11: consecutive_reject_streak ... ✅ PASS
+▶ T12: daily_loss_persists_kill_switch ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+
+  ✅ order > max_order_usd → RISK_BLOCKED
+  ✅ order > max_order_usd ≠ OK
+  ✅ order == max_order_usd → OK (boundary)
+  ✅ order = max_order_usd + epsilon → RISK_BLOCKED
+  ✅ kill switch inactive → order passes
+  ✅ kill switch is active after activation
+  ✅ kill switch active → KILL_SWITCH
+  ✅ kill switch blocks even zero-size order
+  ✅ order window at capacity → RISK_BLOCKED
+  ✅ order window below capacity → OK
+  ✅ usdc < min_usdc_balance → INSUFFICIENT_BALANCE
+  ✅ pol < min_pol_balance → INSUFFICIENT_BALANCE
+  ✅ balance at minimum → OK (boundary)
+  ✅ sufficient balance → OK
+  ✅ loss=499 ($500 limit) → kill switch inactive
+  ✅ loss exceeds max_daily_loss → kill switch activated
+  ✅ after daily loss exceeded → KILL_SWITCH
+  ✅ exposure=4999 ($5000 limit) → OK
+  ✅ exposure=5001 > limit → RISK_BLOCKED
+  ✅ kill switch active after activate
+  ✅ kill switch inactive after deactivate
+  ✅ trading resumes after deactivate
+  ✅ double deactivate is safe
+  ✅ cancel window at capacity → RISK_BLOCKED
+  ✅ valid order → OK
+  ✅ configurable: order $500 < $1000 limit → OK
+  ✅ configurable: order $1500 > $1000 limit → RISK_BLOCKED
+  ✅ configurable: usdc $100 < min $500 → INSUFFICIENT_BALANCE
+  ✅ configurable: 3 orders/min limit hit → RISK_BLOCKED
+  ✅ 4 rejects (< 5 limit) → kill switch inactive
+  ✅ 5 rejects (== limit) → kill switch activated
+  ✅ loss exceeds threshold → kill switch
+  ✅ kill switch persists after daily loss
+  ✅ explicit deactivation clears kill switch
+
+══════════════════════════════════════════════════════════
+Tests:  12/12 passed
+Cases:  34/34 passed (0 failed)
+══════════════════════════════════════════════════════════
+✅ All 12/12 tests passed (34 assertion cases)
+✅ RiskEngine kill switch, rate windows, and limits verified.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_risk_engine" end time: Sep 25 00:34 CST
+"test_risk_engine" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/10 Testing: test_telemetry
+8/10 Test: test_telemetry
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_telemetry"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"test_telemetry" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+📡 Telemetry & Observability — Phase 6 Test Suite
+════════════════════════════════════════════════════════════
+
+AlertConfig defaults:
+  daily_loss_threshold_usd      = 500.0
+  consecutive_429_threshold      = 5
+  latency_spike_us             = 100000 (100ms)
+  position_divergence_threshold = 0.05
+  feed_dead_ms                 = 5000
+  webhook_url                  = ""
+
+▶ T6-1a: SPSC ring buffer capacity == 8192 ... ✅ PASS
+▶ T6-1b: log_event produces valid JSON line ... ✅ PASS
+▶ T6-1c: append-only — no event overwrite ... ✅ PASS
+▶ T6-1d: hot path no I/O (non-blocking) ... ✅ PASS
+▶ T6-1e: backpressure / dropped events counted ... ✅ PASS
+▶ T6-1f: JSON Lines format validation ... ✅ PASS
+▶ T6-2a: AlertConfig defaults (no env) ... ✅ PASS
+▶ T6-2b: AlertConfig env override ... ✅ PASS
+▶ T6-2c: consecutive_429 alert threshold ... ✅ PASS
+▶ T6-2d: daily_loss alert threshold ... ✅ PASS
+▶ T6-3a: metrics JSON contains all counters ... ✅ PASS
+▶ T6-3b: counters are atomic (concurrent) ... ✅ PASS
+▶ T6-3c: record all TickResult types ... ✅ PASS
+▶ Integration: log_risk_block with OrderParams ... ✅ PASS
+▶ Integration: execution_engine.cpp methods match ... ✅ PASS
+▶ Security: no secrets in logs (sanitized) ... ✅ PASS
+
+════════════════════════════════════════════════════════════
+
+  ✅ SPSC_RingBuffer capacity == 8192
+  ✅ SPSC capacity is power of 2
+  ✅ audit.log has at least 1 line after log_event
+  ✅ log line contains "type"
+  ✅ log line contains "market"
+  ✅ log line contains "severity"
+  ✅ log line contains "ts"
+  ✅ log line contains "details"
+  ✅ log line ends with newline
+  ✅ JSON object starts with brace
+  ✅ JSON object ends before newline
+  ✅ 5 events produce 5 log lines
+  ✅ event seq=0 is present (not overwritten)
+  ✅ event seq=1 is present (not overwritten)
+  ✅ event seq=2 is present (not overwritten)
+  ✅ event seq=3 is present (not overwritten)
+  ✅ event seq=4 is present (not overwritten)
+  ✅ 1000 hot-path log_event calls < 10ms (no I/O on hot path)
+  ✅ all 1000 events appear in log after drain
+  ✅ at least 1 event written to log
+  ✅ get_dropped_count() returns a value >= 0
+  ✅ backpressure mechanism: drops counted when flooding 10000 into 8192 queue
+  ✅ all 3 lines are valid JSON objects
+  ✅ JSON line for ORDER_SUBMITTED is valid
+  ✅ JSON line for ORDER_FILLED is valid
+  ✅ JSON line for LATENCY_SPIKE is valid
+  ✅ default daily_loss_threshold_usd == 500.0
+  ✅ default consecutive_429_threshold == 5
+  ✅ default latency_spike_us == 100000
+  ✅ default position_divergence_threshold == 0.05
+  ✅ default feed_dead_ms == 5000
+  ✅ default webhook_url is empty
+  ✅ env override: daily_loss_threshold_usd == 750.5
+  ✅ env override: consecutive_429_threshold == 3
+  ✅ env override: latency_spike_us == 50000
+  ✅ env override: position_divergence_threshold == 0.10
+  ✅ env override: feed_dead_ms == 3000
+  ✅ env override: webhook_url is set
+  ✅ 3rd consecutive 429 triggers RATE_LIMIT_STREAK alert
+  ✅ alert severity is CRITICAL
+  ✅ reset_429_streak clears consecutive_429 counter
+  ✅ loss below threshold: TEST_ALERT logged
+  ✅ loss below threshold: no DAILY_LOSS_EXCEEDED alert
+  ✅ loss exceeds threshold: DAILY_LOSS_EXCEEDED alert fired
+  ✅ metrics JSON is valid object
+  ✅ metrics contains orders_submitted
+  ✅ metrics contains fills
+  ✅ metrics contains cancels
+  ✅ metrics contains risk_blocks
+  ✅ metrics contains tickresult_ok
+  ✅ metrics contains tickresult_risk_blocked
+  ✅ metrics contains tickresult_no_signal
+  ✅ metrics contains realized_pnl
+  ✅ metrics contains daily_loss
+  ✅ metrics contains dropped_events
+  ✅ metrics contains consecutive_429
+  ✅ orders_submitted == 40000 after 4 threads × 10000
+  ✅ fills == 40000 after concurrent increments
+  ✅ cancels == 40000 after concurrent increments
+  ✅ tickresult_ok == 40000 after concurrent increments
+  ✅ tickresult_ok == 1
+  ✅ tickresult_no_signal == 1
+  ✅ tickresult_no_edge == 1
+  ✅ tickresult_not_profitable == 1
+  ✅ tickresult_risk_blocked == 1
+  ✅ tickresult_kill_switch == 1
+  ✅ tickresult_market_not_tradable == 1
+  ✅ tickresult_duplicate == 1
+  ✅ tickresult_insufficient_balance == 1
+  ✅ log_risk_block produces RISK_BLOCKED event
+  ✅ log_risk_block with KILL_SWITCH severity is CRITICAL
+  ✅ log_risk_block with RISK_BLOCKED severity is WARN
+  ✅ log_risk_block includes order_size in details
+  ✅ log_risk_block includes reason
+  ✅ risk_blocks counter incremented by log_risk_block
+  ✅ BALANCE_CHECK event logged
+  ✅ ORDER_SUBMITTED event logged
+  ✅ ORDER_REJECTED event logged
+  ✅ metrics JSON shows orders_submitted == 1
+  ✅ metrics JSON shows tickresult_ok == 1
+  ✅ log contains order_id field (safe, non-secret)
+  ✅ no 'private_key' field in log
+  ✅ no 'api_key' field in log
+  ✅ no 'signature' field in log
+  ✅ no 'seed_phrase' in log
+  ✅ no 'mnemonic' in log
+  ✅ log_risk_block does NOT include maker address bytes (0x42)
+  ✅ log_risk_block does NOT include salt/nonce (sensitive order params)
+  ✅ log_risk_block only logs order_size (sanitized)
+
+════════════════════════════════════════════════════════════
+Tests:  16/16 passed
+Cases:  89/89 passed (0 failed)
+════════════════════════════════════════════════════════════
+✅ All 16/16 tests passed (89 assertion cases)
+✅ Telemetry async logging, alert thresholds, and metrics verified.
+✅ No secrets found in audit logs.
+<end of output>
+Test time =   1.17 sec
+----------------------------------------------------------
+Test Passed.
+"test_telemetry" end time: Sep 25 00:34 CST
+"test_telemetry" time elapsed: 00:00:01
+----------------------------------------------------------
+
+9/10 Testing: keccak_known_answer
+9/10 Test: keccak_known_answer
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/test_signer"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"keccak_known_answer" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+🔐 EIP-712 Signing Engine — Known-Answer Tests
+
+✅ Keccak-256("") PASS
+✅ Keccak-256("abc") PASS
+✅ Keccak-256(0x00) PASS
+
+📝 EIP-712 Signing Test
+
+Domain Separator: b792e5a94900c6691093a2f89def9bc6a786b4d8ea72f2d66d01888906fd562c
+SIG 0 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 1 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 2 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 3 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 4 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 5 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 6 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 7 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 8 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 9 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 10 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 11 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 12 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 13 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 14 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 15 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 16 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 17 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 18 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 19 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+EIP712_HASH: c10279893d91f59341834c408bc56d1ac6c3e9c48e8bc4fb8d97a2b0a200e6d3
+
+✅ 20/20 signatures have valid v (27 or 28)
+✅ Signature tests PASS
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"keccak_known_answer" end time: Sep 25 00:34 CST
+"keccak_known_answer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/10 Testing: latency_benchmark
+10/10 Test: latency_benchmark
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0/bin/latency_bench"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_phase0
+"latency_benchmark" start time: Sep 25 00:34 CST
+Output:
+----------------------------------------------------------
+>> Queue pre-filled with 4095 signals (capacity: 4096)
+   Warmup refill: 0/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+>> Running 20000 ticks (post-warmup, with continuous refill)...
+
+--- FINAL LATENCY RESULTS (Post-MutaLambda + Warmup) ---
+CPU frequency calibrated: 0.372 ns/cycle
+Min: 		27.346 us (73504 cycles)
+P50: 		29.073 us (78144 cycles)
+P99: 		35.433 us (95240 cycles)
+
+✅ Hot Path Core Logic Measured. (Network I/O excluded; 5000-tick warmup, calibrated CPU freq)
+<end of output>
+Test time =   0.91 sec
+----------------------------------------------------------
+Test Passed.
+"latency_benchmark" end time: Sep 25 00:34 CST
+"latency_benchmark" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 25 00:34 CST

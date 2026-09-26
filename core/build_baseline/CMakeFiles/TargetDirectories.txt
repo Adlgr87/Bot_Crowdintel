@@ -1,0 +1,7 @@
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/crowdintel_bot.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/test_signer.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/latency_bench.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/l2_backtester.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/test.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/edit_cache.dir
+/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_baseline/CMakeFiles/rebuild_cache.dir

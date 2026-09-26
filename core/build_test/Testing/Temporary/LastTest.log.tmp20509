@@ -1,0 +1,249 @@
+Start testing: Sep 25 11:14 CST
+----------------------------------------------------------
+1/15 Testing: test_compliance_guard
+1/15 Test: test_compliance_guard
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test/bin/test_compliance_guard"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test
+"test_compliance_guard" start time: Sep 25 11:14 CST
+Output:
+----------------------------------------------------------
+🛡️  ComplianceGuard & MarketMetadataCache — Test Suite
+══════════════════════════════════════════════════════════
+
+▶ T1: token_blocklist_rejected ... ✅ PASS
+▶ T2: market_closed_blocks_trading ... ✅ PASS
+▶ T3: tick_size_snap ... ✅ PASS
+▶ T4: jurisdiction_not_configured ... ✅ PASS
+▶ T5: jurisdiction_allowlist ... ✅ PASS
+▶ T6: check_all_integration ... ✅ PASS
+▶ T7: metadata_dynamic_fees_fields ... ✅ PASS
+▶ T8: market_resolving_soon ... ✅ PASS
+▶ T9: jurisdiction_disabled ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+Results: 9/9 passed ✅
+
+✅ All compliance guard tests PASS
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"test_compliance_guard" end time: Sep 25 11:14 CST
+"test_compliance_guard" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/15 Testing: test_fee_model
+2/15 Test: test_fee_model
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test/bin/test_fee_model"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test
+"test_fee_model" start time: Sep 25 11:14 CST
+Output:
+----------------------------------------------------------
+========================================
+ FeeModel — Phase 4 Test Suite
+ Formula: fee = C × 0.25 × (p·(1−p))²
+========================================
+
+    p=0.30 → 0.0826875000  |  p=0.50 → 0.1171875000 (expected max: 0.1171875000)  |  p=0.70 → 0.0826875000
+    p=0.00 → 0.0000000000  |  p=1.00 → 0.0000000000  |  p=0.50 → 0.1171875000
+    fee($100, maker) = 2.222187  |  fee($1000, maker) = 21.276875
+    maker=$50 + fees → 21.171875  |  taker=$85 + fees → 36.171875
+    slippage @10bps=$0.100020  |  slippage @50bps=$0.500100
+    slippage @size=$100=$0.200040  |  slippage @size=$2500=$5.625000
+    slippage @no-liquidity (1% fallback) =$1.000000
+    edge=$1.00  notional=$100.00  spread=500bps  liquidity=$100
+    net_ev=$-8.7272  min_net_ev=$0.50
+    dynamic_C=0.075 → $0.1171875000  |  dynamic_C=0.150 → $0.2343750000
+    fee with dynamic  =$2.222187  |  fee without dynamic=$2.105000
+    gas(1 tx)=$0.005000  |  gas(5 tx)=$0.025000
+
+========================================
+  ✅ dynamic_fee(0.5) > dynamic_fee(0.3)
+  ✅ dynamic_fee(0.5) > dynamic_fee(0.7)
+  ✅ dynamic_fee(0.5) ≈ expected C×0.25×(0.25)²×N
+  ✅ dynamic_fee(0.3) == dynamic_fee(0.7) (symmetry)
+  ✅ dynamic_fee(0.0) == 0
+  ✅ dynamic_fee(1.0) == 0
+  ✅ dynamic_fee(0.0) < dynamic_fee(0.5)
+  ✅ dynamic_fee(1.0) < dynamic_fee(0.5)
+  ✅ fee increases with notional (maker)
+  ✅ taker fee rate > maker fee rate (0.035 > 0.020)
+  ✅ slippage increases with spread
+  ✅ slippage increases with order size
+  ✅ zero liquidity → 1% fallback slippage
+  ✅ edge > 0
+  ✅ net_ev < edge (costs are deducted)
+  ✅ net_ev < 0 (deeply negative)
+  ✅ net_ev < min → NOT_PROFITABLE
+  ✅ NOT_PROFITABLE != OK
+  ✅ fee scales linearly with C
+  ✅ fee with dynamic > fee without (when p=0.5)
+  ✅ gas cost = base × n_txs
+  ✅ gas scales linearly with tx count
+========================================
+ Summary: 22 cases run, 22 passed, 0 failed
+========================================
+
+✅ All 22 cases PASSED
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_fee_model" end time: Sep 25 11:14 CST
+"test_fee_model" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/15 Testing: test_kelly_slippage
+3/15 Test: test_kelly_slippage
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test/bin/test_kelly_slippage"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test
+"test_kelly_slippage" start time: Sep 25 11:14 CST
+Output:
+----------------------------------------------------------
+========================================
+ KellyEngine — Depth-Aware Slippage Model
+========================================
+
+  ⏳ ["backward_compatible_kelly"] ...     f* = 0.004500 (ev=0.05, conf=0.9, fraction=0.1)
+  ⏳ ["slippage_increases_with_size"] ...     slippage($100)  = $0.2000  (depth_ratio=0.02)
+    slippage($2500) = $5.6250  (depth_ratio=0.50)
+    slippage at depth=$5000 = $15.0000 (expected $15.0000)
+  ⏳ ["slippage_penalty_reduces_position"] ...     Deep liq:  pos=$142.95  kelly_f=0.0225  adj_f=0.0143  net_ev=$14.29
+    Shallow:  pos=$122.13  kelly_f=0.0225  adj_f=0.0122  net_ev=$12.21
+  ⏳ ["unprofitable_eliminates_position"] ...     pos=$0.00  gross_edge=$0.03  net_edge=$-0.29  profitable=0
+  ⏳ ["depth_ratio_capping"] ...     size_to_depth(0.5, $10k, $1k liq, 0.3) = $300.00 (expected $300)
+    size_to_depth(0.01, $10k, $100k liq, 0.3) = $100.00 (expected $100)
+  ⏳ ["high_confidence_deep_liquidity"] ...     pos=$115.15  kelly_f=0.0119  adj_f=0.0115  net_ev=$5.76  profitable=1
+    adjusted/raw ratio = 0.9697
+  ⏳ ["low_confidence"] ...     high conf: pos=$28.77  f=0.0119
+    low conf:  pos=$7.65  f=0.0037
+  ⏳ ["spread_sensitivity"] ...     tight spread: pos=$30.52  net_ev=$1.53
+    wide spread:  pos=$0.00  net_ev=$-0.67
+  ⏳ ["kelly_result_consistency"] ...     gross_edge=$5.00  net_edge=$1.19  cost=$3.81
+    kelly_f=0.0100  adj_f=0.0024  depth_ratio=0.0048
+  ⏳ ["zero_liquidity"] ...     pos=$0.00  net_ev=$0.00  profitable=0
+  ⏳ ["fee_composition"] ...     cost breakdown at $1000 (taker):
+      maker fee:        $3.0000
+      commission:       $0.10
+      gas:              $0.005
+      slippage:         $2.0400
+      total:            $5.1450
+    with dynamic fee (p=0.5): $6.3169 (expected $6.3169)
+
+========================================
+  ✅ fractional_kelly > 0 for positive edge
+  ✅ fractional_kelly < 1.0 (fractional)
+  ✅ fractional_kelly ≈ 0.05*0.9*0.1 = 0.0045
+  ✅ fractional_kelly = 0 for negative edge
+  ✅ position_size = 0.0045 * 10000 = 45
+  ✅ slippage($2500) > slippage($100)
+  ✅ slippage at depth ≈ 1.5× spread cost
+  ✅ shallow liquidity → smaller position
+  ✅ adjusted_f <= kelly_f (penalty applied)
+  ✅ deep position > $100
+  ✅ unprofitable → position_size = 0
+  ✅ unprofitable → not is_profitable
+  ✅ unprofitable → rejection_reason set
+  ✅ position capped to 30% of depth
+  ✅ position below cap = not reduced
+  ✅ zero liquidity → position = 0
+  ✅ high conf + deep liq → is_profitable
+  ✅ adjusted fraction ≈ raw (low slippage)
+  ✅ low conf → smaller kelly_f
+  ✅ low conf → smaller position
+  ✅ wide spread → smaller position
+  ✅ wide spread → lower net_ev
+  ✅ net_edge ≈ gross_edge - cost
+  ✅ adjusted_fraction <= kelly_fraction
+  ✅ position_size ≈ adj_fraction * max_pos
+  ✅ depth_ratio ≈ pos / liquidity
+  ✅ is_profitable consistent
+  ✅ zero liquidity → position = 0
+  ✅ zero liquidity → not profitable
+  ✅ zero liquidity → rejection_reason set
+  ✅ cost = fee + commission + gas + slippage
+  ✅ dynamic fee adds probability-weighted cost
+  ✅ dynamic cost > base cost
+========================================
+ Summary: 33 cases, 33 passed, 0 failed
+========================================
+
+✅ All 33 cases PASSED
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_kelly_slippage" end time: Sep 25 11:14 CST
+"test_kelly_slippage" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/15 Testing: test_mempool_listener
+4/15 Test: test_mempool_listener
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test/bin/test_mempool_listener"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build_test
+"test_mempool_listener" start time: Sep 25 11:14 CST
+Output:
+----------------------------------------------------------
+📡 MempoolListener & Polygon Streaming — Phase C Test Suite
+══════════════════════════════════════════════════════════
+
+▶ C-1: listener_initialization ... ✅ PASS
+▶ C-2: mock_transport_connection ... ✅ PASS
+▶ C-3: calldata_decoding ... ✅ PASS
+▶ C-4: whale_detection ... ✅ PASS
+▶ C-5: whale_signal_generation ... ✅ PASS
+▶ C-6: confidence_scoring ... ✅ PASS
+▶ C-7: stress_mempool_50k ... ✅ PASS
+▶ C-8: lockfree_spsc_validation ... ✅ PASS
+▶ C-9: reconnection_backoff ... ✅ PASS
+▶ C-10: transaction_hash_callback ... ✅ PASS
+
+══════════════════════════════════════════════════════════
+
+  ✅ listener constructed with custom config
+  ✅ listener not running initially
+  ✅ mock transport created
+  ✅ mock transport connects
+  ✅ mock transport is_connected
+  ✅ mock transport disconnects
+  ✅ decoded is_polymarket
+  ✅ decoded function is placeOrder
+  ✅ decoded amount > 0
+  ✅ decoded token_value_usd > 0
+  ✅ transfer decoded function name
+  ✅ small tx confidence = 0 (below threshold)
+  ✅ whale tx confidence >= 0.6
+  ✅ whale tx confidence <= 1.0
+  ✅ non-Polymarket tx confidence = 0
+  ✅ whale signal processing (non-whale is valid)
+  ✅ high gas confidence >= low gas confidence
+  ✅ detector stats total_seen > 0
+  ✅ stress: poll_count > 0
+  ✅ stress: whale_signals >= 0
+  ✅ stress: poll_count reasonable (>50)
+  ✅ stress: drained signals >= 0
+  ✅ lockfree: signal sequence matches (no reordering)
+  ✅ lockfree: pushed == 100000
+  ✅ lockfree: popped == 100000 (no lost items)
+  ✅ lockfree: all signals preserved
+  ✅ reconnect: listener ran without crashing
+  ✅ reconnect: poll_count > 0
+  ✅ transport connected
+  ✅ tx hash is 32 bytes
+  ✅ tx hash is 32 bytes
+  ✅ tx hash callback invoked
+
+══════════════════════════════════════════════════════════
+Tests:  10/10 passed
+Cases:  32/32 passed (0 failed)
+══════════════════════════════════════════════════════════
+✅ All 10/10 tests passed (32 assertion cases)
+✅ MempoolListener, calldata decoding, whale detection validated.
+<end of output>
+Test time =   0.77 sec
+----------------------------------------------------------
+Test Passed.
+"test_mempool_listener" end time: Sep 25 11:14 CST
+"test_mempool_listener" time elapsed: 00:00:00
+----------------------------------------------------------
+

@@ -1,0 +1,81 @@
+Start testing: Sep 22 09:11 CST
+----------------------------------------------------------
+1/2 Testing: keccak_known_answer
+1/2 Test: keccak_known_answer
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build/bin/test_signer"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build
+"keccak_known_answer" start time: Sep 22 09:11 CST
+Output:
+----------------------------------------------------------
+🔐 EIP-712 Signing Engine — Known-Answer Tests
+
+✅ Keccak-256("") PASS
+✅ Keccak-256("abc") PASS
+✅ Keccak-256(0x00) PASS
+
+📝 EIP-712 Signing Test
+
+Domain Separator: b792e5a94900c6691093a2f89def9bc6a786b4d8ea72f2d66d01888906fd562c
+SIG 0 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 1 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 2 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 3 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 4 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 5 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 6 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 7 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 8 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 9 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 10 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 11 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 12 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 13 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 14 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 15 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 16 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 17 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 18 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+SIG 19 r=58d912dda91c59659be066bca649865f10eb0b05f462940ef6f3bd643978b11f s=26c41db2f5d00149c6364aee8d7592b6360940623170c990d5c50a3cc41de163 v=27
+EIP712_HASH: c10279893d91f59341834c408bc56d1ac6c3e9c48e8bc4fb8d97a2b0a200e6d3
+
+✅ 20/20 signatures have valid v (27 or 28)
+✅ Signature tests PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"keccak_known_answer" end time: Sep 22 09:11 CST
+"keccak_known_answer" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: latency_benchmark
+2/2 Test: latency_benchmark
+Command: "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build/bin/latency_bench"
+Directory: /home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel/core/build
+"latency_benchmark" start time: Sep 22 09:11 CST
+Output:
+----------------------------------------------------------
+>> Queue pre-filled with 4095 signals (capacity: 4096)
+   Warmup refill: 0/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+   Warmup refill: 1024/4095 signals queued
+>> Running 20000 ticks (post-warmup, with continuous refill)...
+
+--- FINAL LATENCY RESULTS (Post-MutaLambda + Warmup) ---
+CPU frequency calibrated: 0.372 ns/cycle
+Min: 		20.395 us (54820 cycles)
+P50: 		21.870 us (58784 cycles)
+P99: 		30.631 us (82332 cycles)
+
+✅ Hot Path Core Logic Measured. (Network I/O excluded; 5000-tick warmup, calibrated CPU freq)
+<end of output>
+Test time =   0.73 sec
+----------------------------------------------------------
+Test Passed.
+"latency_benchmark" end time: Sep 22 09:11 CST
+"latency_benchmark" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 22 09:11 CST
