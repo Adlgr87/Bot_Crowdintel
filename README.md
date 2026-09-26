@@ -83,6 +83,46 @@ export OPERATOR_JURISDICTION="US"   # for compliance checks (default: US)
 ./bin/crowdintel_bot
 ```
 
+### Paper Trading Simulation (No Credentials Required)
+
+Run a self-contained simulation to validate bot behavior without touching real
+markets or requiring credentials:
+
+```bash
+# Build the simulation binary
+g++ -std=c++20 -O2 -Icore/include tests/sim/paper_trading_main.cpp -o bin/paper_sim -lpthread
+
+# Run with defaults (1000 ticks, 5 markets, seed=42)
+./bin/paper_sim
+
+# Custom parameters
+./bin/paper_sim --ticks=2000 --markets=10 --seed=123 --capital=100000
+
+# Run without market noise (deterministic prices)
+./bin/paper_sim --no-noise
+```
+
+The simulator exercises the full risk pipeline:
+- **Entry band enforcement** (35–70¢ per Polywhales policy)
+- **Book staleness detection** (90s timeout → blocks ticks)
+- **Exposure limits** (20% of capital cap)
+- **EV threshold filtering**
+- **Slippage simulation** (75% fill rate)
+- **Realized P&L tracking** with mean-reversion exits
+
+Sample output:
+```
+📊 SIMULATION REPORT — CrowdIntel Bot Paper Trading (Polymarket CLOB V2)
+  Total signals:         2000
+  Fills executed:        72        Fill rate: 4.2%
+  Stale books blocked:   110      Risk/exposure blocked: 1557
+  Below EV threshold:    219      Slippage/no fill:  248
+  Initial capital:       $100000.00
+  Final balance:         $80025.45
+  Total exposure:        $19974.55  Total volume: $23038.35
+  Realized P&L:          $161.88     Avg fill price: $0.597
+```
+
 ### Docker Build (Production)
 
 ```bash
