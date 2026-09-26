@@ -306,7 +306,7 @@ daily schedule.
 | [`VERIFICATION_FINAL.md`](VERIFICATION_FINAL.md) | Final remediation verification (authoritative) |
 | [`HOT_PATH_AUDIT_REPORT.md`](HOT_PATH_AUDIT_REPORT.md) | Detailed hot path violation analysis |
 | [`REMEDIATION_MASTER_PLAN.md`](REMEDIATION_MASTER_PLAN.md) | Audit findings → remediation mapping |
-| [`docs/PERF_METRICS.md`](docs/PEF_METRICS.md) | Performance analysis & methodology |
+| [`docs/PERF_METRICS.md`](docs/PERF_METRICS.md) | Performance analysis & methodology |
 | [`docs/OPTIMIZATION_LINEAGE.md`](docs/OPTIMIZATION_LINEAGE.md) | Optimization history |
 | [`PROJECT_ANALYSIS.md`](PROJECT_ANALYSIS.md) | Full project assessment (P0–P3 action plan) |
 
