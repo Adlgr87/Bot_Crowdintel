@@ -11,6 +11,12 @@
  * SPSC_RingBuffer: Single-Producer Single-Consumer Lock-Free Queue.
  * Zero-allocation after construction (buffer allocated once at init).
  * Capacity must be a power of 2 for fast modulo via bitmask.
+ *
+ * Handles non-trivially-destructible types (e.g. TelemetryEvent with std::string):
+ * - Raw memory is allocated (no default-construction of elements)
+ * - Elements are constructed via placement new in try_push()
+ * - Elements are destructed in try_pop() after copying out
+ * - Destructor only destructs elements still live (between tail_ and head_)
  */
 template<typename T, size_t Capacity = 4096>
 class SPSC_RingBuffer {
@@ -19,8 +25,30 @@ class SPSC_RingBuffer {
 
 public:
     SPSC_RingBuffer() : head_(0), tail_(0) {
-        buffer_ = std::make_unique<T[]>(Capacity);
+        // Allocate raw memory — no element construction.
+        // Elements are constructed on-demand via placement new in try_push().
+        // This avoids constructing all Capacity default-objects (which would
+        // be wasted memory for non-trivial types like std::string).
+        buffer_ = static_cast<T*>(::operator new[](Capacity * sizeof(T)));
     }
+
+    ~SPSC_RingBuffer() {
+        // Destruct only the elements that are still live in the buffer
+        // (between tail_ and head_). Elements already popped were destructed
+        // in try_pop(); elements never pushed were never constructed.
+        size_t current_head = head_.load(std::memory_order_relaxed);
+        size_t current_tail = tail_.load(std::memory_order_relaxed);
+        while (current_tail != current_head) {
+            buffer_[current_tail].~T();
+            current_tail = (current_tail + 1) & mask_;
+        }
+        // Free raw memory (no destructors called by ::operator delete[])
+        ::operator delete[](buffer_);
+    }
+
+    // Non-copyable, non-movable (owns raw memory)
+    SPSC_RingBuffer(const SPSC_RingBuffer&) = delete;
+    SPSC_RingBuffer& operator=(const SPSC_RingBuffer&) = delete;
 
     // Producer: Push an item into the queue
     bool try_push(const T& item) {
@@ -45,8 +73,8 @@ public:
         }
 
         size_t next_tail = (current_tail + 1) & mask_;
-        T item = buffer_[current_tail];  // Copy out (POD type)
-        buffer_[current_tail].~T();      // Call destructor
+        T item = buffer_[current_tail];  // Copy out
+        buffer_[current_tail].~T();      // Call destructor on slot
         tail_.store(next_tail, std::memory_order_release);
         return item;
     }
@@ -55,7 +83,7 @@ public:
     static constexpr size_t capacity() { return Capacity; }
 
 private:
-    alignas(64) std::unique_ptr<T[]> buffer_;
+    alignas(64) T* buffer_;         // Raw memory (no unique_ptr — manual destructor)
     alignas(64) std::atomic<size_t> head_;  // Producer writes
     alignas(64) std::atomic<size_t> tail_;  // Consumer writes
     static constexpr size_t mask_ = Capacity - 1;

@@ -24,6 +24,7 @@
 #include "alpha_receiver.hpp"
 #include "ws_market_listener.hpp"
 #include "execution_engine.cpp"
+#include "tick_result.hpp"
 
 #include <iostream>
 #include <cstdlib>
@@ -79,7 +80,12 @@ int main() {
         // 3. Tick Loop — runs continuously on an isolated CPU core in production.
         // In production, pin with: taskset -c 2 ./bin/crowdintel_bot
         while (true) {
-            engine.run_tick();
+            TickResult result = engine.run_tick();
+            // Hot path: no I/O. Telemetry handles logging async.
+            if (result == TickResult::KILL_SWITCH) {
+                // Emergency: stop trading, cancel all orders
+                break;
+            }
             // Yield to allow listener thread to push new data
             std::this_thread::sleep_for(std::chrono::microseconds(10));
         }
