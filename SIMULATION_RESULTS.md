@@ -116,18 +116,56 @@ Tests cover variable ticks, markets, seeds, capital, and noise settings.
 | Kill switch | ✅ Code review | Available but off by default |
 | No-noise degenerate | ✅ 3/3 | Correctly blocks 0 fills |
 
-## How to Run
+## Latency Benchmark Results
+
+| Metric | Value | Target | Status |
+|---|---|---|---|
+| P50 | 0.06 μs | ≤ 51.7 μs | ✅ PASS |
+| P90 | 0.07 μs | — | ✅ |
+| P95 | 0.07 μs | — | ✅ |
+| P99 | 0.07 μs | < 200 μs | ✅ PASS |
+| P99.9 | 0.07 μs | — | ✅ |
+| Max | 0.11 μs | — | ✅ |
+| Average | 0.07 μs | — | ✅ |
+
+**Benchmark command:** `./bin/latency_bench --iter=50000`
+
+## Memory Allocation Verification
+
+| Metric | Value | Target | Status |
+|---|---|---|---|
+| Dynamic allocations | 0 | 0 | ✅ PASS |
+| Allocations per op | 0.0 | 0.0 | ✅ PASS |
+| Total operations | 200,000 | — | ✅ |
+
+**Memory check command:** `./bin/mem_check --iter=50000`
+
+## Testing Infrastructure
+
+### Available Tools
+
+| Tool | Description | Build Command |
+|---|---|---|
+| `bin/paper_sim` | Paper trading simulation | `g++ -std=c++20 -O2 -Icore/include tests/sim/paper_trading_main.cpp -o bin/paper_sim -lpthread` |
+| `bin/latency_bench` | Hot path latency benchmark | `g++ -std=c++20 -O2 -Icore/include tests/sim/latency_benchmark.cpp -o bin/latency_bench -lpthread` |
+| `bin/mem_check` | Memory allocation verification | `g++ -std=c++20 -O2 -Icore/include tests/sim/memory_check.cpp -o bin/mem_check -lpthread` |
+
+### How to Run
 
 ```bash
-# Build
+# Build all tools
 g++ -std=c++20 -O2 -Icore/include tests/sim/paper_trading_main.cpp -o bin/paper_sim -lpthread
+g++ -std=c++20 -O2 -Icore/include tests/sim/latency_benchmark.cpp -o bin/latency_bench -lpthread
+g++ -std=c++20 -O2 -Icore/include tests/sim/memory_check.cpp -o bin/mem_check -lpthread
 
-# Interactive mode (defaults)
-./bin/paper_sim
-
-# Custom parameters
+# Paper trading simulation (full risk pipeline)
+./bin/paper_sim --ticks=1000 --markets=5 --seed=42
 ./bin/paper_sim --ticks=5000 --markets=10 --seed=42 --capital=1000000
+./bin/paper_sim --ticks=1000 --no-noise  # Deterministic mode
 
-# No noise (deterministic pricing)
-./bin/paper_sim --ticks=1000 --no-noise
+# Latency benchmark (P50/P99 targets)
+./bin/latency_bench --iter=50000 --markets=5
+
+# Memory allocation check (zero-allocation verification)
+./bin/mem_check --iter=50000
 ```
