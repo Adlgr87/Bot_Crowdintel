@@ -62,19 +62,24 @@ public:
             return TickResult::RISK_BLOCKED;
         }
 
-        // 3. Daily loss limit — O(1) atomic
+        // 3. Entry band check (Polywhales): price must be 35-70¢ — O(1)
+        if (__builtin_expect(!is_price_in_entry_band(params.price), 0)) {
+            return TickResult::RISK_BLOCKED;
+        }
+
+        // 4. Daily loss limit — O(1) atomic
         if (__builtin_expect(daily_loss_usd_.load(std::memory_order_acquire) >
                               config_.max_daily_loss_usd, 0)) {
             activate_kill_switch();
             return TickResult::KILL_SWITCH;
         }
 
-        // 4. Exposure per market — O(1)
+        // 5. Exposure per market — O(1)
         if (__builtin_expect(market_exposure > config_.max_exposure_per_market, 0)) {
             return TickResult::RISK_BLOCKED;
         }
 
-        // 5. Balance check — O(1)
+        // 6. Balance check — O(1)
         if (__builtin_expect(usdc_balance < config_.min_usdc_balance, 0)) {
             return TickResult::INSUFFICIENT_BALANCE;
         }
@@ -156,6 +161,22 @@ public:
      * Check if feed has been dead for too long (cold path).
      */
     bool is_feed_dead() const {
+        auto last = last_feed_activity_.load(std::memory_order_acquire);
+        auto elapsed = std::chrono::steady_clock::now() - last;
+        return elapsed > std::chrono::milliseconds(config_.feed_dead_timeout_ms);
+    }
+
+    /**
+     * Entry band check (Polywhales adaptation): price must be within
+     * configurable min/max range (default 35¢-70¢).
+     * O(1) comparison.
+     */
+    bool is_price_in_entry_band(uint64_t price_micros) const {
+        return price_micros >= config_.min_price_micros &&
+               price_micros <= config_.max_price_micros;
+    }
+
+    /**
         auto last = last_feed_activity_.load(std::memory_order_acquire);
         auto elapsed = std::chrono::steady_clock::now() - last;
         return elapsed > std::chrono::milliseconds(config_.feed_dead_timeout_ms);

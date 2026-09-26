@@ -38,6 +38,13 @@ struct RiskConfig {
     std::string allowed_jurisdiction    = "US";   // COMPLIANCE_ALLOWED_JURISDICTION
     int    resolution_warning_hours    = 24;      // COMPLIANCE_RESOLUTION_WARNING_HOURS
 
+    // --- Entry Band (adapted from Polywhales policy.ts) ---
+    uint64_t min_price_micros          = 350000;  // COMPLIANCE_MIN_PRICE_MICROS (35¢)
+    uint64_t max_price_micros          = 700000;  // COMPLIANCE_MAX_PRICE_MICROS (70¢)
+    double   max_total_exposure_usd    = 10000.0; // RISK_MAX_TOTAL_EXPOSURE_USD
+    double   max_event_cluster_exposure = 5000.0; // RISK_MAX_EVENT_CLUSTER_EXPOSURE
+    uint64_t max_daily_notional_usd     = 10000;  // RISK_MAX_DAILY_NOTIONAL_USD
+
     // --- Fee Model ---
     double maker_fee_rate              = 0.020;   // FEE_MAKER_RATE (2.0%)
     double taker_fee_rate              = 0.035;   // FEE_TAKER_RATE (3.5%)
@@ -109,6 +116,13 @@ struct RiskConfig {
 
         cfg.clob_rate_limit_per_sec    = get_env_double("CLOB_RATE_LIMIT_PER_SEC", 1.0);
         cfg.clob_burst                 = get_env_double("CLOB_BURST", 2.0);
+
+        // Entry Band
+        cfg.min_price_micros           = static_cast<uint64_t>(get_env_double("COMPLIANCE_MIN_PRICE_MICROS", 350000.0));
+        cfg.max_price_micros           = static_cast<uint64_t>(get_env_double("COMPLIANCE_MAX_PRICE_MICROS", 700000.0));
+        cfg.max_total_exposure_usd     = get_env_double("RISK_MAX_TOTAL_EXPOSURE_USD", 10000.0);
+        cfg.max_event_cluster_exposure = get_env_double("RISK_MAX_EVENT_CLUSTER_EXPOSURE", 5000.0);
+        cfg.max_daily_notional_usd     = static_cast<uint64_t>(get_env_double("RISK_MAX_DAILY_NOTIONAL_USD", 10000.0));
 
         return cfg;
     }

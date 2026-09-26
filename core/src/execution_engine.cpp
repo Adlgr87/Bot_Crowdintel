@@ -229,6 +229,13 @@ public:
         double market_exposure = 0.0;
         double market_pnl = 0.0;
 
+        // ─── Fase 2: Book Staleness Check (O(1), Polywhales adaptation) ─────
+        // Don't trade on stale market data (Polywhales: maxBookAgeMs=90s default)
+        if (book_.is_stale(config_.feed_dead_timeout_ms * 1'000'000ULL)) {
+            telemetry_.record_tick_result(TickResult::STALE_BOOK);
+            return TickResult::STALE_BOOK;
+        }
+
         // Fase 2: Price deviation check (O(1))
         uint64_t current_price = best_ask.price;
         if (params.price > 0 && current_price > 0) {
