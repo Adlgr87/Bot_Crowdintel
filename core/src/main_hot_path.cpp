@@ -31,7 +31,7 @@ int main() {
                   << std::endl;
         return 1;
     }
-    LightweightCLOBClient client(env_api_key, env_secret, env_passphrase, "https://clob.polymarket.com");
+    LightweightCLOBClient client(env_api_key, env_secret, env_passphrase, "https://api.polymarket.com");
     ExecutionEngine engine(book, alpha_queue, client);
 
     // 2. Start the persistent WebSocket listener in the background
