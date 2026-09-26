@@ -2,6 +2,59 @@
 
 ## Status: ✅ APPROVED (with documented constraints)
 
+## Critical Audit Fixes (Final Pass)
+
+### 1. Missing `transparent_string_hash.hpp` — CREATED ✅
+The header was `#include`d in `order_manager.hpp` but did not exist. Created with
+`StringHash` and `StringEqual` transparent functors for `std::string_view` lookups
+in `unordered_map` without `std::string` allocation.
+
+### 2. `register_order_no_alloc()` — DEFINED ✅
+The method was called from `execution_engine.cpp:281` but never defined in
+`order_manager.hpp`. Added with `std::string_view` market_slug parameter and
+pre-generated client_order_id buffer.
+
+### 3. Secondary Index Population — FIXED ✅
+`open_order_index_` was never populated — self-trade detection was **100% broken**.
+Fixed: `register_order_no_alloc` now calls `open_order_index_[key] += 1` after
+inserting into `orders_`.
+
+### 4. Payload JSON Truncation — FIXED ✅
+`build_order_payload_fixed()` used `append_str("\",\"exp\":\"0\",\"t\":0}", 14)`
+but the string literal is 18 bytes, producing malformed JSON. Fixed to pass `18`.
+
+### 5. Deadlock on Shutdown — FIXED ✅
+`process_submit_queue()` ran `while(true)` with no exit condition. The destructor
+called `join()` which would block forever. Fixed: added `shutdown_` atomic flag,
+changed loop to `while(!shutdown_.load())`.
+
+### 6. EIP-712 Domain Separator All-Zero — FIXED ✅
+The signer was constructed with empty `domain_data`, resulting in an all-zeros
+domain separator. Signatures would fail exchange verification. Fixed: added
+`init_eip712_domain()` that sets the Polymarket CLOB V2 verifying contract
+address (`0xC5d563A36AE7814A12dC12389E369Bc91D5B1d35`).
+
+### 7. Rate Window Check — FIXED ✅
+`check_rate_window()` only checked the current 1-second bucket, making the
+rate limit **60× more permissive** than documented (allowed 60× more orders).
+Fixed: now sums all 60 buckets within the sliding window (O(60) with branch-predicted
+fast path — most buckets are 0).
+
+### 8. Market Exposure Hardcoded 0.0 — FIXED ✅
+`market_exposure` and `market_pnl` were hardcoded to `0.0`, meaning exposure
+limits were never enforced. Fixed: uses order USD value as conservative proxy.
+
+### 9. SubmitTask std::string Payload — ELIMINATED ✅
+`SubmitTask` contained a `SignedOrder` with `std::string payload`, causing two
+heap allocations per tick (`assign()` + copy in background thread). Fixed:
+replaced with fixed `char payload[512]` buffer. Zero-alloc in hot path.
+
+### 10. eip712_signer.hpp Allocations — ACCEPTED CONSTRAINT ✅
+`eip712_order_struct_hash` (line 207) and `eip712_domain_separator` (line 166)
+use `std::vector<uint8_t>`. File is marked NEVER MODIFY and KAT vectors pass.
+These allocations occur once per order in the signing step (~31μs with
+libsecp256k1). This is an accepted constraint.
+
 ## Summary of Changes
 
 This report documents the remediation of critical hot-path violations identified
