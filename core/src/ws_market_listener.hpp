@@ -96,7 +96,7 @@ private:
 
             // Simulated data for demo (as before)
             AlphaSignal ws_signal;
-            ws_signal.type = AlphaSignal::Type::HUMAN_SIGNAL;
+            ws_signal.type = static_cast<uint8_t>(AlphaSignal::Type::HUMAN_SIGNAL);
             strncpy(ws_signal.market_slug, "BTC-USD-UP", 31);
             ws_signal.confidence = 0.75;
             ws_signal.ev_per_dollar = 0.0;

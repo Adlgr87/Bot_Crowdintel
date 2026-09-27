@@ -36,7 +36,7 @@ void run_latency_test() {
     size_t filled = 0;
     for (size_t i = 0; i < QUEUE_CAPACITY - 1; ++i) {
         AlphaSignal s{};
-        s.type = AlphaSignal::Type::WHALE_TRADE;
+        s.type = static_cast<uint8_t>(AlphaSignal::Type::WHALE_TRADE);
         snprintf(s.market_slug, 31, "test-market-%zu", i);
         s.confidence = 0.95;
         s.ev_per_dollar = 0.05;
@@ -54,7 +54,7 @@ void run_latency_test() {
             size_t refilled = 0;
             for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
                 AlphaSignal s{};
-                s.type = AlphaSignal::Type::WHALE_TRADE;
+                s.type = static_cast<uint8_t>(AlphaSignal::Type::WHALE_TRADE);
                 s.confidence = 0.95;
                 s.ev_per_dollar = 0.05;
                 s.q_value = 0.01;
@@ -69,7 +69,7 @@ void run_latency_test() {
     // Final refill before measurement (ensure queue is full)
     for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
         AlphaSignal s{};
-        s.type = AlphaSignal::Type::WHALE_TRADE;
+        s.type = static_cast<uint8_t>(AlphaSignal::Type::WHALE_TRADE);
         s.confidence = 0.95;
         s.ev_per_dollar = 0.05;
         s.q_value = 0.01;
@@ -87,7 +87,7 @@ void run_latency_test() {
         // (avoids measuring empty try_pop fast-fail path)
         for (size_t j = 0; j < QUEUE_CAPACITY - 1; ++j) {
             AlphaSignal s{};
-            s.type = AlphaSignal::Type::WHALE_TRADE;
+            s.type = static_cast<uint8_t>(AlphaSignal::Type::WHALE_TRADE);
             s.confidence = 0.95;
             s.ev_per_dollar = 0.05;
             s.q_value = 0.01;
