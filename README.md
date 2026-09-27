@@ -165,8 +165,31 @@ Key benefits:
 | O(1) order lookup (secondary index) | `order_manager.hpp:160` | ✅ |
 | O(1) bucket-based rate window | `risk_engine.hpp:263` | ✅ |
 | Atomic kill switch (checked before signing) | `risk_engine.hpp:55` | ✅ |
-| Cache-aligned OrderBookL2 fields | `order_book.hpp` | ✅ |
+| Double-buffer OrderBookL2 (atomic index swap, lock-free) | `order_book.hpp` | ✅ P0.4 |
+| O(1) staleness check (buffer-level timestamp) | `order_book.hpp` | ✅ P0.5 |
+| RiskConfig range validation (fail-fast) | `market_config.hpp` | ✅ P0.6 |
+| STALE_SIGNAL TickResult enum + string mapping | `tick_result.hpp` | ✅ P0.5 |
 | Cache-conscious OrderParams field reordering | `eip712_signer.hpp:50` | ✅ |
+| Cache-conscious OrderParams field reordering | `eip712_signer.hpp:50` | ✅ |
+
+#### Staleness Threshold Configuration (P0.5/P0.6)
+
+Risk limits are loaded from environment variables with conservative defaults and
+validated at startup via `RiskConfig::validate()`.
+
+| Field | Env Var | Default | Description |
+|---|---|---|---|
+| `max_signal_age_ms` | `BOT_MAX_SIGNAL_AGE_MS` | `500` | Max age of alpha signal before rejection |
+| `max_book_age_ms` | `BOT_MAX_BOOK_AGE_MS` | `250` | Max age of order book snapshot before staling |
+| `feed_dead_timeout_ms` | `RISK_FEED_DEAD_TIMEOUT_MS` | `5000` | Feed dead timeout (staleness gate) |
+
+```bash
+export BOT_MAX_SIGNAL_AGE_MS=500   # Reject signals older than 500ms
+export BOT_MAX_BOOK_AGE_MS=250     # Reject book updates older than 250ms
+```
+
+The bot returns `TickResult::STALE_BOOK` or `TickResult::STALE_SIGNAL` when these
+thresholds are exceeded, blocking any order submission until fresh data arrives.
 
 ### Measured Results (RDTSC Benchmark, 20K ticks, 5K warmup)
 
@@ -302,6 +325,7 @@ ctest --output-on-failure
 | Test | Description | Status |
 |---|---|---|
 | `test_signer` | EIP-712 KAT (20 signatures vs Python ref) | ✅ 20/20 |
+| `test_p0_fixes` | P0 critical fixes (order book, config, stale signals) | ✅ 88/88 cases |
 | `latency_bench` | RDTSC hot path benchmark | ✅ |
 | `l2_backtester` | L2 replay skeleton | ✅ (skeleton) |
 

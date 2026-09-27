@@ -74,6 +74,8 @@ struct SubmitTask {
     char payload[512];               // Fixed buffer — no heap alloc (was std::string)
     size_t payload_len;              // Length of payload string
     std::array<uint8_t, 65> signature;  // Copy of signature — fixed array
+    std::array<uint8_t, 20> maker_addr;    // Maker address (20 bytes)
+    std::array<uint8_t, 20> taker_addr;    // Taker address (20 bytes)
     uint64_t nonce;
     uint64_t price;
     uint64_t size;
@@ -93,6 +95,7 @@ public:
                     LightweightCLOBClient& client)
         : book_(book), alpha_queue_(alpha_queue), client_(client),
           signer_(load_private_key()),
+          shadow_mode_(load_bot_mode() == "shadow"),
           nonce_mgr_(),
           config_(RiskConfig::load_from_env()),
           risk_engine_(config_),
@@ -120,6 +123,7 @@ public:
                     LightweightCLOBClient& client, const std::vector<uint8_t>& private_key)
         : book_(book), alpha_queue_(alpha_queue), client_(client),
           signer_(private_key),
+          shadow_mode_(load_bot_mode() == "shadow"),
           nonce_mgr_(),
           config_(RiskConfig::load_from_env()),
           risk_engine_(config_),
@@ -142,6 +146,15 @@ public:
         if (submit_thread_.joinable()) {
             submit_thread_.join();
         }
+    }
+
+    /**
+     * Load bot mode from BOT_MODE env var.
+     * P1.1: Shadow mode skips order signing and submission.
+     */
+    static std::string load_bot_mode() {
+        const char* mode = std::getenv("BOT_MODE");
+        return mode ? std::string(mode) : "live";
     }
 
     /**
@@ -211,7 +224,7 @@ public:
         std::string_view country_code(operator_jurisdiction_);
 
         TickResult compliance_result = compliance_.check_all(
-            market_slug, country_code, market_cache_);
+            std::string(market_slug), std::string(country_code), market_cache_);
         if (compliance_result != TickResult::OK) {
             // Error path — allocation acceptable (not hot path success case)
             telemetry_.log_risk_block(compliance_result, OrderParams{});
@@ -258,11 +271,19 @@ public:
         memset(params.taker, 0x00, 20);
 
         // Fase 5: Apply tick size from market metadata (O(1))
-        int tick_size = market_cache_.get_tick_size(market_slug);
+        int tick_size = market_cache_.get_tick_size(std::string(market_slug));
         params.price = MarketMetadataCache::apply_tick_size(best_ask.price, tick_size);
         params.size = static_cast<uint64_t>(size * 1e6);
         params.nonce = nonce_mgr_.get_next_nonce();
-        params.side = (signal->ev_per_dollar > 0) ? 0 : 1;
+        // P0.2: Respect direction_hint from signal (force BUY/SELL or engine decides)
+        if (signal->direction_hint == 0) {
+            params.side = 0;  // BUY (force from signal)
+        } else if (signal->direction_hint == 1) {
+            params.side = 1;  // SELL (force from signal)
+        } else {
+            // direction_hint == 2: engine decides by EV edge comparison
+            params.side = (signal->ev_per_dollar > 0) ? 0 : 1;
+        }
 
         // ─── Fase 2: Risk Engine Pre-Trade Check (BEFORE signing) ──────
         double usdc_balance = cached_usdc_balance_.load(std::memory_order_relaxed);
@@ -305,6 +326,20 @@ public:
         if (__builtin_expect(order_mgr_.has_open_order(market_slug, params.side == 0), 0)) {
             telemetry_.record_tick_result(TickResult::DUPLICATE_ORDER);
             return TickResult::DUPLICATE_ORDER;
+        }
+
+        // ─── P1.1: Shadow Mode — Skip signing/submission, log computed params ──
+        // In shadow mode, the engine evaluates signals exactly as in live mode,
+        // but does NOT sign or submit orders to the CLOB. Instead, the computed
+        // order parameters (price, size, side, EV) are logged as "shadow orders"
+        // for strategy validation and backtesting accuracy analysis.
+        if (__builtin_expect(shadow_mode_, 0)) {
+            shadow_orders_.fetch_add(1, std::memory_order_relaxed);
+            telemetry_.log_shadow_order(
+                std::string(market_slug), params,
+                net_ev, edge_usd, notional_usd);
+            telemetry_.record_tick_result(TickResult::SHADOW_ORDER);
+            return TickResult::SHADOW_ORDER;
         }
 
         // ─── Sign Order (EIP-712 — CRYPTOGRAPHICALLY VERIFIED, NOT MODIFIED) ──
@@ -431,6 +466,13 @@ private:
     SubmissionQueue submit_queue_;
     std::thread submit_thread_;
     std::atomic<bool> shutdown_{false};
+
+    // ─── P1.1: Shadow Mode ──────────────────────────────────────────────────
+    // When BOT_MODE=shadow, the engine evaluates signals and computes order
+    // parameters exactly as in live mode, but does NOT sign or submit orders.
+    // Instead, it logs the computed parameters for strategy validation.
+    bool shadow_mode_;
+    std::atomic<uint64_t> shadow_orders_{0};
 
     // ─── Helpers ─────────────────────────────────────────────────────────
 

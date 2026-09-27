@@ -1,6 +1,6 @@
 name: CI/CD & Evolutive Optimization
- 
-# Runs on every push and daily at midnight
+
+# Runs on every push to main/remediation branches and daily at midnight
 on:
   push:
     branches: [ main, remediation/compliance ]
@@ -45,6 +45,11 @@ jobs:
         cd core/build
         ctest --output-on-failure
 
+    - name: Run P0 Fix Verification Suite
+      run: |
+        cd core/build
+        ./bin/test_p0_fixes
+
     - name: Run Crypto Tests (Keccak-256 known-answer vectors)
       run: |
         cd core/build
@@ -68,3 +73,82 @@ jobs:
         fi
         echo "OK: Latency gates passed (P50=${P50}us < 100us, P99=${P99}us < 200us)"
 
+  # --- Job 2: ASAN / UBSAN / TSAN Sanitizer Build ---
+  sanitizer-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake clang libcurl4-openssl-dev libssl-dev autoconf
+
+    - name: Build libsecp256k1 v0.8.0
+      run: |
+        git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+        cd /tmp/secp256k1
+        ./autogen.sh
+        ./configure --enable-module-recovery --disable-tests --disable-bench --disable-shared
+        make -j$(nproc)
+
+    - name: Build with ASAN + UBSAN (Clang)
+      run: |
+        cd core
+        mkdir -p build-san && cd build-san
+        CC=clang CXX=clang++ cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_FLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+          -DSECP256K1_LIBRARY=/tmp/secp256k1/.libs/libsecp256k1.a \
+          -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
+          -DBUILD_DEMO=OFF \
+          --no-warn-unused-cli ..
+        make -j$(nproc)
+
+    - name: Run ctest under ASAN/UBSAN
+      run: |
+        cd core/build-san
+        ctest --output-on-failure -R 'test_p0_fixes|test_presigned_pool|test_risk_engine|test_order_manager|test_signer|test_compliance_guard|test_telemetry|test_position_tracker|test_fee_model|test_rate_limiter|keccak_known_answer'
+
+    - name: Run TSAN build (double-buffer race detection)
+      run: |
+        cd core
+        mkdir -p build-tsan && cd build-tsan
+        CC=clang CXX=clang++ cmake -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_FLAGS="-O1 -g -fsanitize=thread -fno-sanitize-recover=all" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+          -DSECP256K1_LIBRARY=/tmp/secp256k1/.libs/libsecp256k1.a \
+          -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
+          -DBUILD_DEMO=OFF \
+          --no-warn-unused-cli ..
+        make -j$(nproc)
+        TSAN_OPTIONS=halt_on_error=0:report_atomic_races=0 ./bin/test_p0_fixes
+
+  # --- Job 3: Evolutive Optimization with MutaLambda ---
+  mutate-and-optimize:
+    needs: build-and-test # Only run if tests pass
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Python & Dependencies
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+      run: |
+        pip install numpy scipy click rich pyyaml pydantic msgpack requests pycryptodome
+
+    - name: Checkout MutaLambda Framework
+      uses: actions/checkout@v4
+      with:
+        repository: Adlgr87/MutaLambda
+        path: MutaLambda
+
+    - name: Execute MutaLambda Evolution on Hot Path Functions
+      run: |
+        echo "🧬 Triggering MutaLambda evolutionary cycle..."
+        export MUTALAMBDA_PATH="$PWD/MutaLambda"
+        export PYTHONPATH="$PWD/MutaLambda:$PYTHONPATH"
+        python infra/mutalambda/adapter/mutalambda_adapter.py

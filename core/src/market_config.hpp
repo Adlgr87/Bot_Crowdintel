@@ -58,6 +58,52 @@ struct RiskConfig {
     double clob_rate_limit_per_sec     = 1.0;     // CLOB_RATE_LIMIT_PER_SEC
     double clob_burst                  = 2.0;     // CLOB_BURST
 
+    // --- Staleness Thresholds (P0 fixes) ---
+    int    max_signal_age_ms           = 500;     // BOT_MAX_SIGNAL_AGE_MS (P0.5: reject stale alpha signals)
+    int    max_book_age_ms             = 250;     // BOT_MAX_BOOK_AGE_MS (P0.4: reject stale market data)
+
+    // validate() — Strict range checks for all config fields.
+    void validate() const {
+        if (max_daily_loss_usd < 0.0) throw std::invalid_argument("max_daily_loss_usd must be >= 0");
+        if (max_exposure_per_market < 0.0) throw std::invalid_argument("max_exposure_per_market must be >= 0");
+        if (max_exposure_per_side < 0.0) throw std::invalid_argument("max_exposure_per_side must be >= 0");
+        if (max_order_usd < 0.0) throw std::invalid_argument("max_order_usd must be >= 0");
+        if (max_open_orders < 0) throw std::invalid_argument("max_open_orders must be >= 0");
+        if (max_orders_per_min < 0) throw std::invalid_argument("max_orders_per_min must be >= 0");
+        if (max_cancels_per_min < 0) throw std::invalid_argument("max_cancels_per_min must be >= 0");
+        if (max_price_deviation_bps < 0) throw std::invalid_argument("max_price_deviation_bps must be >= 0");
+        if (min_usdc_balance < 0.0) throw std::invalid_argument("min_usdc_balance must be >= 0");
+        if (min_pol_balance < 0.0) throw std::invalid_argument("min_pol_balance must be >= 0");
+        if (max_position_divergence < 0.0) throw std::invalid_argument("max_position_divergence must be >= 0");
+        if (feed_dead_timeout_ms < 0) throw std::invalid_argument("feed_dead_timeout_ms must be >= 0");
+        if (max_consecutive_rejects < 0) throw std::invalid_argument("max_consecutive_rejects must be >= 0");
+        if (cancellation_window_seconds < 0) throw std::invalid_argument("cancellation_window_seconds must be >= 0");
+        if (resolution_warning_hours < 0) throw std::invalid_argument("resolution_warning_hours must be >= 0");
+        if (min_price_micros < 1) throw std::invalid_argument("min_price_micros must be >= 1");
+        if (max_price_micros < min_price_micros) throw std::invalid_argument("max_price_micros must be >= min_price_micros");
+        if (max_total_exposure_usd < 0.0) throw std::invalid_argument("max_total_exposure_usd must be >= 0");
+        if (max_event_cluster_exposure < 0.0) throw std::invalid_argument("max_event_cluster_exposure must be >= 0");
+        if (max_daily_notional_usd < 0) throw std::invalid_argument("max_daily_notional_usd must be >= 0");
+        if (maker_fee_rate < 0.0 || maker_fee_rate > 0.5) throw std::invalid_argument("maker_fee_rate must be in [0, 0.5]");
+        if (taker_fee_rate < 0.0 || taker_fee_rate > 0.5) throw std::invalid_argument("taker_fee_rate must be in [0, 0.5]");
+        if (base_commission_usd < 0.0) throw std::invalid_argument("base_commission_usd must be >= 0");
+        if (gas_cost_usd < 0.0) throw std::invalid_argument("gas_cost_usd must be >= 0");
+        if (min_net_ev_usd < 0.0) throw std::invalid_argument("min_net_ev_usd must be >= 0");
+        if (clob_rate_limit_per_sec <= 0.0) throw std::invalid_argument("clob_rate_limit_per_sec must be > 0");
+        if (clob_burst < 0.0) throw std::invalid_argument("clob_burst must be >= 0");
+        if (max_signal_age_ms < 1) throw std::invalid_argument("max_signal_age_ms must be >= 1");
+        if (max_book_age_ms < 1) throw std::invalid_argument("max_book_age_ms must be >= 1");
+        if (max_signal_age_ms < max_book_age_ms) throw std::invalid_argument("max_signal_age_ms must be >= max_book_age_ms");
+    }
+
+    static void validate_bot_config(int bot_mode, double clob_rate, double clob_burst, int signal_age, int book_age) {
+        if (bot_mode < 0 || bot_mode > 3) throw std::invalid_argument("BOT_MODE must be 0-3");
+        if (clob_rate < 0.1 || clob_rate > 1000.0) throw std::invalid_argument("CLOB_RATE_LIMIT_PER_SEC out of range [0.1, 1000]");
+        if (clob_burst < 0.0 || clob_burst > 10000.0) throw std::invalid_argument("CLOB_BURST out of range [0, 10000]");
+        if (signal_age < 1 || signal_age > 60000) throw std::invalid_argument("BOT_MAX_SIGNAL_AGE_MS out of range [1, 60000]");
+        if (book_age < 1 || book_age > 60000) throw std::invalid_argument("BOT_MAX_BOOK_AGE_MS out of range [1, 60000]");
+    }
+
     static RiskConfig load_from_env() {
         RiskConfig cfg;
 
@@ -116,6 +162,10 @@ struct RiskConfig {
 
         cfg.clob_rate_limit_per_sec    = get_env_double("CLOB_RATE_LIMIT_PER_SEC", 1.0);
         cfg.clob_burst                 = get_env_double("CLOB_BURST", 2.0);
+
+        // Staleness thresholds (P0.4/P0.5)
+        cfg.max_signal_age_ms          = get_env_int("BOT_MAX_SIGNAL_AGE_MS", 500);
+        cfg.max_book_age_ms            = get_env_int("BOT_MAX_BOOK_AGE_MS", 250);
 
         // Entry Band
         cfg.min_price_micros           = static_cast<uint64_t>(get_env_double("COMPLIANCE_MIN_PRICE_MICROS", 350000.0));

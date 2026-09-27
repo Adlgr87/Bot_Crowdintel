@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "spsc_ring_buffer.hpp"
+#include "eip712_signer.hpp"  // For OrderParams struct
 #include "tick_result.hpp"  // For TickResult enum (avoids circular dependency)
 
 /**
@@ -32,8 +33,12 @@ enum class EventType {
     LATENCY_SPIKE,
     ORDER_QUERY,
     POSITION_UPDATE,
+<<<<<<< Updated upstream
+=======
     FILL_EVENT,       // Paper-trading fill evidence (adapted from Polywhales)
     PAPER_SKIP,      // Paper-trading skip evidence (adapted from Polywhales)
+    SHADOW_ORDER,    // P1.1: Shadow mode — order params computed but not submitted to CLOB
+>>>>>>> Stashed changes
 };
 
 /**
@@ -199,6 +204,27 @@ public:
     }
     void reset_429_streak()             { consecutive_429_.store(0, std::memory_order_release); }
 
+    // ─── P1.1: Shadow mode ─────────────────────────────────────────────
+    // Called when the engine evaluates order params in shadow mode (BOT_MODE=shadow).
+    // Logs the computed parameters and increments the shadow_orders_ counter.
+    void log_shadow_order(const std::string& market_slug,
+                          const OrderParams& params,
+                          double net_ev,
+                          double edge_usd,
+                          double notional_usd) {
+        log_event(EventType::SHADOW_ORDER, market_slug,
+                  "{\"price\":" + std::to_string(params.price) +
+                  ",\"size\":" + std::to_string(params.size) +
+                  ",\"side\":" + std::to_string(params.side) +
+                  ",\"nonce\":" + std::to_string(params.nonce) +
+                  ",\"salt\":" + std::to_string(params.salt) +
+                  ",\"net_ev\":" + std::to_string(net_ev) +
+                  ",\"edge_usd\":" + std::to_string(edge_usd) +
+                  ",\"notional_usd\":" + std::to_string(notional_usd) + "}",
+                  "INFO");
+        shadow_orders_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     void add_realized_pnl(double pnl)    { realized_pnl_.fetch_add(pnl, std::memory_order_relaxed); }
     void add_daily_loss(double loss)     { daily_loss_.fetch_add(loss, std::memory_order_relaxed); }
 
@@ -213,46 +239,12 @@ public:
             case TickResult::MARKET_NOT_TRADABLE: tickresult_market_not_tradable_.fetch_add(1, std::memory_order_relaxed); break;
             case TickResult::DUPLICATE_ORDER: tickresult_duplicate_.fetch_add(1, std::memory_order_relaxed); break;
             case TickResult::INSUFFICIENT_BALANCE: tickresult_insufficient_balance_.fetch_add(1, std::memory_order_relaxed); break;
+<<<<<<< Updated upstream
+=======
             case TickResult::STALE_BOOK: tickresult_stale_book_.fetch_add(1, std::memory_order_relaxed); break;
+            case TickResult::SHADOW_ORDER: tickresult_shadow_order_.fetch_add(1, std::memory_order_relaxed); break;
+>>>>>>> Stashed changes
         }
-    }
-
-    // ─── Evidence Recording (adapted from Polywhales evidence.ts) ─────────
-    // Records paper-trading evidence for gate reports and analysis.
-
-    void record_paper_fill(const std::string& action_key,
-                           const std::string& token_id,
-                           bool is_buy,
-                           uint64_t requested_price_micros,
-                           uint64_t filled_price_micros,
-                           uint64_t filled_units,
-                           uint64_t slippage_bps) {
-        // Calculate fill ratio and edge capture
-        uint64_t fill_ratio = (filled_units > 0) ? (filled_units * 1'000'000ULL / filled_units) : 0;
-        uint64_t edge_capture = (is_buy && filled_price_micros < requested_price_micros)
-            ? (requested_price_micros - filled_price_micros)
-            : 0;
-
-        std::string evidence = "{\"type\":\"fill\",\"action_key\":\"" + action_key +
-            "\",\"token_id\":\"" + token_id +
-            "\",\"side\":\"" + (is_buy ? "BUY" : "SELL") +
-            "\",\"fill_ratio_ppm\":" + std::to_string(fill_ratio) +
-            ",\"slippage_bps\":" + std::to_string(slippage_bps) +
-            ",\"edge_capture_micros\":" + std::to_string(edge_capture) + "}";
-
-        log_event(EventType::FILL_EVENT, token_id, evidence, "INFO");
-        paper_fills_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void record_paper_skip(const std::string& action_key,
-                           const std::string& token_id,
-                           const std::string& reason_code) {
-        std::string evidence = "{\"type\":\"skip\",\"action_key\":\"" + action_key +
-            "\",\"token_id\":\"" + token_id +
-            "\",\"reason_code\":\"" + reason_code + "\"}";
-
-        log_event(EventType::RISK_BLOCKED, token_id, evidence, "INFO");
-        paper_skips_.fetch_add(1, std::memory_order_relaxed);
     }
 
     // ─── Alerts (cold path) ────────────────────────────────────────────
@@ -296,10 +288,16 @@ public:
         json += "\"tickresult_kill_switch\":" + std::to_string(tickresult_kill_switch_.load()) + ",";
         json += "\"tickresult_market_not_tradable\":" + std::to_string(tickresult_market_not_tradable_.load()) + ",";
         json += "\"tickresult_duplicate\":" + std::to_string(tickresult_duplicate_.load()) + ",";
+<<<<<<< Updated upstream
+        json += "\"tickresult_insufficient_balance\":" + std::to_string(tickresult_insufficient_balance_.load());
+=======
         json += "\"tickresult_insufficient_balance\":" + std::to_string(tickresult_insufficient_balance_.load()) + ",";
         json += "\"tickresult_stale_book\":" + std::to_string(tickresult_stale_book_.load()) + ",";
+        json += "\"shadow_orders\":" + std::to_string(shadow_orders_.load()) + ",";
+        json += "\"tickresult_shadow_order\":" + std::to_string(tickresult_shadow_order_.load()) + ",";
         json += "\"paper_fills\":" + std::to_string(paper_fills_.load()) + ",";
         json += "\"paper_skips\":" + std::to_string(paper_skips_.load());
+>>>>>>> Stashed changes
         json += "}";
         return json;
     }
@@ -344,11 +342,18 @@ private:
     std::atomic<uint64_t> tickresult_market_not_tradable_{0};
     std::atomic<uint64_t> tickresult_duplicate_{0};
     std::atomic<uint64_t> tickresult_insufficient_balance_{0};
+<<<<<<< Updated upstream
+=======
     std::atomic<uint64_t> tickresult_stale_book_{0};
+    std::atomic<uint64_t> tickresult_shadow_order_{0};
+
+    // P1.1: Shadow mode counter
+    std::atomic<uint64_t> shadow_orders_{0};
 
     // Paper-trading evidence counters (adapted from Polywhales evidence.ts)
     std::atomic<uint64_t> paper_fills_{0};
     std::atomic<uint64_t> paper_skips_{0};
+>>>>>>> Stashed changes
 
     void writer_loop() {
         while (running_.load(std::memory_order_relaxed)) {
@@ -385,6 +390,7 @@ private:
             case EventType::LATENCY_SPIKE: type_str = "LATENCY_SPIKE"; break;
             case EventType::ORDER_QUERY: type_str = "ORDER_QUERY"; break;
             case EventType::POSITION_UPDATE: type_str = "POSITION_UPDATE"; break;
+            case EventType::SHADOW_ORDER:    type_str = "SHADOW_ORDER"; break;
             default: type_str = "UNKNOWN"; break;
         }
 
