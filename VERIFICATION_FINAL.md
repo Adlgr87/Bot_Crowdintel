@@ -1,6 +1,6 @@
 # Final Verification Report — Hot Path Remediation
 
-## Status: ✅ APPROVED (with documented constraints)
+## Status: ⚠️ NOT APPROVED — open findings remain (see HOT_PATH_AUDIT_REPORT.md)
 
 ## Critical Audit Fixes (Final Pass)
 
