@@ -92,6 +92,17 @@ jobs:
               --file infra/docker/Dockerfile.prod \
               --tag crowdintel:ci . >/tmp/docker-build.log 2>&1; then
             tail -n 200 /tmp/docker-build.log
+            {
+              echo '### Production container build failed'
+              echo '```text'
+              tail -n 80 /tmp/docker-build.log
+              echo '```'
+            } >>"$GITHUB_STEP_SUMMARY"
+            diagnostic="$(tail -n 40 /tmp/docker-build.log)"
+            diagnostic="${diagnostic//'%'/'%25'}"
+            diagnostic="${diagnostic//$'\r'/'%0D'}"
+            diagnostic="${diagnostic//$'\n'/'%0A'}"
+            echo "::error title=Production container build failed::$diagnostic"
             exit 1
           fi
           tail -n 30 /tmp/docker-build.log
