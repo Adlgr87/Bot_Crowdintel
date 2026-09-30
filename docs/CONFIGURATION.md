@@ -4,7 +4,7 @@ Configuration is read once at startup. Numeric parse errors, unsupported ticks, 
 
 ## Secrets
 
-Every secret accepts either its normal environment variable or a `_FILE` variant, never both. File input is preferred: it must be a private-permission, regular, non-symlink file. No terminator, LF, and CRLF are supported; empty/unreadable/oversized input is rejected, temporary buffers are zeroed, and the environment entry containing a successfully loaded path/value is removed.
+Every secret accepts either its normal environment variable or a `_FILE` variant, never both. File input is preferred: it must be an owner-readable (`0400`/`0600`), regular, non-symlink file with no group/other permissions. No terminator, LF, and CRLF are supported; empty/unreadable/oversized input is rejected, temporary buffers are zeroed, and the environment entry containing a successfully loaded path/value is removed.
 
 | Secret | File form | Purpose |
 |---|---|---|
