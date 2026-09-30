@@ -98,7 +98,11 @@ jobs:
               tail -n 80 /tmp/docker-build.log
               echo '```'
             } >>"$GITHUB_STEP_SUMMARY"
-            diagnostic="$(tail -n 40 /tmp/docker-build.log)"
+            diagnostic="$(
+              grep -B 6 -A 6 -E '(^|[[:space:]])FAIL([[:space:]]|:)|runtime error:|ERROR:' \
+                /tmp/docker-build.log | tail -n 120
+              tail -n 25 /tmp/docker-build.log
+            )"
             diagnostic="${diagnostic//'%'/'%25'}"
             diagnostic="${diagnostic//$'\r'/'%0D'}"
             diagnostic="${diagnostic//$'\n'/'%0A'}"
