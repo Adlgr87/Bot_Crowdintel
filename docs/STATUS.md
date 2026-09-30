@@ -7,7 +7,7 @@ _Last updated: 2026-09-30. The authoritative observation-by-observation ledger i
 - Offline and network-enabled C++20 builds complete with pinned libsecp256k1.
 - Native CTest covers crypto KATs, core/concurrency, strict HTTP/WSS/JSON, secret files (LF/CRLF/no terminator/empty/overflow/unreadable/permissive/symlink/missing), and replay smoke.
 - Standard-domain EIP-712 digest/signature independently matches Python PyCryptodome + coincurve.
-- GCC and Clang, network/offline, ASan+UBSan, TSan, and the production container are encoded as CI gates.
+- GCC and Clang, network/offline, ASan+UBSan, TSan, and the production container are CI gates; all six hosted jobs passed on the remediation branch on 2026-09-30.
 - Mock executable submits/rejects deterministically without touching the network.
 - The consumable pre-signed path and inline signing fallback are benchmarked with production components.
 
