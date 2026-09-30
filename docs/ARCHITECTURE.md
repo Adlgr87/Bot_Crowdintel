@@ -1,84 +1,98 @@
-# 🏛️ Architecture — Bot CrowdIntel (CLOB V2)
+# Architecture and invariants
 
-## 1. Design principles
+## Data flow
 
-- **Deterministic hot path**: no heap allocation, no syscalls, no logging,
-  no unbounded loops between "signal seen" and "order on the wire".
-- **Single market focus**: one configured `tokenId` ⇒ everything expensive
-  (decimal token string, hex addresses, domain separator, typehash, HMAC
-  midstates, TLS session) is computed once at startup and cached.
-- **Precompute everything the signal hasn't seen yet**: the pre-signed pool
-  moves ECDSA *off* the critical path entirely.
-
-## 2. Topology
-
-```
-                         ┌────────────────────────────── COLD PATHS ─────────┐
-                         │                                                    │
- wss://…/ws/market ──► WsMarketListener ── seqlock ──► OrderBookL2            │
- (RFC 6455 + TLS,        (thread)                                 │            │
-  hand-rolled)                                                    │            │
- CrowdIntel webhook ─► AlphaParser ── SPSC ──► [signals]          │            │
- (FDR q, confidence)    (thread)                              │            │
- Presign thread ──────► PresignedOrderPool ── atomic flip ────────┤            │
- (±8 ticks × both sides, exact-Kelly bucket, TTL refresh)         │            │
-                         └────────────────────────────────────────┼────────────┘
-                                                                  ▼
-                     ExecutionEngine (pinned core, spin/park)
-                     filters (edge, liquidity, size) → Kelly →
-                     pool hit (~90 ns) | inline ECDSA (~24 µs) →
-                     wire body (fixed buffers) → HMAC midstates
-                                                                  │
-                                                                  ▼
-                     LightweightCLOBClient — persistent TLS,
-                     POST /order with POLY_* L2 headers
-                                                                  │
-                                                                  ▼
-                     clob.polymarket.com  (CLOB V2)
+```text
+alpha producer
+    │  POST /signal + Bearer (bounded HTTP body)
+    ▼
+AlphaHttpReceiver → AlphaParser → SPSC<AlphaSignal>
+                                      │
+CLOB market WSS → bounded parser → OrderBookL2
+                                      │
+                                      ▼
+                              ExecutionEngine
+                       risk / freshness / dedupe
+                         │                 │
+                PresignedPool         inline signer
+                         └──────┬──────────┘
+                                ▼
+                         OrderGateway SPSC
+                                ▼
+                    persistent libcurl HTTPS
+                                ▼
+                      semantic CLOB response
 ```
 
-## 3. The hot path, step by step (per tick)
+The hot loop does not perform DNS, TLS, JSON parsing, HMAC authentication, or socket I/O. Those operations remain on cold ingress/egress threads. This separation is an optimization boundary, not evidence that an order reaches the venue in sub-microsecond time.
 
-1. `SPSC::try_pop(signal)` — ~10 ns, wait-free.
-2. Statistical filters re-check (q, confidence, p_win sanity) — a few ns.
-3. `OrderBookL2::read_top()` — seqlock-guarded best bid/ask snapshot; up to
-   4 retries, else `NO_BOOK`.
-4. Direction: signal hint, else the side with the larger edge.
-5. Economic filters: `edge = p_win − ask` (BUY) below `min_edge` ⇒ skip.
-6. Sizing: exact Kelly `f = (w−p)/(1−p)` × fraction cap × bankroll ÷ price,
-   floor to ×1e6, clamp to visible level size, enforce min size.
-7. Amounts: `__int128` product, 6-decimal raw units, tick-rounded price.
-8. **Pool first**: linear scan (≤16 slots) for `(side, price, size)` with a
-   fresh timestamp → memcpy of a ready wire body (~50 ns).
-   Miss ⇒ inline: build `OrderV2` (fresh RDRAND salt + wall-clock ms),
-   ABI-encode (stack), Keccak ×3, libsecp256k1 recoverable sign (~24 µs on a
-   2.1 GHz shared vCPU; ~2–5 µs on tuned bare metal), fill the wire template.
-9. `client.submit(body)`: timestamp (s) + `HMAC-SHA256` over
-   `ts + "POST" + "/order" + body` via precomputed midstates (~0.3 µs) →
-   headers + POSTFIELDS on the persistent libcurl handle → `curl_easy_perform`.
+## Thread ownership
 
-## 4. Thread & concurrency model
+| Component | Writer/owner | Readers | Synchronization |
+|---|---|---|---|
+| Alpha queue | HTTP receiver | hot loop | typed SPSC release/acquire |
+| Order-book depth | WSS thread | hot loop | mutex-protected snapshot/depth operations |
+| Best bid/ask + freshness | WSS thread | hot loop | atomic fields under one versioned publication |
+| Presigned ladder generation | replenisher | hot loop | three buffers, published index, reader counts |
+| Signature slots | replenisher | hot loop | per-slot CAS from available to consumed |
+| Gateway queue | hot loop | HTTPS worker | typed SPSC release/acquire |
+| Risk counters/reservations | hot loop | metrics | atomics or hot-loop ownership |
 
-| Thread | Role | Sync primitive |
-| :--- | :--- | :--- |
-| WSS listener | feed → book producer | seqlock (odd/even counter) |
-| Presign | pool rebuild + flip | `atomic<uint32_t>` release/acquire |
-| Webhook/alpha ingest | signal producer | SPSC head/tail release/acquire |
-| Engine (pinned) | consumer, submitter | reads only; `pause`/nanosleep park |
+## Non-negotiable concurrency invariants
 
-No locks anywhere. No atomics on data (only on counters/indices). All shared
-structures are single-writer.
+1. Queue storage is typed and object lifetimes are real; no byte-array object aliasing.
+2. SPSC queues have exactly one producer and one consumer. Adding another producer requires a different queue, not optimistic reuse.
+3. The book's atomic top is one coherent publication. Depth arrays are never claimed to be safe through a seqlock over non-atomic elements.
+4. A pre-signed buffer cannot be overwritten while any reader holds it. Publication uses three buffers plus reader accounting.
+5. Each signature can transition to consumed only once through compare-and-swap.
+6. Mutable network JSON never aliases hot-path objects.
+7. Thread pinning is best-effort and reported; correctness cannot depend on affinity.
 
-## 5. Build
+## Order construction
 
-CMake, C++20. `-O3 -funroll-loops -fno-plt -fvisibility=hidden` +
-optional `-march=native` (`CROWDINTEL_MARCH_NATIVE`, default ON) + LTO.
-The network layer (curl/OpenSSL) is optional (`CROWDINTEL_NETWORK=OFF`
-builds tests/bench/backtester without any network library).
+Amounts use integer fixed point:
 
-## 6. Deployment posture
+- price: `1e6` units;
+- shares: `1e6` units, truncated to the venue's `0.01`-share precision where required;
+- supported tick quanta follow the current V2 table;
+- unknown/non-dividing tick values fail closed;
+- BUY and SELL maker/taker amounts follow separate official formulas;
+- wire numbers are decimal strings, not binary floating-point JSON numbers;
+- salt is generated by ChaCha20 and restricted to `[0, 2^53-1]` for cross-language wire safety.
 
-- Bare metal with `isolcpus` for the engine core (`infra/scripts/kernel_tuning.sh`
-  applies universal sysctls everywhere and GRUB isolation only where writable).
-- Deterministic Docker build: `infra/docker/Dockerfile.prod`.
-- Secrets only via environment; optional TLS pinning; secret buffers wiped.
+FAK/FOK/GTC/GTD semantics are kept distinct. GTD adds the venue's required 60-second buffer and rejects configured lifetimes below 120 seconds.
+
+## Signing
+
+The signer computes the V2 EIP-712 domain and order struct digest using Keccak-256 and recoverable secp256k1 ECDSA. Standard and negative-risk exchange addresses are selected explicitly. The output is `r || s || v`, with low-S normalization provided by libsecp256k1.
+
+Signature types 0, 1, and 2 use ECDSA with explicit maker/signer identity rules. Type 3 is not equivalent to a 65-byte ECDSA signature: it requires the current deposit-wallet/ERC-7739 wrapper and therefore fails closed in this implementation.
+
+## Presigned ladder
+
+Each side has eight risk buckets. A lookup chooses the largest bucket that does not exceed the engine's allowed size and whose price/tick/market/expiry still match. Slots are consumable, never reusable. If no valid slot exists, the engine may sign inline on the cold fallback path; it does not submit a stale or mismatched signature.
+
+## Risk model
+
+Before submission, the engine checks:
+
+- alpha identity, age, confidence, q-value, direction, and two-epoch Bloom deduplication (no TTL-window false negatives; false positives reject safely);
+- valid/fresh book and non-crossed top;
+- exact tick and current price binding;
+- conservative taker fee `C × feeRate × p × (1-p)`;
+- fractional-Kelly sizing capped by order and total exposure;
+- daily-loss and maximum-exposure breakers;
+- BUY worst-cost reservations;
+- SELL confirmed inventory and reservations.
+
+Reservations are intentionally not treated as fills. Until account reconciliation exists, startup inventory is operator-supplied and automatic recovery is unavailable. That is a deployment blocker, not a cosmetic TODO.
+
+## Failure semantics
+
+- WSS disconnects, unknown tick generations, and authoritative empty snapshots invalidate/clear tradable depth.
+- DNS/TCP/TLS/HTTP failures do not become successful submits.
+- HTTP 2xx alone is insufficient; the body must indicate semantic success and contain no venue error.
+- A timeout after bytes may have reached the venue is ambiguous and is not blindly replayed.
+- Queue full, stale data, unsupported identity, and pool exhaustion are visible rejects.
+- The kill switch is checked before enqueue and before every egress attempt. Emergency shutdown discards unsent queue entries; an already in-flight POST remains potentially ambiguous.
+- The systemd unit does not auto-restart, because restart without order/inventory reconciliation can duplicate exposure.

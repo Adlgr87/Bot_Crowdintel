@@ -181,7 +181,9 @@ inline size_t base64url_encode(const uint8_t* in, size_t len, char* out) {
 }
 
 // Decode base64url (with or without padding). Returns bytes written or SIZE_MAX.
-inline size_t base64url_decode(const char* in, size_t len, uint8_t* out) {
+inline size_t base64url_decode(const char* in, size_t len,
+                               uint8_t* out, size_t out_cap) {
+    if (!in || !out) return SIZE_MAX;
     static auto val = [](char c) -> int {
         if (c >= 'A' && c <= 'Z') return c - 'A';
         if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -190,21 +192,35 @@ inline size_t base64url_decode(const char* in, size_t len, uint8_t* out) {
         if (c == '_' || c == '/') return 63;
         return -1;
     };
-    size_t o = 0;
+    size_t content_len = 0;
+    while (content_len < len && in[content_len] != '=') ++content_len;
+    const size_t padding = len - content_len;
+    if (content_len % 4 == 1 || padding > 2) return SIZE_MAX;
+    if (padding != 0) {
+        if (len % 4 != 0 ||
+            (padding == 1 && content_len % 4 != 3) ||
+            (padding == 2 && content_len % 4 != 2))
+            return SIZE_MAX;
+        for (size_t i = content_len; i < len; ++i)
+            if (in[i] != '=') return SIZE_MAX;
+    }
+
+    size_t written = 0;
     uint32_t acc = 0;
-    int bits = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (in[i] == '=' || in[i] == '\n' || in[i] == '\r') continue;
-        const int v = val(in[i]);
-        if (v < 0) return SIZE_MAX;
-        acc = (acc << 6) | (uint32_t)v;
+    unsigned bits = 0;
+    for (size_t i = 0; i < content_len; ++i) {
+        const int decoded = val(in[i]);
+        if (decoded < 0) return SIZE_MAX;
+        acc = (acc << 6) | static_cast<uint32_t>(decoded);
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
-            out[o++] = (uint8_t)(acc >> bits);
+            if (written == out_cap) return SIZE_MAX;
+            out[written++] = static_cast<uint8_t>(acc >> bits);
         }
     }
-    return o;
+    if (bits != 0 && (acc & ((1U << bits) - 1U)) != 0) return SIZE_MAX;
+    return written;
 }
 
 // Standard base64 (for the WebSocket handshake key).

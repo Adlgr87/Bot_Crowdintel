@@ -1,81 +1,84 @@
-#!/bin/bash
-# kernel_tuning.sh - Smart Performance Tuning for Polymarket Bot
-# This script intelligently applies optimizations based on the environment.
+#!/usr/bin/env bash
+# Conservative host tuning.  Safe network settings apply immediately; boot/NIC
+# changes require explicit flags and are never inferred from writable files.
+set -euo pipefail
 
-echo "🚀 Starting Smart Kernel Tuning for Ultra-Low Latency..."
+[[ $EUID -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
 
-# --- Phase 1: Universal Optimizations (Apply to ANY VPS/Server) ---
-echo "🌐 Applying Universal Network Optimizations..."
+HOT_CORE="${HOT_CORE:-2}"
+APPLY_BOOT=0
+NIC=""
+for arg in "$@"; do
+  case "$arg" in
+    --hot-core=*) HOT_CORE="${arg#*=}" ;;
+    --apply-boot) APPLY_BOOT=1 ;;
+    --nic=*) NIC="${arg#*=}" ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+[[ "$HOT_CORE" =~ ^[0-9]+$ ]] || { echo "Invalid HOT_CORE" >&2; exit 2; }
+[[ -z "$NIC" || "$NIC" =~ ^[A-Za-z0-9_.:-]+$ ]] || {
+  echo "Invalid NIC name" >&2; exit 2;
+}
+(( HOT_CORE < $(nproc) )) || { echo "HOT_CORE=$HOT_CORE is not present" >&2; exit 2; }
 
-cat << 'SYSCTL' > /etc/sysctl.d/99-lowlatency.conf
-# Maximize buffer sizes to prevent packet drops during bursts
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
-
-# Low latency networking
+SYSCTL_FILE=/etc/sysctl.d/99-crowdintel-client.conf
+if [[ -e "$SYSCTL_FILE" ]]; then
+  cp -a "$SYSCTL_FILE" "$SYSCTL_FILE.bak.$(date +%Y%m%d%H%M%S)"
+fi
+cat >"$SYSCTL_FILE" <<'SYSCTL'
+# Outbound long-lived TLS/WebSocket client: detect dead peers and avoid slow
+# start after quiet periods.  Listener backlog/port-range cargo-cult omitted.
+net.ipv4.tcp_keepalive_time = 30
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 3
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.ip_local_port_range = 1024 65535
-
-# Reduce time-wait recycling and keep-alive overhead
-net.ipv4.tcp_fin_timeout = 10
-net.ipv4.tcp_keepalive_time = 600
-
-# Backlog and connection limits
-net.core.netdev_max_backlog = 5000
-net.core.somaxconn = 65535
-
-# Busy polling to reduce interrupt overhead (if supported)
-net.core.busy_poll = 50
-net.core.busy_read = 50
+# Moderate socket ceilings; application buffers remain independently bounded.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 SYSCTL
+sysctl --system >/dev/null
+echo "Applied reversible client network settings: $SYSCTL_FILE"
 
-# BBR only if the module is actually available on this kernel
-if modprobe tcp_bbr 2>/dev/null && sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.d/99-lowlatency.conf
-    echo "✅ BBR congestion control enabled."
-else
-    echo "ℹ️ BBR not available — keeping default congestion control."
+if [[ -n "$NIC" ]]; then
+  command -v ethtool >/dev/null || { echo "ethtool is required for --nic" >&2; exit 3; }
+  ip link show "$NIC" >/dev/null
+  ethtool -k "$NIC" >"/var/tmp/crowdintel-${NIC}-offload-before.txt"
+  # GRO/LRO may add aggregation latency.  TSO/GSO primarily affect bulk egress;
+  # leave them unchanged unless measurements on this exact NIC justify it.
+  ethtool -K "$NIC" gro off lro off
+  echo "Disabled GRO/LRO on $NIC; prior state saved under /var/tmp."
 fi
 
-sysctl -p /etc/sysctl.d/99-lowlatency.conf > /dev/null
-echo "✅ Universal Network Stack Optimized (buffers, busy-poll, port range)."
-
-# --- Phase 2: Advanced Optimizations (Bare-Metal Only) ---
-# Check if we have access to GRUB (implies we can reboot / we own the machine)
-if [ -w "/etc/default/grub" ]; then
-    echo "🖥️ Bare-Metal Detected. Applying Advanced CPU & Kernel Optimizations..."
-    
-    # Disable C-states/P-states
-    echo "intel_idle.max_cstate=0" > /etc/modprobe.d/intel_idle.conf
-    echo "processor.max_cstate=0" >> /etc/modprobe.d/intel_idle.conf
-
-    # Isolate CPUs (e.g., cores 2 and 3 for the Hot Path)
-    if grep -q "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub; then
-        # Append isolation parameters, being careful not to duplicate
-        sed -i '/GRUB_CMDLINE_LINUX_DEFAULT/ {
-            s/isolcpus=[^ ]* //g;
-            s/nohz_full=[^ ]* //g;
-            s/rcu_nocbs=[^ ]* //g;
-            s/intel_pstate=disable //g;
-            s/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 intel_pstate=disable /;
-        }' /etc/default/grub
-        update-grub
-        echo "✅ CPU Isolation Configured (cores 2,3). GRUB updated. Reboot required."
-    fi
-
-    # NIC Offloading (requires root and ethtool)
-    echo "🔌 Applying NIC Offloading Settings..."
-    # This is a placeholder. In a production script, you would detect the interface name.
-    # interface=$(ip route | grep default | awk '{print $5}')
-    # ethtool -K $interface gso off gro off tso off lro off 2>/dev/null || true
-    echo "ℹ️ To apply: ethtool -K <your_interface> gso off gro off tso off lro off"
-    echo "✨ Advanced Kernel Tuning Complete."
-else
-    echo "☁️ VPS Environment Detected."
-    echo "✅ Applied universal network optimizations (Phase 1)."
-    echo "ℹ️ Advanced CPU/kernel tuning (isolated CPUs, C-states) requires bare-metal and has been skipped."
+if (( APPLY_BOOT == 0 )); then
+  echo "Boot tuning skipped (pass --apply-boot after latency/power measurements)."
+  exit 0
 fi
 
-echo "🏁 Kernel Tuning Script Finished."
+if command -v systemd-detect-virt >/dev/null && systemd-detect-virt --quiet; then
+  echo "Refusing boot CPU isolation inside a VM/container." >&2
+  exit 4
+fi
+
+KPARAMS="isolcpus=managed_irq,${HOT_CORE} nohz_full=${HOT_CORE} rcu_nocbs=${HOT_CORE} intel_idle.max_cstate=1 processor.max_cstate=1"
+if command -v update-grub >/dev/null && [[ -d /etc/default/grub.d ]]; then
+  GRUB_SNIPPET=/etc/default/grub.d/99-crowdintel.cfg
+  if [[ -e "$GRUB_SNIPPET" ]]; then
+    cp -a "$GRUB_SNIPPET" "$GRUB_SNIPPET.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  # GRUB_CMDLINE_LINUX_DEFAULT is composed by this dedicated snippet rather
+  # than destructively editing an existing administrator-owned line.
+  cat >"$GRUB_SNIPPET" <<EOF
+# Generated by kernel_tuning.sh; remove this file to roll back.
+GRUB_CMDLINE_LINUX_DEFAULT="\${GRUB_CMDLINE_LINUX_DEFAULT:-} $KPARAMS"
+EOF
+  update-grub
+elif command -v grubby >/dev/null; then
+  grubby --update-kernel=ALL --args="$KPARAMS"
+else
+  echo "No supported bootloader updater (update-grub/grubby); no boot change made." >&2
+  exit 5
+fi
+
+echo "Configured hot core $HOT_CORE with shallow (not disabled) C-states."
+echo "Reboot required. Verify /proc/cmdline and measure p99 latency + power afterward."

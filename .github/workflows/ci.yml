@@ -1,61 +1,137 @@
-name: CI
+name: crowdintel-ci
 
 on:
   push:
-    branches: [ main ]
   pull_request:
-  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SECP256K1_COMMIT: 6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d
 
 jobs:
-  build-and-test:
+  build-test:
+    name: ${{ matrix.compiler }} / network=${{ matrix.network }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            network: "ON"
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            network: "ON"
+          - compiler: gcc-offline
+            cc: gcc
+            cxx: g++
+            network: "OFF"
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install build and reference-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build git libssl-dev libcurl4-openssl-dev python3-pip
+          python3 -m pip install --user pycryptodome==3.23.0 coincurve==21.0.0
+      - name: Build pinned libsecp256k1
+        run: |
+          git clone --filter=blob:none https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+          git -C /tmp/secp256k1 checkout --detach "$SECP256K1_COMMIT"
+          test "$(git -C /tmp/secp256k1 rev-parse HEAD)" = "$SECP256K1_COMMIT"
+          cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
+            -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF \
+            -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF
+          cmake --build /tmp/secp256k1/build
+      - name: Configure and build
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S core -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCROWDINTEL_NETWORK=${{ matrix.network }} \
+            -DCROWDINTEL_CPU_TARGET=portable \
+            -DSECP256K1_ROOT=/tmp/secp256k1
+          cmake --build build
+      - name: Native tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Independent Python signer cross-check
+        run: |
+          build/bin/test_signer --json > /tmp/signer.json
+          python3 tests/crypto/cross_check_v2.py /tmp/signer.json
+          build/bin/test_signer --json-neg-risk > /tmp/signer-neg-risk.json
+          python3 tests/crypto/cross_check_v2.py /tmp/signer-neg-risk.json
+      - name: CPU latency gross-regression smoke test
+        if: matrix.compiler == 'gcc'
+        run: |
+          build/bin/latency_bench | tee /tmp/latency.txt
+          python3 tests/benchmarks/check_latency.py /tmp/latency.txt
 
-    - name: Install build deps
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake libcurl4-openssl-dev libssl-dev
+  production-container:
+    name: production container
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build production image and run build-stage tests
+        run: |
+          docker build --pull --file infra/docker/Dockerfile.prod \
+            --tag crowdintel:ci .
+      - name: Verify non-root runtime identity and executable image
+        run: |
+          test "$(docker image inspect crowdintel:ci --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm \
+            -e BOT_MODE=mock -e BOT_TICKS=1 \
+            -e BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b \
+            crowdintel:ci
 
-    - name: Build libsecp256k1 v0.8.0 (recovery + asm)
-      run: |
-        git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
-        cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
-          -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-          -DSECP256K1_ENABLE_MODULE_RECOVERY=ON -DSECP256K1_ASM=x86_64 \
-          -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF
-        cmake --build /tmp/secp256k1/build -j$(nproc)
-
-    - name: Configure
-      run: |
-        cd core
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-          -DSECP256K1_LIBRARY=/tmp/secp256k1/build/lib/libsecp256k1.a \
-          -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include
-
-    - name: Build
-      run: cmake --build core/build -j$(nproc)
-
-    - name: Crypto KATs + golden vector (C++ vs embedded reference)
-      run: core/build/bin/test_signer
-
-    - name: Unit tests (SPSC, book, Kelly, amounts, wire body, HMAC, WSS parser)
-      run: core/build/bin/test_core
-
-    - name: Independent Python cross-check of the EIP-712 V2 signer
-      run: |
-        pip install pycryptodome coincurve
-        core/build/bin/test_signer --json > /tmp/signer.json
-        python3 tests/crypto/cross_check_v2.py /tmp/signer.json
-
-    - name: Latency benchmark (calibrated; completes and reports percentiles)
-      run: core/build/bin/latency_bench
-
-    - name: Backtester smoke
-      run: core/build/bin/l2_backtester tests/replay/sample_ticks.csv
-
-    - name: Bot offline demo (mock mode, bounded ticks)
-      run: |
-        BOT_MODE=mock BOT_PRIVATE_KEY_HEX=$(python3 -c "print('11'*32)") \
-          BOT_TICKS=8 core/build/bin/crowdintel_bot
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan+UBSan
+            cmake_args: -DCROWDINTEL_ASAN=ON -DCROWDINTEL_UBSAN=ON
+            env: ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          - name: TSan
+            cmake_args: -DCROWDINTEL_TSAN=ON
+            env: TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build git
+      - name: Build pinned libsecp256k1
+        run: |
+          git clone --filter=blob:none https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+          git -C /tmp/secp256k1 checkout --detach "$SECP256K1_COMMIT"
+          test "$(git -C /tmp/secp256k1 rev-parse HEAD)" = "$SECP256K1_COMMIT"
+          cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF \
+            -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
+            -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF \
+            -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF
+          cmake --build /tmp/secp256k1/build
+      - name: Build and test
+        run: |
+          cmake -S core -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCROWDINTEL_NETWORK=OFF -DCROWDINTEL_CPU_TARGET=portable \
+            -DCROWDINTEL_LTO=OFF -DSECP256K1_ROOT=/tmp/secp256k1 \
+            ${{ matrix.cmake_args }}
+          cmake --build build
+          env ${{ matrix.env }} ctest --test-dir build --output-on-failure

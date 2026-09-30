@@ -1,39 +1,51 @@
-# Deterministic production build for Bot CrowdIntel (CLOB V2).
-# Static libsecp256k1; dynamic libssl/libcurl from the runtime layer.
-FROM ubuntu:22.04 AS builder
+# Hardened amd64 production build.  The base manifest and secp256k1 source are
+# immutable; Ubuntu package versions should additionally be mirrored/snapshotted
+# by operators requiring byte-for-byte rebuilds.
+ARG UBUNTU_IMAGE=ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+FROM ${UBUNTU_IMAGE} AS builder
 
-RUN apt-get update && apt-get install -y \
-    build-essential cmake git libssl-dev libcurl4-openssl-dev \
+ARG DEBIAN_FRONTEND=noninteractive
+ARG SECP256K1_COMMIT=6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates cmake git libssl-dev libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# libsecp256k1 v0.8.0 — recovery module + x86_64 asm, static.
-RUN git clone --depth 1 --branch v0.8.0 https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1 \
+RUN git clone --filter=blob:none https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1 \
+    && git -C /tmp/secp256k1 checkout --detach ${SECP256K1_COMMIT} \
+    && test "$(git -C /tmp/secp256k1 rev-parse HEAD)" = "${SECP256K1_COMMIT}" \
     && cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
-        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-        -DSECP256K1_ENABLE_MODULE_RECOVERY=ON -DSECP256K1_ASM=x86_64 \
-        -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF \
-    && cmake --build /tmp/secp256k1/build -j$(nproc)
+         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+         -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
+         -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_TESTS=OFF \
+         -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+    && cmake --build /tmp/secp256k1/build -j2
 
-WORKDIR /app
+WORKDIR /src
 COPY . .
-
-# -march=native is intentional: build on the SAME host class that runs the image
-# (or set CROWDINTEL_MARCH_NATIVE=OFF for portable binaries).
-RUN cmake -S core -B core/build -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -S core -B /tmp/build -DCMAKE_BUILD_TYPE=Release \
+      -DCROWDINTEL_CPU_TARGET=x86-64-v3 -DCROWDINTEL_LTO=ON \
       -DSECP256K1_LIBRARY=/tmp/secp256k1/build/lib/libsecp256k1.a \
       -DSECP256K1_INCLUDE_DIR=/tmp/secp256k1/include \
-    && cmake --build core/build -j$(nproc) \
-    && ctest --test-dir core/build --output-on-failure
+    && cmake --build /tmp/build -j2 \
+    && ctest --test-dir /tmp/build --output-on-failure \
+    && /tmp/build/bin/latency_bench
 
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y libcurl4 libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+FROM ${UBUNTU_IMAGE} AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libcurl4 libssl3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 crowdintel \
+    && useradd --uid 10001 --gid crowdintel --no-create-home \
+       --shell /usr/sbin/nologin crowdintel
 
 WORKDIR /app
-COPY --from=builder /app/core/build/bin/crowdintel_bot /app/crowdintel_bot
+COPY --from=builder --chown=crowdintel:crowdintel \
+     /tmp/build/bin/crowdintel_bot /app/crowdintel_bot
+USER 10001:10001
 
-# Credentials are injected at runtime (never baked into the image):
-#   BOT_PRIVATE_KEY_HEX, CLOB_API_KEY, CLOB_SECRET, CLOB_PASSPHRASE,
-#   BOT_TOKEN_ID, [BOT_NEG_RISK, BOT_SIGNATURE_TYPE, BOT_MAKER_ADDRESS, ...]
-# Pin the hot loop with BOT_PIN_CPU=<isolcpus core>.
+# Liveness only; venue/feed readiness is emitted in process metrics/logs and
+# should be checked externally before arming trading.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD kill -0 1 || exit 1
 ENTRYPOINT ["/app/crowdintel_bot"]

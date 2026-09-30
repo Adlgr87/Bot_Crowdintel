@@ -1,29 +1,10 @@
 #ifndef LIGHTWEIGHT_CLIENT_HPP
 #define LIGHTWEIGHT_CLIENT_HPP
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LightweightCLOBClient: HTTPS order submission for Polymarket CLOB V2.
-//
-// Wire protocol (docs.polymarket.com — L2 auth headers are unchanged in V2):
-//   POST {host}/order
-//   POLY_ADDRESS / POLY_SIGNATURE / POLY_TIMESTAMP / POLY_API_KEY / POLY_PASSPHRASE
-//   POLY_SIGNATURE = base64url( HMAC-SHA256( base64url_decode(secret),
-//                                            ts_seconds + "POST" + "/order" + body ) )
-//
-// Hot-path design:
-//   - ONE persistent curl easy handle (connection + TLS session reuse; the
-//     TCP/TLS handshake happens once, not per order).
-//   - HMAC key midstates precomputed once → per-order HMAC ≈ 2 SHA-256 blocks.
-//   - Secret decoded into a fixed buffer and wiped on destruction (volatile
-//     stores the optimizer cannot elide).
-//   - Optional TLS public-key pinning (CURLOPT_PINNEDPUBLICKEY, "sha256//...").
-//   - Response captured into a fixed buffer; the CLOB orderID is extracted so
-//     the caller can track/cancel the order.
-// ─────────────────────────────────────────────────────────────────────────────
-
-#include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -31,154 +12,383 @@
 
 #include "../crypto/secure_zero.hpp"
 #include "../crypto/sha256_engine.hpp"
+#include "../include/bounded_json.hpp"
 #include "market_config.hpp"
 #include "polymarket_order.hpp"
 
 class LightweightCLOBClient {
 public:
-    LightweightCLOBClient(const MarketConfig& cfg) : cfg_(cfg) {
+    explicit LightweightCLOBClient(const MarketConfig& cfg) : cfg_(cfg) {
         static std::once_flag curl_once;
         std::call_once(curl_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 
-        // Decode the base64url secret ONCE — the HMAC key is the raw bytes.
-        const size_t slen = std::strlen(cfg.api_secret_b64);
-        secret_len_ = base64url_decode(cfg.api_secret_b64, slen, secret_raw_);
-        if (secret_len_ == 0 || secret_len_ == (size_t)-1 ||
+        const size_t encoded_len = std::strlen(cfg.api_secret_b64);
+        secret_len_ = base64url_decode(cfg.api_secret_b64, encoded_len,
+                                       secret_raw_, sizeof(secret_raw_));
+        if (secret_len_ == 0 || secret_len_ == SIZE_MAX ||
             secret_len_ > sizeof(secret_raw_)) {
             std::fprintf(stderr, "FATAL: CLOB_SECRET is not valid base64url\n");
             std::exit(1);
         }
         hmac_.set_key(secret_raw_, secret_len_);
 
-        // Persistent handle: connection cache + TLS session survive across orders.
         curl_ = curl_easy_init();
-        if (!curl_) { std::fprintf(stderr, "FATAL: curl_easy_init failed\n"); std::exit(1); }
-        std::snprintf(url_, sizeof(url_), "%s/order", cfg.clob_host);
-        curl_easy_setopt(curl_, CURLOPT_URL, url_);
-        curl_easy_setopt(curl_, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
-        curl_easy_setopt(curl_, CURLOPT_CONNECTTIMEOUT, 3L);
-        curl_easy_setopt(curl_, CURLOPT_TIMEOUT, 5L);
-        curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl_, CURLOPT_WRITEDATA, this);
-        curl_easy_setopt(curl_, CURLOPT_ACCEPT_ENCODING, nullptr);  // identity — no decompress latency
-        curl_easy_setopt(curl_, CURLOPT_USERAGENT, "crowdintel-bot/2.0");
-        if (cfg.tls_pin[0]) {
-            curl_easy_setopt(curl_, CURLOPT_PINNEDPUBLICKEY, cfg.tls_pin);
+        if (!curl_) {
+            std::fprintf(stderr, "FATAL: curl_easy_init failed\n");
+            std::exit(1);
         }
+        std::snprintf(order_url_, sizeof(order_url_), "%s/order", cfg.clob_host);
+        std::snprintf(warmup_url_, sizeof(warmup_url_), "%s/time", cfg.clob_host);
+        configure_common();
+        configure_post();
     }
 
     ~LightweightCLOBClient() {
-        if (curl_) {
-            curl_easy_cleanup(curl_);
-            curl_ = nullptr;
-        }
+        if (curl_) curl_easy_cleanup(curl_);
         secure_zero(secret_raw_, sizeof(secret_raw_));
         secure_zero(&hmac_, sizeof(hmac_));
+        secure_zero(resp_, sizeof(resp_));
     }
 
     LightweightCLOBClient(const LightweightCLOBClient&) = delete;
     LightweightCLOBClient& operator=(const LightweightCLOBClient&) = delete;
 
-    // HOT PATH (network egress). `body` is the fully built, signed wire JSON.
-    SubmitResult submit(const WireBody& body) {
-        SubmitResult res{false, 0, {0}};
+    // Establish DNS/TCP/TLS and populate curl's connection cache before the
+    // first order reaches the gateway.  Failure is non-fatal; submit reports it.
+    void warmup() {
         resp_len_ = 0;
+        resp_overflow_ = false;
+        curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
+        curl_easy_setopt(curl_, CURLOPT_URL, warmup_url_);
+        curl_easy_setopt(curl_, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TIMEOUT_MS, 2000L);
+        (void)curl_easy_perform(curl_);
+        configure_post();
+    }
 
-        // 1. Timestamp (seconds) for both the header and the HMAC message.
-        char ts[24];
-        const uint64_t now_sec = now_unix_seconds();
-        const size_t ts_len = u64_to_dec(now_sec, ts);
-
-        // 2. HMAC over  ts + "POST" + "/order" + body  (stack-joined message;
-        //    ≈700-1200 bytes → one streaming pass over precomputed midstates).
-        char sig_b64[48];
-        uint8_t digest[32];
-        {
-            char msg[1600 + 64];
-            size_t off = 0;
-            std::memcpy(msg + off, ts, ts_len); off += ts_len;
-            std::memcpy(msg + off, "POST", 4); off += 4;
-            std::memcpy(msg + off, "/order", 6); off += 6;
-            std::memcpy(msg + off, body.buf, body.len); off += body.len;
-            hmac_.compute((const uint8_t*)msg, off, digest);
-            secure_zero(msg, off);
+    SubmitResult submit(const WireBody& body) {
+        SubmitResult result{};
+        resp_len_ = 0;
+        resp_overflow_ = false;
+        resp_[0] = '\0';
+        if (body.len >= sizeof(body.buf)) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "wire body length out of bounds");
+            return result;
         }
-        const size_t sig_len = base64url_encode(digest, 32, sig_b64);
-        sig_b64[sig_len] = '\0';
 
-        // 3. Headers (two of them vary per request → rebuilt per call).
-        char h_addr[80], h_sig[96], h_ts[48], h_key[96], h_pp[160], h_ct[40];
-        std::snprintf(h_addr, sizeof(h_addr), "POLY_ADDRESS: %s", cfg_.maker_hex);
-        std::snprintf(h_sig,  sizeof(h_sig),  "POLY_SIGNATURE: %s", sig_b64);
-        std::snprintf(h_ts,   sizeof(h_ts),   "POLY_TIMESTAMP: %.*s", (int)ts_len, ts);
-        std::snprintf(h_key,  sizeof(h_key),  "POLY_API_KEY: %s", cfg_.owner_api_key);
-        std::snprintf(h_pp,   sizeof(h_pp),   "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
-        std::snprintf(h_ct,   sizeof(h_ct),   "Content-Type: application/json");
+        char timestamp[24];
+        const size_t timestamp_len = u64_to_dec(now_unix_seconds(), timestamp);
 
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, h_addr);
-        headers = curl_slist_append(headers, h_sig);
-        headers = curl_slist_append(headers, h_ts);
-        headers = curl_slist_append(headers, h_key);
-        headers = curl_slist_append(headers, h_pp);
-        headers = curl_slist_append(headers, h_ct);
+        // L2 HMAC: timestamp + method + path + exact body bytes.
+        uint8_t digest[32];
+        char message[1600 + 64];
+        size_t message_len = 0;
+        std::memcpy(message + message_len, timestamp, timestamp_len);
+        message_len += timestamp_len;
+        std::memcpy(message + message_len, "POST/order", 10);
+        message_len += 10;
+        std::memcpy(message + message_len, body.buf, body.len);
+        message_len += body.len;
+        hmac_.compute(reinterpret_cast<const uint8_t*>(message), message_len, digest);
+        secure_zero(message, message_len);
+
+        char signature_b64[48];
+        const size_t signature_len = base64url_encode(digest, 32, signature_b64);
+        signature_b64[signature_len] = '\0';
+        secure_zero(digest, sizeof(digest));
+
+        char address_header[80], signature_header[96], timestamp_header[48];
+        char api_key_header[96], passphrase_header[160];
+        std::snprintf(address_header, sizeof(address_header),
+                      "POLY_ADDRESS: %s", cfg_.api_address_hex);
+        std::snprintf(signature_header, sizeof(signature_header),
+                      "POLY_SIGNATURE: %s", signature_b64);
+        std::snprintf(timestamp_header, sizeof(timestamp_header),
+                      "POLY_TIMESTAMP: %.*s", static_cast<int>(timestamp_len), timestamp);
+        std::snprintf(api_key_header, sizeof(api_key_header),
+                      "POLY_API_KEY: %s", cfg_.owner_api_key);
+        std::snprintf(passphrase_header, sizeof(passphrase_header),
+                      "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
+
+        curl_slist* headers = nullptr;
+        bool headers_ok = append_header(headers, address_header);
+        headers_ok = append_header(headers, signature_header) && headers_ok;
+        headers_ok = append_header(headers, timestamp_header) && headers_ok;
+        headers_ok = append_header(headers, api_key_header) && headers_ok;
+        headers_ok = append_header(headers, passphrase_header) && headers_ok;
+        headers_ok = append_header(headers, "Content-Type: application/json") &&
+                     headers_ok;
+        if (!headers_ok) {
+            curl_slist_free_all(headers);
+            secure_zero(signature_b64, sizeof(signature_b64));
+            std::snprintf(result.error, sizeof(result.error), "header allocation failed");
+            return result;
+        }
 
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, body.buf);
-        curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, (long)body.len);
-
-        // 4. Send. libcurl reuses the keep-alive connection.
-        const CURLcode rc = curl_easy_perform(curl_);
-        if (rc == CURLE_OK) {
-            curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &res.http_code);
-            res.ok = (res.http_code >= 200 && res.http_code < 300);
+        curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.len));
+        const CURLcode code = curl_easy_perform(curl_);
+        if (code == CURLE_OK) {
+            long http_code = 0;
+            curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &http_code);
+            if (resp_overflow_) {
+                result.http_code = http_code;
+                std::snprintf(result.error, sizeof(result.error),
+                              "CLOB response exceeded bounded buffer");
+            } else {
+                result = classify_response(http_code, resp_, resp_len_);
+            }
+        } else {
+            std::snprintf(result.error, sizeof(result.error), "%s",
+                          curl_easy_strerror(code));
+            // Do not blindly retry ambiguous writes (timeout/recv failure).
+            result.retryable = code == CURLE_COULDNT_CONNECT ||
+                               code == CURLE_COULDNT_RESOLVE_HOST;
         }
-        if (res.ok && resp_len_) extract_order_id(res.order_id, sizeof(res.order_id));
 
         curl_slist_free_all(headers);
-        return res;
+        curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
+        secure_zero(signature_b64, sizeof(signature_b64));
+        return result;
+    }
+
+    // Pure semantic classifier used by submit() and response fixtures. HTTP
+    // success alone is never order acceptance.
+    static SubmitResult classify_response(long http_code,
+                                          const char* json, size_t length) {
+        SubmitResult result{};
+        result.http_code = http_code;
+        if (!json) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "malformed CLOB response");
+            return result;
+        }
+        size_t begin = 0;
+        while (begin < length &&
+               std::isspace(static_cast<unsigned char>(json[begin]))) ++begin;
+        size_t end = length;
+        while (end > begin &&
+               std::isspace(static_cast<unsigned char>(json[end - 1]))) --end;
+        if (begin == end || json[begin] != '{' || json[end - 1] != '}' ||
+            !bounded_json::valid_document(json, length)) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "malformed CLOB response");
+            return result;
+        }
+        if (duplicate_key(json, length, "success") ||
+            duplicate_key(json, length, "orderID") ||
+            duplicate_key(json, length, "status") ||
+            duplicate_key(json, length, "errorMsg") ||
+            duplicate_key(json, length, "error")) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "duplicate semantic field in CLOB response");
+            return result;
+        }
+        extract_json_string(json, length, "orderID",
+                            result.order_id, sizeof(result.order_id));
+        extract_json_string(json, length, "status",
+                            result.status, sizeof(result.status));
+        if (find_key(json, length, "errorMsg")) {
+            if (!extract_json_string(json, length, "errorMsg",
+                                     result.error, sizeof(result.error)))
+                std::snprintf(result.error, sizeof(result.error),
+                              "malformed or oversized errorMsg");
+        } else if (find_key(json, length, "error") &&
+                   !extract_json_string(json, length, "error",
+                                        result.error, sizeof(result.error))) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "malformed or oversized error");
+        }
+
+        bool body_success = false;
+        const bool has_success =
+            extract_json_bool(json, length, "success", body_success);
+        const bool http_ok = http_code >= 200 && http_code < 300;
+        const bool status_ok = std::strcmp(result.status, "live") == 0 ||
+                               std::strcmp(result.status, "matched") == 0 ||
+                               std::strcmp(result.status, "delayed") == 0;
+        result.ok = http_ok && has_success && body_success && status_ok &&
+                    result.order_id[0] != '\0' && result.error[0] == '\0';
+        // A 429 is an explicit pre-admission throttle. Gateway/proxy 5xx
+        // responses are ambiguous for POST and must be reconciled, not replayed.
+        result.retryable = result.order_id[0] == '\0' && http_code == 429;
+        if (http_ok && !has_success && result.error[0] == '\0')
+            std::snprintf(result.error, sizeof(result.error),
+                          "missing success field in CLOB response");
+        else if (http_ok && has_success && body_success &&
+                 (result.order_id[0] == '\0' || !status_ok) &&
+                 result.error[0] == '\0')
+            std::snprintf(result.error, sizeof(result.error),
+                          "missing order ID or unknown success status");
+        return result;
     }
 
 private:
+    void configure_common() {
+        curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TCP_KEEPIDLE, 20L);
+        curl_easy_setopt(curl_, CURLOPT_TCP_KEEPINTVL, 10L);
+        curl_easy_setopt(curl_, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
+        curl_easy_setopt(curl_, CURLOPT_TIMEOUT_MS, 3000L);
+        curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl_, CURLOPT_WRITEDATA, this);
+        curl_easy_setopt(curl_, CURLOPT_ACCEPT_ENCODING, "identity");
+        curl_easy_setopt(curl_, CURLOPT_USERAGENT, "crowdintel-bot/2.1");
+        curl_easy_setopt(curl_, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl_, CURLOPT_SSL_VERIFYHOST, 2L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(curl_, CURLOPT_PROTOCOLS_STR, "https");
+        curl_easy_setopt(curl_, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+        curl_easy_setopt(curl_, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        curl_easy_setopt(curl_, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+        curl_easy_setopt(curl_, CURLOPT_FOLLOWLOCATION, 0L);
+        if (cfg_.tls_pin[0])
+            curl_easy_setopt(curl_, CURLOPT_PINNEDPUBLICKEY, cfg_.tls_pin);
+    }
+
+    void configure_post() {
+        curl_easy_setopt(curl_, CURLOPT_URL, order_url_);
+        curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl_, CURLOPT_TIMEOUT_MS, 3000L);
+    }
+
+    static bool append_header(curl_slist*& list, const char* value) {
+        curl_slist* updated = curl_slist_append(list, value);
+        if (!updated) return false;
+        list = updated;
+        return true;
+    }
+
     static uint64_t now_unix_seconds() {
-        timespec ts;
+        timespec ts{};
         clock_gettime(CLOCK_REALTIME, &ts);
-        return (uint64_t)ts.tv_sec;
+        return static_cast<uint64_t>(ts.tv_sec);
     }
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* self = static_cast<LightweightCLOBClient*>(userdata);
+        if (size != 0 && nmemb > SIZE_MAX / size) {
+            self->resp_overflow_ = true;
+            return 0;
+        }
         const size_t total = size * nmemb;
-        const size_t space = sizeof(self->resp_) - self->resp_len_ - 1;
-        const size_t take = total < space ? total : space;
+        const size_t available = sizeof(self->resp_) - self->resp_len_ - 1;
+        const size_t take = total < available ? total : available;
+        if (total > available) self->resp_overflow_ = true;
         if (take) {
             std::memcpy(self->resp_ + self->resp_len_, ptr, take);
             self->resp_len_ += take;
             self->resp_[self->resp_len_] = '\0';
         }
-        return total;  // always consume everything
+        return total;
     }
 
-    void extract_order_id(char* out, size_t cap) const {
-        static constexpr char K[] = "\"orderID\":\"";
-        const char* hit = std::strstr(resp_, K);
-        if (!hit) return;
-        hit += sizeof(K) - 1;
-        size_t i = 0;
-        while (hit[i] && hit[i] != '"' && i < cap - 1) { out[i] = hit[i]; ++i; }
-        out[i] = '\0';
+    static size_t key_occurrences(const char* json, size_t length,
+                                  const char* key,
+                                  const char** first = nullptr) {
+        if (first) *first = nullptr;
+        if (!json || !key) return 0;
+        const size_t key_len = std::strlen(key);
+        int depth = 0;
+        size_t count = 0;
+        for (size_t i = 0; i < length; ++i) {
+            if (json[i] == '{' || json[i] == '[') { ++depth; continue; }
+            if (json[i] == '}' || json[i] == ']') { --depth; continue; }
+            if (json[i] != '"') continue;
+            const size_t start = i + 1;
+            size_t cursor = start;
+            bool escaped = false;
+            while (cursor < length) {
+                const char ch = json[cursor];
+                if (escaped) escaped = false;
+                else if (ch == '\\') escaped = true;
+                else if (ch == '"') break;
+                ++cursor;
+            }
+            if (cursor == length) return count;
+            size_t after = cursor + 1;
+            while (after < length &&
+                   std::isspace(static_cast<unsigned char>(json[after]))) ++after;
+            if (depth == 1 && cursor - start == key_len &&
+                std::memcmp(json + start, key, key_len) == 0 &&
+                after < length && json[after] == ':') {
+                if (count++ == 0 && first) *first = json + cursor + 1;
+            }
+            i = cursor;
+        }
+        return count;
+    }
+
+    static const char* find_key(const char* json, size_t length,
+                                const char* key) {
+        const char* first = nullptr;
+        (void)key_occurrences(json, length, key, &first);
+        return first;
+    }
+
+    static bool duplicate_key(const char* json, size_t length,
+                              const char* key) {
+        return key_occurrences(json, length, key) > 1;
+    }
+
+    static bool extract_json_bool(const char* json, size_t length,
+                                  const char* key, bool& out) {
+        const char* p = find_key(json, length, key);
+        if (!p) return false;
+        const char* end = json + length;
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p == end || *p++ != ':') return false;
+        while (p < end && std::isspace(static_cast<unsigned char>(*p))) ++p;
+        if (end - p >= 4 && std::memcmp(p, "true", 4) == 0) { out = true; return true; }
+        if (end - p >= 5 && std::memcmp(p, "false", 5) == 0) { out = false; return true; }
+        return false;
+    }
+
+    static bool extract_json_string(const char* json, size_t length,
+                                    const char* key, char* out, size_t cap) {
+        if (cap == 0) return false;
+        out[0] = '\0';
+        const char* p = find_key(json, length, key);
+        if (!p) return false;
+        const char* end = json + length;
+        while (p < end && std::isspace(static_cast<unsigned char>(*p))) ++p;
+        if (p == end || *p++ != ':') return false;
+        while (p < end && std::isspace(static_cast<unsigned char>(*p))) ++p;
+        if (p == end || *p++ != '"') return false;
+        size_t written = 0;
+        while (p < end && *p != '"') {
+            // Signed order IDs/statuses never require JSON escapes. Error
+            // diagnostics with escapes are rejected rather than partially
+            // decoded into a misleading semantic result.
+            if (*p == '\\') { out[0] = '\0'; return false; }
+            if (written + 1 >= cap) {
+                out[0] = '\0';
+                return false;
+            }
+            out[written++] = *p;
+            ++p;
+        }
+        if (p == end) { out[0] = '\0'; return false; }
+        out[written] = '\0';
+        return true;
     }
 
     const MarketConfig& cfg_;
     CURL* curl_ = nullptr;
-    char  url_[192];
-    HmacSha256 hmac_;
-    uint8_t secret_raw_[64];
-    size_t  secret_len_ = 0;
-    char    resp_[1024];
-    size_t  resp_len_ = 0;
+    char order_url_[192]{};
+    char warmup_url_[192]{};
+    HmacSha256 hmac_{};
+    uint8_t secret_raw_[64]{};
+    size_t secret_len_ = 0;
+    char resp_[2048]{};
+    size_t resp_len_ = 0;
+    bool resp_overflow_ = false;
 };
 
-#endif // LIGHTWEIGHT_CLIENT_HPP
+#endif  // LIGHTWEIGHT_CLIENT_HPP

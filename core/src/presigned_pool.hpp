@@ -1,28 +1,16 @@
 #ifndef PRESIGNED_POOL_HPP
 #define PRESIGNED_POOL_HPP
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PresignedOrderPool: ECDSA signatures computed BEFORE the signal arrives.
+// Consumable pre-signed ladder keyed by the current best bid/ask and eight
+// conservative size buckets.  The hot path chooses the largest fresh bucket
+// not exceeding its Kelly/risk limit; it never mutates a signed amount.
 //
-// The single most expensive step of tick-to-wire is the per-order ECDSA
-// (~2-5 µs with libsecp256k1, ~25-45 µs naive). But on a prediction market
-// the plausible trade set is tiny: take the best ask (or bid) at one of a few
-// price levels near the mid, at roughly the Kelly size. So a COLD thread
-// continuously pre-builds and pre-signs orders over a price grid around the
-// mid; the HOT path, on signal, does a linear scan over a handful of slots
-// and — on a hit — submits an already-signed order. Tick-to-wire drops from
-// "keccak + ECDSA + JSON" (~5-45 µs) to "scan + memcpy + HMAC" (~1-2 µs).
-//
-// Freshness: every rebuild stamps new salt + timestamp_ms; slots older than
-// the TTL are not served (the CLOB treats timestamp as the uniqueness source;
-// keeping it current also keeps orders from looking stale).
-//
-// Concurrency: double-buffered. The producer fills the inactive set, then
-// flips an atomic index (release). The consumer reads the active set and a
-// slot is only ever replaced wholesale after a flip — no torn reads.
-// ─────────────────────────────────────────────────────────────────────────────
+// Metadata and bodies are separate so a lookup touches compact cache lines.
+// Three buffers plus per-buffer reader counts/writer locks prevent the producer
+// from reusing memory while one or more readers copy a body. Every slot is
+// claimed once with CAS, so
+// salts/timestamps cannot be submitted twice.
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -31,116 +19,210 @@
 
 #include "../crypto/eip712_signer.hpp"
 #include "../crypto/fast_random.hpp"
+#include "market_config.hpp"
 #include "polymarket_order.hpp"
-
-struct PresignedSlot {
-    uint64_t price;        // ×1e6
-    uint64_t size;         // ×1e6
-    uint8_t  side;
-    uint8_t  valid;
-    uint16_t _pad0;
-    uint32_t _pad1;
-    uint64_t built_ms;
-    WireBody body;         // fully built wire JSON incl. signature
-};
 
 class PresignedOrderPool {
 public:
-    static constexpr size_t LEVELS_PER_SIDE = 8;   // ±8 ticks around the mid
-    static constexpr size_t SLOT_COUNT = LEVELS_PER_SIDE * 2;
+    static constexpr size_t SIZE_BUCKETS = 8;
+    static constexpr size_t SLOT_COUNT = SIZE_BUCKETS * 2;
 
     PresignedOrderPool(const MarketConfig& cfg,
                        const EIP712Signer& signer,
                        uint64_t ttl_ms)
         : cfg_(cfg), signer_(signer), ttl_ms_(ttl_ms) {}
 
-    // ── Cold path: rebuild the inactive buffer and flip. ─────────────────────
-    // grid_center: ×1e6 price around which the grid is laid out (the mid).
-    // shares:      ×1e6 share size to pre-sign (Kelly-sized by the caller).
-    void rebuild(uint64_t grid_center, uint64_t shares) {
-        const uint32_t next = 1u - active_.load(std::memory_order_relaxed);
-        auto& dst = buffers_[next];
-        size_t n = 0;
-        FastRandom rng;  // fresh salts per slot
-        const uint64_t now = now_ms();
+    PresignedOrderPool(const PresignedOrderPool&) = delete;
+    PresignedOrderPool& operator=(const PresignedOrderPool&) = delete;
 
-        for (int s = 0; s < 2; ++s) {
-            const uint8_t side = (s == 0) ? K_SIDE_BUY : K_SIDE_SELL;
-            for (size_t l = 0; l < LEVELS_PER_SIDE; ++l) {
-                // Taker grid: a BUY takes the ASK side of the book (prices at
-                // or above the mid); a SELL takes the BID side (at or below).
-                const int64_t off = (int64_t)(l + 1);
-                int64_t px = (int64_t)grid_center + (side == K_SIDE_BUY ? +off : -off) *
-                             (int64_t)cfg_.tick_size;
-                if (px <= 0 || px >= 1000000) continue;
-                const uint64_t price = round_price_to_tick((uint64_t)px, cfg_.tick_size);
-
-                uint64_t maker_amt, taker_amt;
-                if (!compute_amounts(side, price, shares, maker_amt, taker_amt)) continue;
-
-                OrderV2 o{};
-                o.salt = rng.next_salt();
-                o.timestamp_ms = now;
-                std::memcpy(o.maker, cfg_.maker, 20);
-                std::memcpy(o.signer, cfg_.signer, 20);
-                std::memcpy(o.token_id, cfg_.token_id_be, 32);
-                o.maker_amount = maker_amt;
-                o.taker_amount = taker_amt;
-                o.side = side;
-                o.signature_type = cfg_.signature_type;
-
-                uint8_t sig[65];
-                if (!signer_.sign_order(o, sig)) continue;
-
-                PresignedSlot slot;
-                slot.price = price;
-                slot.size = shares;
-                slot.side = side;
-                slot.valid = 1;
-                slot._pad0 = 0; slot._pad1 = 0;
-                slot.built_ms = now;
-                if (!build_wire_body(o, sig, cfg_.token_id_dec, cfg_.maker_hex,
-                                     cfg_.signer_hex, cfg_.owner_api_key,
-                                     cfg_.order_type, slot.body))
-                    continue;
-                dst[n++] = slot;
+    // Returns false only when both inactive buffers are temporarily protected.
+    bool rebuild(uint64_t best_bid, uint64_t best_ask,
+                 uint64_t target_shares, uint64_t tick_size) {
+        const uint32_t current = active_.load(std::memory_order_acquire);
+        int32_t next = -1;
+        for (int32_t i = 0; i < 3; ++i) {
+            if (i == static_cast<int32_t>(current)) continue;
+            uint32_t expected = 0;
+            if (access_[i].compare_exchange_strong(
+                    expected, WRITER_LOCK, std::memory_order_acq_rel)) {
+                next = i;
+                break;
             }
         }
-        built_count_ = n;
-        active_.store(next, std::memory_order_release);   // publish
+        if (next < 0) return false;
+
+        Buffer& dst = buffers_[next];
+        dst.count = 0;
+        const uint64_t now = now_ms();
+        const bool market_order = std::strcmp(cfg_.order_type, "FAK") == 0 ||
+                                  std::strcmp(cfg_.order_type, "FOK") == 0;
+        const uint64_t expiration = cfg_.wire_expiration(now / 1000ULL);
+
+        for (uint8_t side = K_SIDE_BUY; side <= K_SIDE_SELL; ++side) {
+            const uint64_t price = side == K_SIDE_BUY ? best_ask : best_bid;
+            if (price == 0 || price >= 1000000) continue;
+            uint64_t previous_size = 0;
+            for (size_t bucket = 1; bucket <= SIZE_BUCKETS; ++bucket) {
+                const uint64_t requested = static_cast<uint64_t>(
+                    static_cast<crowd_uint128_t>(target_shares) * bucket /
+                    SIZE_BUCKETS);
+                uint64_t maker = 0, taker = 0, effective = 0;
+                if (!compute_order_amounts(side, price, requested, tick_size,
+                                           market_order, maker, taker, effective) ||
+                    effective < cfg_.min_size_shares || effective == previous_size)
+                    continue;
+                previous_size = effective;
+
+                OrderV2 order{};
+                order.salt = rng_.next_salt();
+                order.timestamp_ms = now;
+                std::memcpy(order.maker, cfg_.maker, 20);
+                std::memcpy(order.signer, cfg_.signer, 20);
+                std::memcpy(order.token_id, cfg_.token_id_be, 32);
+                order.maker_amount = maker;
+                order.taker_amount = taker;
+                order.side = side;
+                order.signature_type = cfg_.signature_type;
+
+                uint8_t signature[65];
+                if (!signer_.sign_order(order, signature)) continue;
+
+                const size_t n = dst.count;
+                if (n >= SLOT_COUNT) break;
+                if (!build_wire_body(order, signature, cfg_.token_id_dec,
+                                     cfg_.maker_hex, cfg_.signer_hex,
+                                     cfg_.owner_api_key, cfg_.order_type,
+                                     dst.bodies[n], expiration))
+                    continue;
+                Meta& meta = dst.meta[n];
+                meta.price = price;
+                meta.tick_size = tick_size;
+                meta.size = effective;
+                meta.maker_amount = maker;
+                meta.taker_amount = taker;
+                meta.built_ms = now;
+                meta.side = side;
+                meta.consumed.store(0, std::memory_order_relaxed);
+                ++dst.count;
+            }
+        }
+
+        // Publish only after the complete buffer is visible. Unlocking before
+        // the active index changes is safe: readers can only register against
+        // the still-active old buffer until the release publication below.
+        access_[next].store(0, std::memory_order_release);
+        active_.store(static_cast<uint32_t>(next), std::memory_order_release);
+        return true;
     }
 
-    // ── Hot path: find a fresh pre-signed order for (side, price, size). ─────
-    // On hit, copies the wire body into `out` and returns true.
-    inline bool acquire(uint8_t side, uint64_t price, uint64_t size,
-                        WireBody& out) const {
-        const auto& slots = buffers_[active_.load(std::memory_order_acquire)];
-        const uint64_t deadline = now_ms();               // vDSO ~20ns
-        for (size_t i = 0; i < built_count_; ++i) {
-            const auto& s = slots[i];
-            if (s.valid && s.side == side && s.price == price && s.size == size &&
-                deadline - s.built_ms <= ttl_ms_) {
-                std::memcpy(&out, &s.body, sizeof(WireBody));
-                return true;
+    // Largest unconsumed bucket <= max_size.  Returns signed amounts so the
+    // risk ledger reserves exactly what will be submitted.
+    bool acquire_at_most(uint8_t side, uint64_t price, uint64_t tick_size,
+                         uint64_t max_size, WireBody& out, uint64_t& actual_size,
+                         uint64_t& maker_amount, uint64_t& taker_amount) const {
+        for (int retry = 0; retry < 8; ++retry) {
+            const uint32_t index = active_.load(std::memory_order_acquire);
+            uint32_t access = access_[index].load(std::memory_order_acquire);
+            if ((access & WRITER_LOCK) != 0 || access == WRITER_LOCK - 1)
+                continue;
+            if (!access_[index].compare_exchange_weak(
+                    access, access + 1, std::memory_order_acq_rel))
+                continue;
+            if (index != active_.load(std::memory_order_acquire)) {
+                access_[index].fetch_sub(1, std::memory_order_release);
+                continue;
             }
+
+            const Buffer& src = buffers_[index];
+            const uint64_t now = now_ms();
+            size_t best = SLOT_COUNT;
+            uint64_t best_size = 0;
+            for (size_t i = 0; i < src.count; ++i) {
+                const Meta& meta = src.meta[i];
+                if (meta.side == side && meta.price == price &&
+                    meta.tick_size == tick_size && meta.size <= max_size &&
+                    meta.size > best_size &&
+                    now >= meta.built_ms && now - meta.built_ms <= ttl_ms_ &&
+                    meta.consumed.load(std::memory_order_relaxed) == 0) {
+                    best = i;
+                    best_size = meta.size;
+                }
+            }
+
+            bool claimed = false;
+            if (best != SLOT_COUNT) {
+                uint8_t expected = 0;
+                claimed = src.meta[best].consumed.compare_exchange_strong(
+                    expected, 1, std::memory_order_acq_rel);
+                if (claimed) {
+                    const WireBody& body = src.bodies[best];
+                    std::memcpy(out.buf, body.buf, body.len + 1);
+                    out.len = body.len;
+                    actual_size = src.meta[best].size;
+                    maker_amount = src.meta[best].maker_amount;
+                    taker_amount = src.meta[best].taker_amount;
+                }
+            }
+            access_[index].fetch_sub(1, std::memory_order_release);
+            if (claimed) return true;
         }
         return false;
     }
 
-    size_t built_count() const { return built_count_; }
+    size_t built_count() const {
+        for (int retry = 0; retry < 8; ++retry) {
+            const uint32_t index = active_.load(std::memory_order_acquire);
+            uint32_t access = access_[index].load(std::memory_order_acquire);
+            if ((access & WRITER_LOCK) != 0 || access == WRITER_LOCK - 1)
+                continue;
+            if (!access_[index].compare_exchange_weak(
+                    access, access + 1, std::memory_order_acq_rel))
+                continue;
+            if (index != active_.load(std::memory_order_acquire)) {
+                access_[index].fetch_sub(1, std::memory_order_release);
+                continue;
+            }
+            const size_t result = buffers_[index].count;
+            access_[index].fetch_sub(1, std::memory_order_release);
+            return result;
+        }
+        return 0;
+    }
+
     static uint64_t now_ms() {
-        struct timespec ts;
+        timespec ts{};
         clock_gettime(CLOCK_REALTIME, &ts);
-        return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+        return static_cast<uint64_t>(ts.tv_sec) * 1000ULL +
+               static_cast<uint64_t>(ts.tv_nsec) / 1000000ULL;
     }
 
 private:
+    struct Meta {
+        uint64_t price = 0;
+        uint64_t tick_size = 0;
+        uint64_t size = 0;
+        uint64_t maker_amount = 0;
+        uint64_t taker_amount = 0;
+        uint64_t built_ms = 0;
+        uint8_t side = 0;
+        mutable std::atomic<uint8_t> consumed{1};
+    };
+
+    struct Buffer {
+        std::array<Meta, SLOT_COUNT> meta{};
+        std::array<WireBody, SLOT_COUNT> bodies{};
+        size_t count = 0;
+    };
+
+    static constexpr uint32_t WRITER_LOCK = 1U << 31;
+
     const MarketConfig& cfg_;
     const EIP712Signer& signer_;
+    FastRandom rng_;
     uint64_t ttl_ms_;
+    mutable std::array<std::atomic<uint32_t>, 3> access_{};
     std::atomic<uint32_t> active_{0};
-    std::array<PresignedSlot, SLOT_COUNT> buffers_[2] = {};
-    size_t built_count_ = 0;   // count in the (last-built) buffer
+    std::array<Buffer, 3> buffers_{};
 };
 
-#endif // PRESIGNED_POOL_HPP
+#endif  // PRESIGNED_POOL_HPP

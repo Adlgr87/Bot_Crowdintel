@@ -32,20 +32,22 @@ ORDER_TYPE = (
     "uint256 timestamp,bytes32 metadata,bytes32 builder)"
 )
 STANDARD_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B"
+NEG_RISK_EXCHANGE = "0xe2222d279d744050d28e00520010520000310F59"
 
 
-def domain_separator() -> bytes:
+def domain_separator(neg_risk: bool = False) -> bytes:
     enc = (
         keccak256(DOMAIN_TYPE.encode())
         + keccak256(b"Polymarket CTF Exchange")
         + keccak256(b"2")
         + (137).to_bytes(32, "big")
-        + bytes.fromhex(STANDARD_EXCHANGE[2:].lower()).rjust(32, b"\x00")
+        + bytes.fromhex((NEG_RISK_EXCHANGE if neg_risk else STANDARD_EXCHANGE)[2:].lower())
+            .rjust(32, b"\x00")
     )
     return keccak256(enc)
 
 
-def order_digest(o: dict) -> bytes:
+def order_digest(o: dict, neg_risk: bool = False) -> bytes:
     def a(addr): return bytes.fromhex(addr[2:].lower()).rjust(32, b"\x00")
     def u(n): return int(n).to_bytes(32, "big")
     struct_hash = keccak256(
@@ -55,7 +57,7 @@ def order_digest(o: dict) -> bytes:
         + u(o["side"]) + u(o["signature_type"]) + u(o["timestamp_ms"])
         + bytes.fromhex(o["metadata"][2:]) + bytes.fromhex(o["builder"][2:])
     )
-    return keccak256(b"\x19\x01" + domain_separator() + struct_hash)
+    return keccak256(b"\x19\x01" + domain_separator(neg_risk) + struct_hash)
 
 
 def main() -> int:
@@ -65,8 +67,9 @@ def main() -> int:
     sig = bytes.fromhex(blob["signature"])     # r || s || v(27/28)
     got_digest = bytes.fromhex(blob["eip712_digest"])
 
-    # 1. Digest must match the reference implementation
-    want_digest = order_digest(o)
+    # 1. Digest must match the independently selected exchange domain.
+    neg_risk = bool(blob.get("neg_risk", False))
+    want_digest = order_digest(o, neg_risk)
     ok_digest = got_digest == want_digest
 
     # 2. Signature must verify against the digest and recover the signer
@@ -82,6 +85,7 @@ def main() -> int:
     ref_sig = pk.sign_recoverable(want_digest, hasher=None)
     ok_det = ref_sig[:64] == sig[:64] and 27 + ref_sig[64] == sig[64]
 
+    print(f"domain                   : {'negative-risk' if neg_risk else 'standard'}")
     print(f"digest matches reference : {'PASS' if ok_digest else 'FAIL'}")
     print(f"signature recovers signer: {'PASS' if ok_recover else 'FAIL'}")
     print(f"rfc6979 sig matches      : {'PASS' if ok_det else 'FAIL'}")

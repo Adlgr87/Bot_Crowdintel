@@ -25,20 +25,17 @@
 //         bytes32 builder)
 //
 // Performance notes:
-//   - secp256k1 context created with SIGN flag, randomized once at startup,
-//     and uses libsecp256k1's precomputed ecmult-gen table → ~2-5 µs/sign.
+//   - secp256k1 context is created with SIGN, validated/randomized once at
+//     startup, and uses the library's precomputed ecmult-gen table. Actual
+//     timing is CPU/build dependent and is reported only by the benchmark.
 //   - The domain separator AND the Order typehash are computed once and cached.
 //   - All hashing buffers are stack arrays — zero heap allocation per sign.
 //   - Private key memory is wiped on destruction (OPENSSL_cleanse-free, using
 //     volatile zeroization so the compiler cannot elide it).
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include <array>
 #include <cstdint>
 #include <cstring>
-#include <stdexcept>
-#include <string>
-#include <vector>
 
 #include <secp256k1.h>
 #include <secp256k1_preallocated.h>
@@ -46,7 +43,7 @@
 
 #include <cstdlib>
 
-#include "keccak256_optimized.hpp"
+#include "keccak256.hpp"
 #include "fast_random.hpp"
 #include "secure_zero.hpp"
 #include "polymarket_order.hpp"
@@ -60,8 +57,7 @@ inline constexpr const char* K_ORDER_TYPE_STR =
     "uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,"
     "uint256 timestamp,bytes32 metadata,bytes32 builder)";
 
-// MutaLambda optimization: precompute typehash once (eliminates redundant
-// keccak256 calls per sign_order invocation).
+// Precompute the typehash once per signer (cold path).
 inline void compute_typehash(const char* type_str, size_t len, uint8_t out[32]) {
     keccak256_hash(reinterpret_cast<const uint8_t*>(type_str), len, out);
 }
@@ -96,46 +92,53 @@ class EIP712Signer {
 public:
     EIP712Signer() = default;
 
-    void init(const uint8_t private_key[32], bool neg_risk) {
-        if (secp_ctx_) return;  // already initialized
+    bool init(const uint8_t private_key[32], bool neg_risk) noexcept {
+        if (secp_ctx_) return true;  // already initialized
+        if (!private_key) return false;
 
-        // libsecp256k1: SIGN-only context (verification is the chain's job).
-        // Preallocated, then randomized once to harden against side-channel
-        // key extraction (recommended by the library docs).
+        // libsecp256k1: SIGN-only context, randomized before any key operation.
         const size_t ctx_size = secp256k1_context_preallocated_size(
             SECP256K1_CONTEXT_SIGN);
-        void* ctx_mem = std::malloc(ctx_size);
-        if (!ctx_mem) throw std::runtime_error("secp256k1 ctx alloc failed");
+        ctx_mem_ = std::malloc(ctx_size);
+        if (!ctx_mem_) return false;
         secp_ctx_ = secp256k1_context_preallocated_create(
-            ctx_mem, SECP256K1_CONTEXT_SIGN);
-        ctx_mem_ = ctx_mem;
-
-        uint8_t rand32[32];
-        fill_entropy(rand32);
-        if (secp256k1_context_randomize(secp_ctx_, rand32) != 1) {
-            // Non-fatal: proceed with an unrandomized context (verifier-
-            // visible behavior is identical; only side-channel hardening drops).
+            ctx_mem_, SECP256K1_CONTEXT_SIGN);
+        if (!secp_ctx_ ||
+            secp256k1_ec_seckey_verify(secp_ctx_, private_key) != 1) {
+            release_context();
+            return false;
         }
-        secure_zero(rand32, 32);
+
+        uint8_t rand32[32]{};
+        try {
+            fill_entropy(rand32);
+        } catch (...) {
+            secure_zero(rand32, sizeof(rand32));
+            release_context();
+            return false;
+        }
+        const int randomized = secp256k1_context_randomize(secp_ctx_, rand32);
+        secure_zero(rand32, sizeof(rand32));
+        if (randomized != 1) {
+            release_context();
+            return false;
+        }
 
         std::memcpy(privkey_, private_key, 32);
-
-        // Cache the domain separator and the Order typehash (both constant).
         crowdintel::compute_domain_separator(neg_risk, domain_sep_);
         keccak256_hash(reinterpret_cast<const uint8_t*>(crowdintel::K_ORDER_TYPE_STR),
                        std::strlen(crowdintel::K_ORDER_TYPE_STR), order_typehash_);
-
-        // Derive the public signer address from the private key (recovery of
-        // the pubkey from a self-signed digest is a cheap one-time cost).
-        derive_signer_address();
+        if (!derive_signer_address()) {
+            secure_zero(privkey_, sizeof(privkey_));
+            release_context();
+            return false;
+        }
+        return true;
     }
 
     ~EIP712Signer() {
-        secure_zero(privkey_, 32);
-        if (secp_ctx_) {
-            secp256k1_context_preallocated_destroy(secp_ctx_);
-            std::free(ctx_mem_);
-        }
+        secure_zero(privkey_, sizeof(privkey_));
+        release_context();
     }
 
     EIP712Signer(const EIP712Signer&) = delete;
@@ -146,7 +149,8 @@ public:
 
     // Sign a V2 order → 65-byte (r‖s‖v, v ∈ {27,28}). Returns false on failure
     // (never throws — hot path).
-    bool sign_order(const OrderV2& o, uint8_t out_sig65[65]) const {
+    bool sign_order(const OrderV2& o, uint8_t out_sig65[65]) const noexcept {
+        if (!secp_ctx_ || !out_sig65) return false;
         // 1. structHash = keccak256(typeHash ‖ ABI-encode(order))
         uint8_t encoded[32 * 11];
         abi_encode_order(o, encoded);
@@ -167,7 +171,7 @@ public:
 
         // 3. Recoverable ECDSA — recid (⇒ v) computed during signing at no
         //    extra cost; RFC 6979 deterministic nonce; low-S automatic.
-        //    MutaLambda: __builtin_expect marks failure as cold (rare).
+        //    Failure is exceptionally rare after startup key validation.
         secp256k1_ecdsa_recoverable_signature sig;
         if (__builtin_expect(!secp256k1_ecdsa_sign_recoverable(secp_ctx_, &sig, digest,
                                               privkey_, nullptr, nullptr), 0))
@@ -193,27 +197,39 @@ public:
 
 private:
     static void fill_entropy(uint8_t out[32]) {
-        // Pull from FastRandom (RDRAND when present) — include a slice of the
-        // TSC for defense in depth.
-        extern uint64_t crowdintel_hw_seed_word();  // defined in fast_random.hpp include chain
+        // One OS-seeded ChaCha20 instance supplies the context blinding seed;
+        // no clock, address, or hardware-instruction fallback is accepted.
+        FastRandom rng;
         for (int i = 0; i < 4; ++i) {
-            const uint64_t w = crowdintel_hw_seed_word();
-            std::memcpy(out + i * 8, &w, 8);
+            const uint64_t word = rng.next_u64();
+            std::memcpy(out + i * 8, &word, 8);
         }
     }
 
-    void derive_signer_address() {
+    bool derive_signer_address() noexcept {
         // address = last 20 bytes of keccak256(uncompressed pubkey[1..64])
         secp256k1_pubkey pub;
-        if (!secp256k1_ec_pubkey_create(secp_ctx_, &pub, privkey_))
-            throw std::runtime_error("pubkey creation failed");
+        if (secp256k1_ec_pubkey_create(secp_ctx_, &pub, privkey_) != 1)
+            return false;
         uint8_t ser65[65];
-        size_t out_len = 65;
-        secp256k1_ec_pubkey_serialize(secp_ctx_, ser65, &out_len, &pub,
-                                      SECP256K1_EC_UNCOMPRESSED);
+        size_t out_len = sizeof(ser65);
+        if (secp256k1_ec_pubkey_serialize(
+                secp_ctx_, ser65, &out_len, &pub,
+                SECP256K1_EC_UNCOMPRESSED) != 1 || out_len != sizeof(ser65))
+            return false;
         uint8_t hash[32];
         keccak256_hash(ser65 + 1, 64, hash);
         std::memcpy(signer_addr_, hash + 12, 20);
+        secure_zero(hash, sizeof(hash));
+        secure_zero(ser65, sizeof(ser65));
+        return true;
+    }
+
+    void release_context() noexcept {
+        if (secp_ctx_) secp256k1_context_preallocated_destroy(secp_ctx_);
+        if (ctx_mem_) std::free(ctx_mem_);
+        secp_ctx_ = nullptr;
+        ctx_mem_ = nullptr;
     }
 
     secp256k1_context* secp_ctx_ = nullptr;

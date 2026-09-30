@@ -11,8 +11,8 @@
 //    6979 ECDSA; libsecp256k1 uses the same deterministic nonce derivation,
 //    so signatures must be identical).
 // 5. Signature recovery: 20 random orders must recover to the signer address.
-// 6. `--json`: emits the golden order + signature as JSON for the Python
-//    cross-check (tests/crypto/cross_check_v2.py).
+// 6. `--json` / `--json-neg-risk`: emit standard and negative-risk vectors
+//    for the independent Python cross-check.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "eip712_signer.hpp"
@@ -104,13 +104,17 @@ struct GoldenContext {
     OrderV2 order;
 };
 
-static void make_golden(GoldenContext& gc) {
+static void make_golden(GoldenContext& gc, bool neg_risk = false) {
     // MUST match tests/crypto/cross_check_v2.py's golden order.
     const char* KEY = "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b";
     uint8_t key[32];
     hex2bin(KEY, key, 32);
 
-    gc.signer.init(key, /*neg_risk=*/false);
+    if (!gc.signer.init(key, neg_risk)) {
+        std::fprintf(stderr, "FATAL: signer initialization failed\n");
+        ++g_failures;
+    }
+    secure_zero(key, sizeof(key));
 
     OrderV2& o = gc.order;
     o.salt = 123456789012345678ULL;
@@ -230,9 +234,9 @@ static void test_recovery() {
 }
 
 // ── 6. JSON emission for the Python cross-check ──────────────────────────────
-static void emit_json() {
+static void emit_json(bool neg_risk = false) {
     GoldenContext gc;
-    make_golden(gc);
+    make_golden(gc, neg_risk);
     uint8_t sig[65];
     if (!gc.signer.sign_order(gc.order, sig)) { std::exit(1); }
     const char* KEY = "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b";
@@ -251,6 +255,7 @@ static void emit_json() {
     keccak256_hash(final_buf, 66, digest);
 
     std::printf("{\n");
+    std::printf("  \"neg_risk\": %s,\n", neg_risk ? "true" : "false");
     std::printf("  \"private_key_hex\": \"%s\",\n", KEY);
     std::printf("  \"eip712_digest\": \"");
     print_hash(digest);
@@ -277,8 +282,9 @@ static void emit_json() {
 }
 
 int main(int argc, char** argv) {
-    if (argc > 1 && std::strcmp(argv[1], "--json") == 0) {
-        emit_json();
+    if (argc > 1 && (std::strcmp(argv[1], "--json") == 0 ||
+                     std::strcmp(argv[1], "--json-neg-risk") == 0)) {
+        emit_json(std::strcmp(argv[1], "--json-neg-risk") == 0);
         return 0;
     }
     std::printf("== CROWDINTEL crypto KATs ==\n");

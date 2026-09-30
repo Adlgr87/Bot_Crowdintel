@@ -1,16 +1,10 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// l2_backtester: replay L2 tick data through the book + Kelly take-strategy.
+// L2 replay diagnostic.
 //
-// Input: CSV lines  bid_price,bid_size,ask_price,ask_size,p_win[,confidence,q]
-//         (prices/sizes in decimal units, ×1e6 fixed internally; p_win the
-//          CrowdIntel posterior for that tick)
-//         fed on stdin or via file argument. Empty lines and #-comments skip.
-//
-// Simulates: signal edge vs the live book, exact Kelly sizing, marketable
-// take at the opposing level (up to visible size), fee-less PnL marked at
-// the opposite side mid, slippage vs mid, hit rate and max drawdown.
-// This replaces the previous `run_replay` skeleton (an empty loop body).
-// ─────────────────────────────────────────────────────────────────────────────
+// A trade is marked on the NEXT tick, never at the same tick that supplied its
+// spread.  The final open trade is reported but excluded from PnL/win rate.
+// Taker fees use the live V2 curve C * rate * p * (1-p).  This remains a short
+// smoke replay, not evidence of strategy profitability; production validation
+// needs long data and resolution/fill labels.
 
 #include <algorithm>
 #include <cmath>
@@ -25,134 +19,158 @@
 #include "kelly_engine.hpp"
 
 struct ReplayTick {
-    double bid, bid_sz, ask, ask_sz;
-    double p_win;
+    double bid = 0, bid_size = 0, ask = 0, ask_size = 0;
+    double p_win = 0;
     double confidence = 0.95;
     double q_value = 0.01;
 };
 
 class L2Backtester {
 public:
-    explicit L2Backtester(double bankroll_usd, double kelly_fraction = 0.25,
-                          double min_edge = 0.02)
-        : bankroll_(bankroll_usd), kelly_cap_(kelly_fraction), min_edge_(min_edge) {}
+    L2Backtester(double bankroll_usd, double kelly_fraction = 0.25,
+                 double min_edge = 0.02, double taker_fee_rate = 0.05,
+                 double min_confidence = 0.85, double max_q = 0.05)
+        : initial_bankroll_(bankroll_usd), kelly_fraction_(kelly_fraction),
+          min_edge_(min_edge), fee_rate_(taker_fee_rate),
+          min_confidence_(min_confidence), max_q_(max_q) {}
 
     struct Trade {
-        uint64_t idx;
-        uint8_t side;        // 0 buy 1 sell
-        double price, size_shares, mid_after;
+        uint64_t tick = 0;
+        uint8_t side = 0;
+        double entry = 0;
+        double shares = 0;
+        double exit_mid = 0;
+        double fee = 0;
+        double pnl = 0;
+        bool marked = false;
     };
 
-    // Feed one tick; returns the trade taken (if any).
-    bool on_tick(uint64_t idx, const ReplayTick& t, OrderBookL2& book) {
-        Level2Entry b{(uint64_t)(t.bid * 1e6 + 0.5), (uint64_t)(t.bid_sz * 1e6 + 0.5)};
-        Level2Entry a{(uint64_t)(t.ask * 1e6 + 0.5), (uint64_t)(t.ask_sz * 1e6 + 0.5)};
-        book.set_bids(&b, 1);
-        book.set_asks(&a, 1);
+    bool on_tick(uint64_t tick_index, const ReplayTick& tick, OrderBookL2& book) {
+        const double current_mid = 0.5 * (tick.bid + tick.ask);
+        mark_open_trades(current_mid);
 
-        const double buy_edge = t.p_win - t.ask;
-        const double sell_edge = t.bid - t.p_win;
+        Level2Entry bid{static_cast<uint64_t>(tick.bid * 1e6 + 0.5),
+                        static_cast<uint64_t>(tick.bid_size * 1e6 + 0.5)};
+        Level2Entry ask{static_cast<uint64_t>(tick.ask * 1e6 + 0.5),
+                        static_cast<uint64_t>(tick.ask_size * 1e6 + 0.5)};
+        book.set_book(&bid, 1, &ask, 1);
+
+        if (tick.confidence < min_confidence_ || tick.q_value > max_q_ ||
+            !(tick.p_win > 0 && tick.p_win < 1)) return false;
+        const double buy_fee = fee_rate_ * tick.ask * (1.0 - tick.ask);
+        const double sell_fee = fee_rate_ * tick.bid * (1.0 - tick.bid);
+        const double buy_edge = tick.p_win - tick.ask - buy_fee;
+        const double sell_edge = tick.bid - tick.p_win - sell_fee;
         if (buy_edge < min_edge_ && sell_edge < min_edge_) return false;
-        if (t.confidence < 0.85 || t.q_value > 0.05) return false;
 
-        Trade tr{};
-        tr.idx = idx;
+        Trade trade{};
+        trade.tick = tick_index;
+        const double bankroll = std::max(0.0, initial_bankroll_ + realized_pnl_);
         if (buy_edge >= sell_edge) {
-            tr.side = 0;
-            tr.price = t.ask;
-            const double k = KellyEngine::kelly_buy(t.p_win, t.ask);
-            const double usd = KellyEngine::position_usd(k, kelly_cap_, bankroll_);
-            tr.size_shares = usd / t.ask;
-            const double avail = t.ask_sz;
-            tr.size_shares = std::min(tr.size_shares, avail);
+            trade.side = 0;
+            trade.entry = tick.ask;
+            const double kelly = KellyEngine::kelly_buy(
+                tick.p_win, std::min(0.999999, tick.ask + buy_fee));
+            const double usd = KellyEngine::position_usd(
+                kelly, kelly_fraction_, bankroll);
+            trade.shares = std::min(usd / tick.ask, tick.ask_size);
         } else {
-            tr.side = 1;
-            tr.price = t.bid;
-            const double k = KellyEngine::kelly_sell(t.p_win, t.bid);
-            const double usd = KellyEngine::position_usd(k, kelly_cap_, bankroll_);
-            tr.size_shares = usd / t.bid;
-            const double avail = t.bid_sz;
-            tr.size_shares = std::min(tr.size_shares, avail);
+            trade.side = 1;
+            trade.entry = tick.bid;
+            const double kelly = KellyEngine::kelly_sell(
+                tick.p_win, std::max(0.000001, tick.bid - sell_fee));
+            const double usd = KellyEngine::position_usd(
+                kelly, kelly_fraction_, bankroll);
+            trade.shares = std::min(usd / tick.bid, tick.bid_size);
         }
-        if (tr.size_shares <= 0.0) return false;
-
-        const double mid = 0.5 * (t.bid + t.ask);
-        tr.mid_after = mid;
-        // Mark-to-mid PnL: buy wins if price moves up (proxy for resolution EV);
-        // immediate mark = edge captured.
-        const double mark = (tr.side == 0) ? (mid - tr.price) : (tr.price - mid);
-        const double pnl = mark * tr.size_shares;
-        pnl_ += pnl;
-        equity_.push_back(pnl_);
-        trades_.push_back(tr);
+        if (!(trade.shares > 0)) return false;
+        trade.fee = trade.shares * fee_rate_ * trade.entry * (1.0 - trade.entry);
+        trades_.push_back(trade);
         return true;
     }
 
     void report() const {
-        if (trades_.empty()) {
-            std::printf("replay done: 0 trades\n");
+        size_t marked = 0, wins = 0, open = 0;
+        double slippage = 0, peak = 0, max_drawdown = 0;
+        for (const Trade& trade : trades_) {
+            if (!trade.marked) { ++open; continue; }
+            ++marked;
+            if (trade.pnl > 0) ++wins;
+            slippage += std::abs(trade.entry - trade.exit_mid) * trade.shares;
+        }
+        for (double equity : equity_curve_) {
+            peak = std::max(peak, equity);
+            max_drawdown = std::max(max_drawdown, peak - equity);
+        }
+        if (marked == 0) {
+            std::printf("replay done: trades=%zu marked=0 open=%zu (insufficient future ticks)\n",
+                        trades_.size(), open);
             return;
         }
-        double sum_slip = 0.0, peak = -1e18, max_dd = 0.0;
-        size_t wins = 0;
-        for (const auto& tr : trades_) {
-            const double slip = (tr.side == 0) ? (tr.price - tr.mid_after)
-                                               : (tr.mid_after - tr.price);
-            sum_slip += std::abs(slip) * tr.size_shares;
-            if (pnl_of(tr) > 0) ++wins;
-        }
-        for (double eq : equity_) {
-            peak = std::max(peak, eq);
-            max_dd = std::max(max_dd, peak - eq);
-        }
-        std::printf("replay done: trades=%zu win_rate=%.1f%% pnl=%.2f usd "
-                    "avg_slippage=%.6f max_drawdown=%.2f\n",
-                    trades_.size(),
-                    100.0 * wins / trades_.size(),
-                    pnl_, sum_slip / trades_.size(), max_dd);
+        std::printf("replay done: trades=%zu next_tick_marked=%zu open=%zu "
+                    "win_rate=%.1f%% pnl_after_fees=%.2f avg_abs_move_cost=%.6f "
+                    "max_drawdown=%.2f\n",
+                    trades_.size(), marked, open,
+                    100.0 * static_cast<double>(wins) / static_cast<double>(marked),
+                    realized_pnl_, slippage / static_cast<double>(marked), max_drawdown);
     }
 
 private:
-    double pnl_of(const Trade& tr) const {
-        const double mark = (tr.side == 0) ? (tr.mid_after - tr.price)
-                                           : (tr.price - tr.mid_after);
-        return mark * tr.size_shares;
+    void mark_open_trades(double next_mid) {
+        for (Trade& trade : trades_) {
+            if (trade.marked) continue;
+            trade.exit_mid = next_mid;
+            const double gross = trade.side == 0
+                ? (next_mid - trade.entry) * trade.shares
+                : (trade.entry - next_mid) * trade.shares;
+            trade.pnl = gross - trade.fee;
+            trade.marked = true;
+            realized_pnl_ += trade.pnl;
+            equity_curve_.push_back(realized_pnl_);
+        }
     }
 
-    double bankroll_, kelly_cap_, min_edge_;
-    double pnl_ = 0.0;
-    std::vector<double> equity_;
+    double initial_bankroll_;
+    double kelly_fraction_;
+    double min_edge_;
+    double fee_rate_;
+    double min_confidence_;
+    double max_q_;
+    double realized_pnl_ = 0;
+    std::vector<double> equity_curve_;
     std::vector<Trade> trades_;
 };
 
 int main(int argc, char** argv) {
-    std::printf("CROWDINTEL L2 backtester — replays bid,ask,p_win CSV through the book\n");
     std::ifstream file;
-    std::istream* in = &std::cin;
+    std::istream* input = &std::cin;
     if (argc > 1) {
         file.open(argv[1]);
-        if (!file) { std::fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
-        in = &file;
+        if (!file) {
+            std::fprintf(stderr, "cannot open %s\n", argv[1]);
+            return 1;
+        }
+        input = &file;
     }
 
-    L2Backtester bt(10000.0);
+    L2Backtester backtester(10000.0);
     OrderBookL2 book;
     std::string line;
-    uint64_t idx = 0, parsed = 0;
-    while (std::getline(*in, line)) {
+    uint64_t index = 0, parsed = 0;
+    while (std::getline(*input, line)) {
         if (line.empty() || line[0] == '#') continue;
-        ReplayTick t;
-        double conf = 0.95, q = 0.01;
+        ReplayTick tick;
+        double confidence = 0.95, q_value = 0.01;
         if (std::sscanf(line.c_str(), "%lf,%lf,%lf,%lf,%lf,%lf,%lf",
-                        &t.bid, &t.bid_sz, &t.ask, &t.ask_sz,
-                        &t.p_win, &conf, &q) >= 5) {
-            t.confidence = conf;
-            t.q_value = q;
-            bt.on_tick(idx++, t, book);
+                        &tick.bid, &tick.bid_size, &tick.ask, &tick.ask_size,
+                        &tick.p_win, &confidence, &q_value) >= 5) {
+            tick.confidence = confidence;
+            tick.q_value = q_value;
+            backtester.on_tick(index++, tick, book);
             ++parsed;
         }
     }
-    std::printf("parsed %llu ticks\n", (unsigned long long)parsed);
-    bt.report();
+    std::printf("parsed %llu ticks\n", static_cast<unsigned long long>(parsed));
+    backtester.report();
     return 0;
 }
