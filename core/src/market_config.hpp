@@ -438,6 +438,7 @@ private:
         if (fd < 0) return false;
         struct stat metadata{};
         if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+            (metadata.st_mode & S_IRUSR) == 0 ||
             (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
             ::close(fd);
             return false;

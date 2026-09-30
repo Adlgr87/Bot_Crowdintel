@@ -37,7 +37,7 @@ Public market data, DNS responses, HTTP bodies, alpha payloads, clocks, and proc
 
 - Never commit real credentials or `.env` files.
 - Never send secrets in issue reports, chat, shell arguments, benchmark output, packet captures, or screenshots.
-- Provision through a secret manager or protected root-only channel. `*_FILE` inputs must be regular, non-symlink files with no group/other permission bits; empty, unreadable, or oversized files fail startup.
+- Provision through a secret manager or protected root-only channel. `*_FILE` inputs must be owner-readable regular, non-symlink files with no group/other permission bits (normally mode `0400` or `0600`); empty, unreadable, or oversized files fail startup even when the process has privilege to bypass mode checks.
 - Keep separate research/canary/production identities.
 - Live startup requires `mlockall`; failure to keep signer/credential memory out of swap is fatal.
 - Minimize balances and allowances; revoke/rotate after incidents.
