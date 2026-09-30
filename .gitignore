@@ -1,7 +1,6 @@
 # Dependencias / build
-core/build/
+core/build*/
 build/
-MutaLambda/
 __pycache__/
 *.pyc
 *.pyo
@@ -22,8 +21,10 @@ test_keccak_verify.cpp
 
 # Secretos locales (nunca commitear)
 .env
+.env.*
 *.key
 *_secret*
+credentials/
 
 # SO / IDE
 .DS_Store

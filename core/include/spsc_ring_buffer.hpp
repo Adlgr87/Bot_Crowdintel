@@ -1,71 +1,74 @@
 #ifndef SPSC_RING_BUFFER_HPP
 #define SPSC_RING_BUFFER_HPP
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SPSC_RingBuffer: wait-free single-producer/single-consumer queue.
+// Bounded wait-free single-producer/single-consumer queue.
 //
-// - Capacity is a power of two (compile-time enforced).
-// - Storage is a member array (no unique_ptr indirection on every access).
-// - Elements must be trivially copyable (POD) — we memcpy slots in/out, which
-//   avoids placement-new/destructor bookkeeping and lets the compiler emit
-//   simple mov instructions.
-// - acquire/release pairing publishes/consumes slot contents; producer's
-//   head counter is relaxed (only one producer), consumer's tail likewise.
-// ─────────────────────────────────────────────────────────────────────────────
+// The queue owns real T objects rather than overlaying a byte array through a
+// cached interior pointer.  This avoids strict-aliasing/lifetime UB and makes
+// accidental copies impossible (a copied interior pointer used to reference
+// the original queue).  Large queues should be allocated on the heap by their
+// owner; the type itself performs no allocation.
 
 #include <array>
 #include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <type_traits>
 
 template <typename T, size_t Capacity = 4096>
 class SPSC_RingBuffer {
-    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+    static_assert((Capacity & (Capacity - 1)) == 0,
+                  "Capacity must be a power of two");
     static_assert(Capacity > 1, "Capacity must be > 1");
-    static_assert(std::is_trivially_copyable_v<T>, "T must be trivially copyable");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "T must be trivially copyable");
 
 public:
-    // Producer: returns false when full. Counters are unbounded (size_t wrap
-    // is benign: Capacity is a power of two and wrap is masked consistently).
-    // MutaLambda optimization: __builtin_expect marks rare branch as unlikely.
-    inline bool try_push(const T& item) {
+    SPSC_RingBuffer() = default;
+    SPSC_RingBuffer(const SPSC_RingBuffer&) = delete;
+    SPSC_RingBuffer& operator=(const SPSC_RingBuffer&) = delete;
+    SPSC_RingBuffer(SPSC_RingBuffer&&) = delete;
+    SPSC_RingBuffer& operator=(SPSC_RingBuffer&&) = delete;
+
+    // One slot remains unused so full and empty are distinguishable using only
+    // the monotonically increasing counters.
+    inline bool try_push(const T& item) noexcept {
         const size_t h = head_.load(std::memory_order_relaxed);
-        if (__builtin_expect(h - tail_cache_ >= Capacity - 1, 0)) {
-            tail_cache_ = tail_.load(std::memory_order_acquire);  // refresh
-            if (h - tail_cache_ >= Capacity - 1) return false;    // full
+        if (h - tail_cache_ >= Capacity - 1) {
+            tail_cache_ = tail_.load(std::memory_order_acquire);
+            if (h - tail_cache_ >= Capacity - 1) return false;
         }
         std::memcpy(&slots_[h & MASK], &item, sizeof(T));
         head_.store(h + 1, std::memory_order_release);
         return true;
     }
 
-    // Consumer: returns false when empty; on success copies into `out`.
-    inline bool try_pop(T& out) {
+    inline bool try_pop(T& out) noexcept {
         const size_t t = tail_.load(std::memory_order_relaxed);
-        if (__builtin_expect(t == head_cache_, 0)) {
-            head_cache_ = head_.load(std::memory_order_acquire);  // refresh
-            if (t == head_cache_) return false;                   // empty
+        if (t == head_cache_) {
+            head_cache_ = head_.load(std::memory_order_acquire);
+            if (t == head_cache_) return false;
         }
         std::memcpy(&out, &slots_[t & MASK], sizeof(T));
         tail_.store(t + 1, std::memory_order_release);
         return true;
     }
 
-    static constexpr size_t capacity() { return Capacity; }
+    [[nodiscard]] bool empty() const noexcept {
+        return tail_.load(std::memory_order_acquire) ==
+               head_.load(std::memory_order_acquire);
+    }
+
+    static constexpr size_t capacity() noexcept { return Capacity; }
 
 private:
     static constexpr size_t MASK = Capacity - 1;
 
-    alignas(64) std::array<uint8_t, sizeof(T) * Capacity> storage_{};
-    // Slots overlay storage_ (constructed lazily via memcpy — POD only).
-    T* slots_ = reinterpret_cast<T*>(storage_.data());
-
-    alignas(64) std::atomic<size_t> head_{0};   // producer-only writes
-    alignas(64) std::atomic<size_t> tail_{0};   // consumer-only writes
-    size_t tail_cache_ = 0;                     // producer-side cache of tail_
-    size_t head_cache_ = 0;                     // consumer-side cache of head_
+    alignas(64) std::array<T, Capacity> slots_{};
+    alignas(64) std::atomic<size_t> head_{0};
+    alignas(64) std::atomic<size_t> tail_{0};
+    size_t tail_cache_ = 0;  // producer-owned
+    size_t head_cache_ = 0;  // consumer-owned
 };
 
-#endif // SPSC_RING_BUFFER_HPP
+#endif  // SPSC_RING_BUFFER_HPP

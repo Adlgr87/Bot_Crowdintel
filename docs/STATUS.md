@@ -1,44 +1,36 @@
-# 📊 Project Status — Bot CrowdIntel
+# Project status
 
-_Last updated: 2026-09-22 (CLOB V2 remediation). For the full defect list that
-was fixed, see [REMEDIATION_2026-09-22.md](REMEDIATION_2026-09-22.md)._
+_Last updated: 2026-09-30. The authoritative observation-by-observation ledger is [REMEDIATION_STATUS.md](REMEDIATION_STATUS.md)._
 
-## What is verified (automated, in CI)
+## Verified in this repository
 
-| Area | Verification | Result |
-| :--- | :--- | :--- |
-| Keccak-256 | KATs (Ethereum vectors + multi-block) | ✅ PASS |
-| SHA-256 / HMAC (in-house, hot path) | FIPS 180-2 + RFC 4231 vectors | ✅ PASS |
-| EIP-712 V2 domain / struct hash / digest | golden vector vs Python reference | ✅ PASS |
-| ECDSA (libsecp256k1, RFC 6979) | signature byte-identical to coincurve; 20/20 recover to signer | ✅ PASS |
-| Wire body (POST /order JSON) | byte-for-byte vs Python reference | ✅ PASS |
-| L2 auth headers + HMAC | scheme per docs (POLY_*, base64url) | ✅ implemented + HMAC KAT |
-| SPSC ring buffer | unit + 200k-item 2-thread FIFO test | ✅ PASS |
-| OrderBookL2 seqlock | concurrency torture (writer+reader) | ✅ PASS |
-| Kelly sizing | exact binary Kelly known answers | ✅ PASS |
-| WSS market parser | real doc messages (snapshot + deltas + legacy pairs) | ✅ PASS |
-| Hot-path latency | calibrated RDTSC, 20k samples | ✅ 90 ns P50 (pool) / 24 µs (inline) |
+- Offline and network-enabled C++20 builds complete with pinned libsecp256k1.
+- Native CTest covers crypto KATs, core/concurrency, strict HTTP/WSS/JSON, secret files (LF/CRLF/no terminator/empty/overflow/unreadable/permissive/symlink/missing), and replay smoke.
+- Standard-domain EIP-712 digest/signature independently matches Python PyCryptodome + coincurve.
+- GCC and Clang, network/offline, ASan+UBSan, TSan, and the production container are encoded as CI gates.
+- Mock executable submits/rejects deterministically without touching the network.
+- The consumable pre-signed path and inline signing fallback are benchmarked with production components.
 
-## What is NOT yet verified
+## Intentionally fail-closed
 
-- **A live order against production clob.polymarket.com.** The sandbox/CI
-  environment signs correctly (cross-checked) but holds no funded wallet.
-  First live deployment should start with a paper-size GTC on a cheap market.
-- **WSS connection to the production feed.** The client is hand-rolled
-  (RFC 6455 + TLS) and its parser is unit-tested against official message
-  shapes, but a long-run soak against `wss://ws-subscriptions-clob.polymarket.com`
-  has not been executed from CI. Run `BOT_MODE=live` with `BOT_TICKS=0` on a
-  VPS and watch the `ws:` counters in the shutdown summary.
+- Signature type 3 / deposit wallet: correct ERC-7739 wrapper is not implemented.
+- Unknown ticks, stale/invalid/crossed books, stale/duplicate alpha, invalid identity, exhausted/mismatched signatures, risk-limit violations, and unsuccessful CLOB response bodies.
+- Ambiguous transport outcomes are not blindly retried.
+- systemd does not auto-restart after failure because account state may be unknown.
 
-## Open items before real-money deployment
+## Not verified
 
-1. **Operator security review**: key management (the bot reads
-   `BOT_PRIVATE_KEY_HEX` from the environment — use a vault/secret manager and
-   consider a dedicated hot wallet with capped balance).
-2. **Per-market tick size**: `BOT_TICK_SIZE` is static; fetch the market's
-   minimum tick via `getClobMarketInfo` at startup for multi-market setups.
-3. **Balance/allowance checks** before sizing (the engine clamps to visible
-   liquidity but does not query the wallet balance).
-4. **Cert pinning** supported (`BOT_TLS_PIN`, `sha256//...`) — enable in prod.
-5. **User-channel (fills) feed**: order lifecycle tracking is not wired into
-   the engine yet; fills are visible via the CLOB data API/WS user channel.
+- No live order/fill has been claimed from this environment.
+- Type 1/2 account identity combinations need exact official-SDK/live comparison.
+- Target-host DNS/TCP/TLS/HMAC/venue latency is unmeasured.
+- Current market tick, minimum, fees, balances, allowances, and inventory require metadata/account preflight.
+- WSS schema behavior needs a long live soak and fault injection.
+
+## Production blockers
+
+1. Authenticated private user/order/fill channel.
+2. Startup and continuous reconciliation of open orders, fills, balances, allowances, reservations, PnL, and inventory.
+3. Automated readiness that includes public feed and private account-state health.
+4. Controlled canary evidence against the current official SDK and exact account/market.
+
+Until those are resolved, the project is suitable for offline research, mock/shadow validation, and tightly supervised disposable canaries only—not unattended real-money deployment. Follow [DEPLOYMENT.md](DEPLOYMENT.md).

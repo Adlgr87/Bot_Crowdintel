@@ -1,46 +1,33 @@
 # Changelog — Bot_Crowdintel
 
-## [Unreleased] — MutaLambda hot-path integration
+## Unreleased — correctness, safety, and deployability remediation
 
-### Integrated from MutaLambda evolutionary optimisation
+### Protocol and execution
 
-Hot-path kernels in `core/crypto/`, `core/include/`, and `core/src/` were
-optimised with MutaLambda's genetic engine (`benchmarks/cpp_hotpath.py`)
-driving clang++ × agnes-2.5-flash / g++ × gemini-2.5-flash. All mutations
-preserve bit-identical Keccak-256 KAT output and zero functional behaviour
-changes.
+- Added authenticated bounded alpha HTTP ingress and asynchronous bounded CLOB egress.
+- Reworked CLOB V2 amounts/ticks/order types, semantic response handling, safe retry classification, standard/negative-risk domains, and fail-closed type 3 behavior.
+- Replaced reusable pre-sign assumptions with a consumable bid/ask risk ladder, three buffers, per-buffer reader/writer registration, and one-time CAS claims.
+- Added fee-aware fractional Kelly sizing, exposure/daily-loss breakers, BUY cost reservations, and confirmed-inventory SELL reservations.
+- Updated WSS TLS/upgrade validation, heartbeat/schema handling, strict bounded JSON/frame parsing, authoritative empty snapshots, freshness invalidation, and tick-generation binding.
 
-#### `core/crypto/keccak256.hpp` — `keccak_f1600`
-- **Mutation:** θ-step iteration reversed (x: 4→0) to break back-to-back
-  latency chain between consecutive `C[x]` computations.
-- **Metric:** 1.3156× speedup on clang++ 22.1.8 (−547.8 → 416.2 ns/op).
-  (g++ 13.3.0: 1.0373× / +3.73 %.)
+### Concurrency and security
 
-#### `core/crypto/eip712_signer.hpp` — `sign_order`
-- **Mutation:** `order_typehash_` pre-computed once at `init()` time (eliminates
-  1 redundant `keccak256` per `sign_order` call); `__builtin_expect` applied to
-  cold ECDSA failure paths.
+- Replaced unsafe raw SPSC storage with typed non-copyable storage.
+- Added atomic coherent top-of-book publication and mutex-protected depth snapshots.
+- Replaced weak salt fallback with OS-seeded ChaCha20 and 53-bit wire-safe salts.
+- Added strict regular/non-symlink `_FILE` secret inputs, permission/size/control-character checks, zeroization, systemd credentials, non-root/capability-free deployment, and disabled core dumps.
+- Restricted ambiguous POST retries, made the kill switch cancel unsent egress, and disabled automatic service restart pending reconciliation.
 
-#### `core/include/spsc_ring_buffer.hpp` — `try_push` / `try_pop`
-- **Mutation:** `__builtin_expect` on rare full/empty branches for
-  improved branch prediction on the fast path.
+### Verification and operations
 
-#### `core/src/execution_engine.hpp` — `run_tick`
-- **Mutation:** Hot scalars (`p_win`, `price_raw_d`) hoisted into locals
-  with `__builtin_expect` on filter rejection branches.
+- Added GCC/Clang network/offline CI, ASan+UBSan, TSan, production-container builds, pinned dependencies/Actions, independent Python EIP-712 checks for both exchange domains, and CPU gross-regression budgets.
+- Added HTTP, gateway, concurrent pool, parser, risk/math, secret-file, replay, and concurrency tests.
+- Changed replay PnL to next-tick marking with V2 fees and no unmarkable final trade.
+- Added portable/x86-64-v2/x86-64-v3 CPU contracts, hardened Docker/systemd definitions, conservative reversible host tuning, configuration reference, security model, and deployment/rollback runbook.
+- Removed duplicate generated crypto trees, unused market-making/parser translation units, fictional optimization lineage, stale benchmark claims, and contradictory readiness documents.
 
-### Correctness
-- Keccak-256 KAT: bit-identical to Ethereum-canonical vectors under both
-  clang++ and g++.
-- EIP-712 signature output: bit-identical (deterministic ECDSA).
-- SPSC ring buffer: same acquire/release ordering, unchanged semantics.
-- Engine: identical `TickResult` classification for identical inputs.
+### Known blockers
 
-### Reproducing the MutaLambda keccak run
-```bash
-MUTALAMBDA_UNSAFE_LOCAL=1 python benchmarks/cpp_hotpath.py \
-  --compiler clang++ --backend openai --model agnes-2.5-flash \
-  --generations 14 --islands 3 --population 50 \
-  --samples 10 --warmups 2
-```
-Full results: `benchmarks/results/results_cpp_keccak.json` in MutaLambda.
+- Private user-channel fill/order updates and startup/continuous account reconciliation are not implemented.
+- Signature type 3 needs a verified variable-length ERC-7739 wrapper.
+- Live SDK/wire/account validation and target-hardware/network measurement remain controlled deployment gates.

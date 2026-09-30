@@ -1,5 +1,5 @@
 # Build artifacts
-core/build/
+core/build*/
 build/
 .git/
 
@@ -8,9 +8,11 @@ __pycache__/
 *.pyc
 .mypy_cache/
 
-# Secrets (defense in depth — the bot reads them from the environment)
+# Secrets (runtime injection only; preferably systemd/container secret files)
 .env
+.env.*
 *.key
+credentials/
 
 # OS / IDE
 .DS_Store

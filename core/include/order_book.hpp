@@ -1,89 +1,175 @@
 #ifndef ORDER_BOOK_HPP
 #define ORDER_BOOK_HPP
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OrderBookL2: fixed-capacity, zero-allocation Level-2 book.
+// Fixed-capacity L2 book with an atomic, freshness-aware top-of-book view.
 //
-// - Prices/sizes are uint64 fixed-point (×1e6). No floats in the hot path.
-// - bids[0] is the best bid (descending), asks[0] the best ask (ascending).
-// - Producer = WS listener thread (single writer). Consumer = engine thread.
-//   A seqlock counter lets the consumer detect torn reads:
-//     acquire-load seq (even) → read → re-load seq; retry if changed.
-// - No packed structs (packed + misaligned 8-byte fields = split cache lines),
-//   no pragmas that alter FP semantics (there are no floats here).
-// ─────────────────────────────────────────────────────────────────────────────
+// The engine never reads the mutable depth arrays.  The WebSocket writer
+// updates depth under a cold-path mutex and publishes bid+ask in one seqlock
+// transaction whose fields are atomic.  This is valid in the C++ memory model
+// (a seqlock over non-atomic payloads would still be a data race).  Cold-path
+// depth snapshots are copied while holding the mutex.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 struct Level2Entry {
-    uint64_t price;   // fixed-point ×1e6
-    uint64_t size;    // fixed-point ×1e6 (0 = empty level)
+    uint64_t price = 0;  // fixed-point x1e6
+    uint64_t size = 0;   // fixed-point x1e6
 };
 
 class OrderBookL2 {
 public:
     static constexpr size_t MAX_LEVELS = 100;
 
-    // ── Producer API (WS listener thread) ────────────────────────────────────
-    // Replace the full side (snapshot or post-sort delta application).
-    // Levels must arrive pre-sorted: bids descending, asks ascending.
-    void set_bids(const Level2Entry* levels, size_t n) {
-        write_begin();
-        if (n > MAX_LEVELS) n = MAX_LEVELS;
-        for (size_t i = 0; i < n; ++i) bids_[i] = levels[i];
-        for (size_t i = n; i < MAX_LEVELS; ++i) bids_[i] = {0, 0};
-        write_end();
-    }
-    void set_asks(const Level2Entry* levels, size_t n) {
-        write_begin();
-        if (n > MAX_LEVELS) n = MAX_LEVELS;
-        for (size_t i = 0; i < n; ++i) asks_[i] = levels[i];
-        for (size_t i = n; i < MAX_LEVELS; ++i) asks_[i] = {0, 0};
-        write_end();
-    }
-
-    // ── Consumer API (engine thread) — seqlock-guarded snapshot ─────────────
     struct Top {
         Level2Entry bid;
         Level2Entry ask;
-        uint64_t    sequence;
+        uint64_t sequence = 0;
+        uint64_t updated_ns = 0;  // CLOCK_MONOTONIC
     };
 
-    // Returns false if the producer updated the book mid-read (retry).
-    inline bool read_top(Top& out) const {
-        const uint64_t s1 = seq_.load(std::memory_order_acquire);
-        if (s1 & 1) return false;                    // writer active
-        out.bid = bids_[0];
-        out.ask = asks_[0];
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const uint64_t s2 = seq_.load(std::memory_order_relaxed);
-        if (s1 != s2) return false;                  // torn read
-        out.sequence = s1;
+    // Publish both sides as one coherent market-data event.
+    void set_book(const Level2Entry* bids, size_t nb,
+                  const Level2Entry* asks, size_t na) {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        copy_side(bids_, bids, nb);
+        copy_side(asks_, asks, na);
+        publish_top_locked(now_mono_ns());
+    }
+
+    // Compatibility helpers for tests/cold callers.  Feed handlers should use
+    // set_book() so a snapshot/delta cannot expose a mixed generation.
+    void set_bids(const Level2Entry* levels, size_t n) {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        copy_side(bids_, levels, n);
+        publish_top_locked(now_mono_ns());
+    }
+
+    void set_asks(const Level2Entry* levels, size_t n) {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        copy_side(asks_, levels, n);
+        publish_top_locked(now_mono_ns());
+    }
+
+    // Clear tradable state immediately on disconnect.  The engine therefore
+    // cannot trade a snapshot left behind by a dead socket.
+    void invalidate() {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        bids_.fill({0, 0});
+        asks_.fill({0, 0});
+        publish_top_locked(0);
+    }
+
+    // Returns false on a concurrent publication.  max_age_ns==0 disables the
+    // age check; live engines pass a configured freshness budget.
+    inline bool read_top(Top& out, uint64_t max_age_ns = 0) const noexcept {
+        // Sequential consistency gives one total order across the version and
+        // atomic payload fields. Equal even versions therefore bracket one
+        // coherent generation without a fence that TSan cannot model.
+        const uint64_t s1 = seq_.load(std::memory_order_seq_cst);
+        if (s1 & 1U) return false;
+
+        out.bid.price = bid_price_.load(std::memory_order_seq_cst);
+        out.bid.size = bid_size_.load(std::memory_order_seq_cst);
+        out.ask.price = ask_price_.load(std::memory_order_seq_cst);
+        out.ask.size = ask_size_.load(std::memory_order_seq_cst);
+        out.updated_ns = updated_ns_.load(std::memory_order_seq_cst);
+
+        const uint64_t s2 = seq_.load(std::memory_order_seq_cst);
+        if (s1 != s2 || (s2 & 1U)) return false;
+        out.sequence = s2;
+
+        if (max_age_ns != 0) {
+            if (out.updated_ns == 0) return false;
+            const uint64_t now = now_mono_ns();
+            if (now < out.updated_ns || now - out.updated_ns > max_age_ns)
+                return false;
+        }
         return true;
     }
 
-    // Unguarded accessors for cold-path/benchmark use.
-    inline Level2Entry get_bid(size_t level) const {
-        return (level < MAX_LEVELS) ? bids_[level] : Level2Entry{0, 0};
+    // Cold-path coherent depth copy used by the WS delta merger.
+    void snapshot(Level2Entry* bids, size_t& nb,
+                  Level2Entry* asks, size_t& na) const {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        nb = copy_out(bids_, bids);
+        na = copy_out(asks_, asks);
     }
-    inline Level2Entry get_ask(size_t level) const {
-        return (level < MAX_LEVELS) ? asks_[level] : Level2Entry{0, 0};
+
+    Level2Entry get_bid(size_t level) const {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        return level < MAX_LEVELS ? bids_[level] : Level2Entry{};
     }
-    inline uint64_t sequence() const { return seq_.load(std::memory_order_acquire); }
+
+    Level2Entry get_ask(size_t level) const {
+        std::lock_guard<std::mutex> lock(depth_mu_);
+        return level < MAX_LEVELS ? asks_[level] : Level2Entry{};
+    }
+
+    uint64_t sequence() const noexcept {
+        return seq_.load(std::memory_order_acquire);
+    }
+
+    void set_tick_size(uint64_t tick) noexcept {
+        if (tick > 0 && tick < 1000000)
+            tick_size_.store(tick, std::memory_order_release);
+    }
+
+    uint64_t tick_size(uint64_t fallback) const noexcept {
+        const uint64_t v = tick_size_.load(std::memory_order_acquire);
+        return v ? v : fallback;
+    }
+
+    static uint64_t now_mono_ns() noexcept {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 
 private:
-    inline void write_begin() { seq_.fetch_add(1, std::memory_order_relaxed); }  // → odd
-    inline void write_end()   {
-        std::atomic_thread_fence(std::memory_order_release);
-        seq_.fetch_add(1, std::memory_order_release);                               // → even
+    static void copy_side(std::array<Level2Entry, MAX_LEVELS>& dst,
+                          const Level2Entry* src, size_t n) {
+        n = std::min(n, MAX_LEVELS);
+        for (size_t i = 0; i < n; ++i) dst[i] = src[i];
+        for (size_t i = n; i < MAX_LEVELS; ++i) dst[i] = {0, 0};
     }
 
-    alignas(64) std::array<Level2Entry, MAX_LEVELS> bids_{};   // descending
-    alignas(64) std::array<Level2Entry, MAX_LEVELS> asks_{};   // ascending
-    alignas(64) std::atomic<uint64_t> seq_{0};                  // seqlock
+    static size_t copy_out(const std::array<Level2Entry, MAX_LEVELS>& src,
+                           Level2Entry* dst) {
+        size_t n = 0;
+        while (n < MAX_LEVELS && src[n].size != 0) {
+            dst[n] = src[n];
+            ++n;
+        }
+        return n;
+    }
+
+    void publish_top_locked(uint64_t updated) noexcept {
+        seq_.fetch_add(1, std::memory_order_seq_cst);
+        bid_price_.store(bids_[0].price, std::memory_order_seq_cst);
+        bid_size_.store(bids_[0].size, std::memory_order_seq_cst);
+        ask_price_.store(asks_[0].price, std::memory_order_seq_cst);
+        ask_size_.store(asks_[0].size, std::memory_order_seq_cst);
+        updated_ns_.store(updated, std::memory_order_seq_cst);
+        seq_.fetch_add(1, std::memory_order_seq_cst);
+    }
+
+    mutable std::mutex depth_mu_;
+    std::array<Level2Entry, MAX_LEVELS> bids_{};
+    std::array<Level2Entry, MAX_LEVELS> asks_{};
+
+    alignas(64) std::atomic<uint64_t> seq_{0};
+    std::atomic<uint64_t> bid_price_{0};
+    std::atomic<uint64_t> bid_size_{0};
+    std::atomic<uint64_t> ask_price_{0};
+    std::atomic<uint64_t> ask_size_{0};
+    std::atomic<uint64_t> updated_ns_{0};
+    std::atomic<uint64_t> tick_size_{0};
 };
 
-#endif // ORDER_BOOK_HPP
+#endif  // ORDER_BOOK_HPP

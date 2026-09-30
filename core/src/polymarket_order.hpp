@@ -19,10 +19,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+
+#if defined(__SIZEOF_INT128__)
+__extension__ typedef unsigned __int128 crowd_uint128_t;
+#else
+#error "CrowdIntel exact amount arithmetic requires compiler uint128 support"
+#endif
 
 // ── Signed struct (V2) ───────────────────────────────────────────────────────
 struct OrderV2 {
-    uint64_t salt;                       // random 56-bit (JSON-safe integer)
+    uint64_t salt;                       // random <= Number.MAX_SAFE_INTEGER
     uint8_t  maker[20];                  // funder / deposit wallet
     uint8_t  signer[20];                 // address of the signing EOA
     uint8_t  token_id[32];               // uint256 big-endian (ERC-1155 position id)
@@ -35,15 +42,20 @@ struct OrderV2 {
     uint8_t  builder[32]  = {0};         // bytes32 (zero unless builder code)
 };
 
-// Side codes
+// Side codes and venue share precision.
 inline constexpr uint8_t K_SIDE_BUY  = 0;
 inline constexpr uint8_t K_SIDE_SELL = 1;
+inline constexpr uint64_t K_SHARE_QUANTUM = 10000;  // 0.01 share in x1e6
 
 // Result of a submission (shared by the real and mock clients).
 struct SubmitResult {
-    bool     ok;
-    long     http_code;
-    char     order_id[80];   // CLOB orderID when the response carries one
+    bool ok = false;          // accepted by gateway or venue
+    bool final = true;        // false when only queued for asynchronous egress
+    bool retryable = false;   // only explicit 429 or unequivocal pre-send failure
+    long http_code = 0;
+    char order_id[80]{};
+    char status[24]{};
+    char error[192]{};
 };
 
 // ── ABI encoding for hashing (11 static slots × 32 bytes) ────────────────────
@@ -81,13 +93,17 @@ inline bool parse_fixed1e6(const char* s, size_t len, uint64_t& out) {
     bool any = false;
     for (; i < len && s[i] != '.'; ++i) {
         if (s[i] < '0' || s[i] > '9') return false;
-        int_part = int_part * 10 + (uint64_t)(s[i] - '0');
+        const uint64_t digit = static_cast<uint64_t>(s[i] - '0');
+        if (int_part > (std::numeric_limits<uint64_t>::max() - digit) / 10ULL)
+            return false;
+        int_part = int_part * 10ULL + digit;
         any = true;
     }
     uint64_t frac = 0;
     int frac_digits = 0;
     if (i < len && s[i] == '.') {
         ++i;
+        if (i == len) return false;
         for (; i < len; ++i) {
             if (s[i] < '0' || s[i] > '9') return false;
             if (frac_digits < 6) {
@@ -100,6 +116,9 @@ inline bool parse_fixed1e6(const char* s, size_t len, uint64_t& out) {
     }
     if (!any && frac_digits == 0) return false;
     for (int d = frac_digits; d < 6; ++d) frac *= 10;
+    if (int_part > (std::numeric_limits<uint64_t>::max() - frac) /
+                       1000000ULL)
+        return false;
     out = int_part * 1000000ULL + frac;
     return true;
 }
@@ -114,25 +133,78 @@ inline uint64_t round_price_to_tick(uint64_t price, uint64_t tick) {
     return p;
 }
 
-// price_u × size_u / 1e6 in __int128 (never overflows for sane orders).
-inline uint64_t product_scaled(uint64_t price_u, uint64_t size_u) {
-    const unsigned __int128 v =
-        (unsigned __int128)price_u * (unsigned __int128)size_u / 1000000ULL;
-    return (uint64_t)v;
+inline uint64_t floor_to_quantum(uint64_t value, uint64_t quantum) {
+    return quantum ? value - value % quantum : value;
 }
 
-// Fill maker/taker amounts for a side. Returns false on degenerate size.
+// Official amount precision associated with each current tick.  The returned
+// value is a raw x1e6 quantum (for example, 100 means four decimals).
+inline uint64_t amount_quantum_for_tick(uint64_t tick) {
+    switch (tick) {
+        case 100000: return 1000;  // 0.1    -> 3 amount decimals
+        case 10000:  return 100;   // 0.01   -> 4
+        case 5000:   return 10;    // 0.005  -> 5
+        case 2500:   return 1;     // 0.0025 -> 6
+        case 1000:   return 10;    // 0.001  -> 5
+        case 100:    return 1;     // 0.0001 -> 6
+        default:     return 0;     // fail closed for an unknown venue grid
+    }
+}
+
+// price_u * size_u / 1e6 in __int128.
+inline uint64_t product_scaled(uint64_t price_u, uint64_t size_u) {
+    return static_cast<uint64_t>(
+        static_cast<crowd_uint128_t>(price_u) * size_u / 1000000ULL);
+}
+
+// Canonical venue quantization.  Shares are always floored to two decimals.
+// FAK/FOK BUYs additionally spend a cent-quantized collateral budget and
+// derive their received shares from that budget, matching market-order rules.
+inline bool compute_order_amounts(uint8_t side, uint64_t price_u,
+                                  uint64_t requested_size_u, uint64_t tick,
+                                  bool market_order,
+                                  uint64_t& maker_amount,
+                                  uint64_t& taker_amount,
+                                  uint64_t& effective_size_u) {
+    if (side > K_SIDE_SELL || price_u == 0 || price_u >= 1000000ULL ||
+        requested_size_u == 0 || amount_quantum_for_tick(tick) == 0)
+        return false;
+
+    const uint64_t amount_quantum = amount_quantum_for_tick(tick);
+    uint64_t shares = floor_to_quantum(requested_size_u, K_SHARE_QUANTUM);
+    if (shares == 0) return false;
+
+    if (side == K_SIDE_BUY && market_order) {
+        maker_amount = floor_to_quantum(product_scaled(price_u, shares),
+                                        K_SHARE_QUANTUM);  // direct pUSD <= 2 dp
+        if (maker_amount == 0) return false;
+        const crowd_uint128_t numerator =
+            static_cast<crowd_uint128_t>(maker_amount) * 1000000ULL;
+        taker_amount = floor_to_quantum(
+            static_cast<uint64_t>(numerator / price_u), amount_quantum);
+        effective_size_u = taker_amount;
+    } else {
+        const uint64_t notional = floor_to_quantum(
+            product_scaled(price_u, shares), amount_quantum);
+        if (notional == 0) return false;
+        if (side == K_SIDE_BUY) {
+            maker_amount = notional;
+            taker_amount = shares;
+        } else {
+            maker_amount = shares;
+            taker_amount = notional;
+        }
+        effective_size_u = shares;
+    }
+    return maker_amount != 0 && taker_amount != 0;
+}
+
+// Backward-compatible limit-order helper used by golden tests.
 inline bool compute_amounts(uint8_t side, uint64_t price_u, uint64_t size_u,
                             uint64_t& maker_amount, uint64_t& taker_amount) {
-    if (size_u == 0 || price_u == 0 || price_u >= 1000000ULL) return false;
-    if (side == K_SIDE_BUY) {
-        maker_amount = product_scaled(price_u, size_u);  // USDC
-        taker_amount = size_u;                           // shares
-    } else {
-        maker_amount = size_u;                           // shares
-        taker_amount = product_scaled(price_u, size_u);  // USDC
-    }
-    return maker_amount > 0 && taker_amount > 0;
+    uint64_t effective = 0;
+    return compute_order_amounts(side, price_u, size_u, 10000, false,
+                                 maker_amount, taker_amount, effective);
 }
 
 // ── uint256 decimal (tokenId) ↔ 32-byte BE ───────────────────────────────────
@@ -146,10 +218,10 @@ inline bool parse_uint256_dec(const char* s, size_t len, uint8_t out32[32]) {
         if (s[i] < '0' || s[i] > '9') return false;
         const uint64_t d = (uint64_t)(s[i] - '0');
         // ×10 with carry
-        unsigned __int128 carry = d;
+        crowd_uint128_t carry = d;
         for (int l = 0; l < 4; ++l) {
-            const unsigned __int128 v =
-                (unsigned __int128)limbs[l] * 10ULL + carry;
+            const crowd_uint128_t v =
+                static_cast<crowd_uint128_t>(limbs[l]) * 10ULL + carry;
             limbs[l] = (uint64_t)v;
             carry = v >> 64;
         }
@@ -215,7 +287,43 @@ inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],
                             const char* signer_hex,     // precomputed "0x..." (40)
                             const char* owner_api_key,
                             const char* order_type,     // GTC | GTD | FOK | FAK
-                            WireBody& out) {
+                            WireBody& out,
+                            uint64_t expiration_seconds = 0) {
+    if (!sig65 || !token_id_dec || !maker_hex || !signer_hex ||
+        !owner_api_key || !order_type || o.side > K_SIDE_SELL ||
+        o.signature_type > 2)
+        return false;
+    const size_t token_len = std::strlen(token_id_dec);
+    const size_t maker_len = std::strlen(maker_hex);
+    const size_t signer_len = std::strlen(signer_hex);
+    const size_t owner_len = std::strlen(owner_api_key);
+    const size_t order_len = std::strlen(order_type);
+    if (token_len == 0 || token_len > 78 || maker_len != 42 ||
+        signer_len != 42 || owner_len == 0 || owner_len >= 64 ||
+        order_len < 3 || order_len > 4 ||
+        maker_hex[0] != '0' || maker_hex[1] != 'x' ||
+        signer_hex[0] != '0' || signer_hex[1] != 'x')
+        return false;
+    for (size_t i = 0; i < token_len; ++i)
+        if (token_id_dec[i] < '0' || token_id_dec[i] > '9') return false;
+    for (size_t i = 2; i < 42; ++i) {
+        const char m = maker_hex[i], s = signer_hex[i];
+        const bool maker_digit = (m >= '0' && m <= '9') ||
+            (m >= 'a' && m <= 'f') || (m >= 'A' && m <= 'F');
+        const bool signer_digit = (s >= '0' && s <= '9') ||
+            (s >= 'a' && s <= 'f') || (s >= 'A' && s <= 'F');
+        if (!maker_digit || !signer_digit) return false;
+    }
+    for (size_t i = 0; i < owner_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(owner_api_key[i]);
+        if (c < 0x21U || c > 0x7eU || c == '"' || c == '\\') return false;
+    }
+    if (std::strcmp(order_type, "GTC") != 0 &&
+        std::strcmp(order_type, "GTD") != 0 &&
+        std::strcmp(order_type, "FOK") != 0 &&
+        std::strcmp(order_type, "FAK") != 0)
+        return false;
+
     char* p = out.buf;
     *p++ = '{';
     // deferExec
@@ -224,8 +332,10 @@ inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],
     std::memcpy(p, "\"builder\":\"0x", 13); p += 13;
     p += bytes_to_hex(o.builder, 32, p);
     *p++ = '"';
-    // expiration (wire-only field for GTD handling; not part of signed struct)
-    std::memcpy(p, ",\"expiration\":\"0\"", 17); p += 17;
+    // expiration is wire-only in V2 (Unix seconds for GTD, zero otherwise).
+    std::memcpy(p, ",\"expiration\":\"", 15); p += 15;
+    p += u64_to_dec(expiration_seconds, p);
+    *p++ = '"';
     // maker
     std::memcpy(p, ",\"maker\":\"", 10); p += 10;
     std::memcpy(p, maker_hex, 42); p += 42;   // includes 0x
@@ -265,21 +375,20 @@ inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],
     *p++ = '"';
     // tokenId (decimal string)
     std::memcpy(p, ",\"tokenId\":\"", 12); p += 12;
-    const size_t tl = std::strlen(token_id_dec);
-    std::memcpy(p, token_id_dec, tl); p += tl;
+    std::memcpy(p, token_id_dec, token_len); p += token_len;
     *p++ = '"';
     // close order + wrapper
     std::memcpy(p, "},\"orderType\":\"", 15); p += 15;
-    const size_t ol = std::strlen(order_type);
-    std::memcpy(p, order_type, ol); p += ol;
+    std::memcpy(p, order_type, order_len); p += order_len;
     *p++ = '"';
     std::memcpy(p, ",\"owner\":\"", 10); p += 10;
-    const size_t ow = std::strlen(owner_api_key);
-    std::memcpy(p, owner_api_key, ow); p += ow;
+    std::memcpy(p, owner_api_key, owner_len); p += owner_len;
     std::memcpy(p, "\"}", 2); p += 2;
 
-    out.len = (size_t)(p - out.buf);
-    return out.len < sizeof(out.buf);
+    out.len = static_cast<size_t>(p - out.buf);
+    if (out.len >= sizeof(out.buf)) return false;
+    out.buf[out.len] = '\0';
+    return true;
 }
 
 #endif // POLYMARKET_ORDER_HPP

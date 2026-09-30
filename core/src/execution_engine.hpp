@@ -1,63 +1,63 @@
 #ifndef EXECUTION_ENGINE_HPP
 #define EXECUTION_ENGINE_HPP
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ExecutionEngine: the hot path.
-//
-// On each tick: pop one CrowdIntel signal → apply economic filters against the
-// LIVE book (edge, liquidity) → size with exact Kelly → build a CLOB V2 order
-// → sign (pre-signed pool hit, or inline ECDSA fallback) → submit.
-//
-// Contract & correlation guarantees:
-//   - The signal carries p_win; the engine pairs it with the live best price.
-//     A signal without a two-sided book is never traded (no price-0 orders).
-//   - BUY consumes the best ASK, SELL consumes the best BID — the levels the
-//     order would actually hit.
-//   - salt/timestamp are unique per order (FastRandom + wall clock ms).
-//   - No heap allocation, no I/O syscalls, no logging on this path.
-// ─────────────────────────────────────────────────────────────────────────────
-
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 
-#include "../include/order_book.hpp"
-#include "../include/spsc_ring_buffer.hpp"
 #include "../crypto/eip712_signer.hpp"
 #include "../crypto/fast_random.hpp"
+#include "../include/order_book.hpp"
+#include "../include/spsc_ring_buffer.hpp"
 #include "alpha_receiver.hpp"
 #include "kelly_engine.hpp"
+#include "market_config.hpp"
 #include "polymarket_order.hpp"
 #include "presigned_pool.hpp"
-// NOTE: the Client is a template parameter (duck-typed submit(body)); this
-// header deliberately does not include the network client so offline builds
-// never pull curl/OpenSSL.
 
-enum class TickResult : int {
-    NO_SIGNAL = 0,       // nothing to do (not an error)
-    FILTERED_STATS,      // q/confidence/p_win rejected
-    NO_BOOK,             // no live two-sided market
-    NO_EDGE,             // |p_win − price| below min_edge
-    TOO_SMALL,           // position below min size / rounds to zero
-    SIGN_FAILED,         // ECDSA failure (should never happen)
-    BODY_FAILED,         // wire body overflow (should never happen)
-    SUBMIT_FAILED,       // network/CLOB rejected
-    SUBMITTED
+enum class TickResult : uint8_t {
+    NO_SIGNAL = 0,
+    FILTERED_STATS,
+    WRONG_MARKET,
+    STALE_SIGNAL,
+    DUPLICATE_SIGNAL,
+    NO_BOOK,
+    NO_EDGE,
+    NO_INVENTORY,
+    RISK_REJECTED,
+    TOO_SMALL,
+    SIGN_FAILED,
+    BODY_FAILED,
+    SUBMIT_FAILED,
+    QUEUED,
+    SUBMITTED,
+    COUNT
 };
 
-inline const char* tick_result_name(TickResult r) {
-    switch (r) {
-        case TickResult::NO_SIGNAL:      return "no_signal";
+inline const char* tick_result_name(TickResult result) {
+    switch (result) {
+        case TickResult::NO_SIGNAL: return "no_signal";
         case TickResult::FILTERED_STATS: return "filtered_stats";
-        case TickResult::NO_BOOK:        return "no_book";
-        case TickResult::NO_EDGE:        return "no_edge";
-        case TickResult::TOO_SMALL:      return "too_small";
-        case TickResult::SIGN_FAILED:    return "sign_failed";
-        case TickResult::BODY_FAILED:    return "body_failed";
-        case TickResult::SUBMIT_FAILED:  return "submit_failed";
-        case TickResult::SUBMITTED:      return "submitted";
+        case TickResult::WRONG_MARKET: return "wrong_market";
+        case TickResult::STALE_SIGNAL: return "stale_signal";
+        case TickResult::DUPLICATE_SIGNAL: return "duplicate_signal";
+        case TickResult::NO_BOOK: return "no_book";
+        case TickResult::NO_EDGE: return "no_edge";
+        case TickResult::NO_INVENTORY: return "no_inventory";
+        case TickResult::RISK_REJECTED: return "risk_rejected";
+        case TickResult::TOO_SMALL: return "too_small";
+        case TickResult::SIGN_FAILED: return "sign_failed";
+        case TickResult::BODY_FAILED: return "body_failed";
+        case TickResult::SUBMIT_FAILED: return "submit_failed";
+        case TickResult::QUEUED: return "queued";
+        case TickResult::SUBMITTED: return "submitted";
+        case TickResult::COUNT: break;
     }
-    return "?";
+    return "unknown";
 }
 
 template <typename Client>
@@ -68,119 +68,266 @@ public:
                     SPSC_RingBuffer<AlphaSignal>& signals,
                     const EIP712Signer& signer,
                     PresignedOrderPool& pool,
-                    Client& client)
+                    Client& client,
+                    const std::atomic<bool>* trading_enabled = nullptr)
         : cfg_(cfg), book_(book), signals_(signals), signer_(signer),
-          pool_(pool), client_(client) {}
+          pool_(pool), client_(client), trading_enabled_(trading_enabled),
+          confirmed_inventory_(cfg.initial_position_shares) {}
 
-    // One hot tick. Returns what happened (benchmarked and counted).
     TickResult run_tick() {
-        AlphaSignal sig;
-        if (!signals_.try_pop(sig)) return TickResult::NO_SIGNAL;
+        AlphaSignal signal{};
+        if (!signals_.try_pop(signal)) return TickResult::NO_SIGNAL;
 
-        // ── 1. Statistical pre-filters (defensive repeat of the cold path). ──
-        // MutaLambda: __builtin_expect marks these as likely to pass.
-        if (__builtin_expect(!(sig.p_win > 0.0 && sig.p_win < 1.0), 0))
+        if (!std::isfinite(signal.p_win) || !std::isfinite(signal.confidence) ||
+            !std::isfinite(signal.q_value) ||
+            !(signal.p_win > 0.0 && signal.p_win < 1.0) ||
+            signal.confidence < cfg_.min_confidence ||
+            signal.q_value > cfg_.max_q_value || signal.direction_hint > 2)
             return TickResult::FILTERED_STATS;
-        if (__builtin_expect(sig.confidence < cfg_.min_confidence || sig.q_value > cfg_.max_q_value, 0))
-            return TickResult::FILTERED_STATS;
+        if (signal.market_hash != cfg_.market_hash)
+            return TickResult::WRONG_MARKET;
 
-        // ── 2. Live top of book (seqlock-guarded; a few retries suffice — the
-        //       producer updates at most every few hundred µs). ───────────────
-        OrderBookL2::Top top;
+        const uint64_t now_ns = realtime_ns();
+        const uint64_t ttl_ns = cfg_.signal_ttl_ms * 1000000ULL;
+        constexpr uint64_t MAX_FUTURE_SKEW_NS = 1000000000ULL;
+        if (signal.timestamp_ns == 0 ||
+            (signal.timestamp_ns > now_ns &&
+             signal.timestamp_ns - now_ns > MAX_FUTURE_SKEW_NS) ||
+            (now_ns > signal.timestamp_ns && now_ns - signal.timestamp_ns > ttl_ns))
+            return TickResult::STALE_SIGNAL;
+        if (seen_before(signal.signal_id, now_ns, ttl_ns))
+            return TickResult::DUPLICATE_SIGNAL;
+        if (trading_enabled_ && !trading_enabled_->load(std::memory_order_acquire))
+            return TickResult::RISK_REJECTED;
+
+        OrderBookL2::Top top{};
         bool have_book = false;
+        const uint64_t max_age_ns = cfg_.max_book_age_ms * 1000000ULL;
         for (int attempt = 0; attempt < 4 && !have_book; ++attempt)
-            have_book = book_.read_top(top);
-        if (!have_book || top.bid.size == 0 || top.ask.size == 0)
+            have_book = book_.read_top(top, max_age_ns);
+        if (!have_book || top.bid.size == 0 || top.ask.size == 0 ||
+            top.bid.price >= top.ask.price)
             return TickResult::NO_BOOK;
 
-        // ── 3. Direction & price actually hit. ───────────────────────────────
-        uint8_t side;
-        if (sig.direction_hint == 1) {
+        uint8_t side = K_SIDE_BUY;
+        if (signal.direction_hint == 0) {
+            side = K_SIDE_BUY;
+        } else if (signal.direction_hint == 1) {
             side = K_SIDE_SELL;
         } else {
-            // Default: trade the direction of the edge.
-            const double buy_edge  = sig.p_win - (double)top.ask.price * 1e-6;
-            const double sell_edge = (double)top.bid.price * 1e-6 - sig.p_win;
-            side = (buy_edge >= sell_edge) ? K_SIDE_BUY : K_SIDE_SELL;
+            const double buy_edge = net_edge(K_SIDE_BUY, signal.p_win,
+                                             static_cast<double>(top.ask.price) * 1e-6);
+            const double sell_edge = net_edge(K_SIDE_SELL, signal.p_win,
+                                              static_cast<double>(top.bid.price) * 1e-6);
+            side = buy_edge >= sell_edge ? K_SIDE_BUY : K_SIDE_SELL;
         }
-        const uint64_t price_raw = round_price_to_tick(
-            (side == K_SIDE_BUY) ? top.ask.price : top.bid.price, cfg_.tick_size);
-        const double price = (double)price_raw * 1e-6;
 
-        // ── 4. Edge filter (economic, needs the live price). ─────────────────
-        // MutaLambda: hoist hot values into locals for register reuse.
-        const double price_raw_d = (double)price_raw;
-        const double p_win = sig.p_win;
-        const double edge = (side == K_SIDE_BUY)
-            ? (p_win - price_raw_d * 1e-6)
-            : (price_raw_d * 1e-6 - p_win);
-        if (__builtin_expect(edge < cfg_.min_edge, 0)) return TickResult::NO_EDGE;
+        if (side == K_SIDE_SELL && confirmed_inventory_ < cfg_.min_size_shares)
+            return TickResult::NO_INVENTORY;
 
-        // ── 5. Exact Kelly sizing (×1e6 fixed shares). ───────────────────────
-        const double k = (side == K_SIDE_BUY)
-            ? KellyEngine::kelly_buy(sig.p_win, price)
-            : KellyEngine::kelly_sell(sig.p_win, price);
-        const double usd = KellyEngine::position_usd(k, cfg_.kelly_fraction, cfg_.bankroll_usd);
-        uint64_t shares = KellyEngine::usd_to_shares_fixed(usd, price);
-        if (shares < cfg_.min_size_shares) return TickResult::TOO_SMALL;
-        // Never exceed visible liquidity at the level we take (partial take is
-        // fine; blowing through the book is not — naive version).
-        const uint64_t avail = (side == K_SIDE_BUY) ? top.ask.size : top.bid.size;
-        if (shares > avail) shares = avail;
-        if (shares < cfg_.min_size_shares) return TickResult::TOO_SMALL;
+        const uint64_t tick = book_.tick_size(cfg_.tick_size);
+        const uint64_t raw_book_price = side == K_SIDE_BUY
+                                      ? top.ask.price : top.bid.price;
+        const uint64_t price_raw = round_price_to_tick(raw_book_price, tick);
+        const double price = static_cast<double>(price_raw) * 1e-6;
+        const double edge = net_edge(side, signal.p_win, price);
+        if (edge < cfg_.min_edge) return TickResult::NO_EDGE;
 
-        uint64_t maker_amt, taker_amt;
-        if (!compute_amounts(side, price_raw, shares, maker_amt, taker_amt))
+        // Size against the fee-adjusted execution price.  This is conservative:
+        // fees reduce both the gate and the Kelly fraction.
+        const double fee_per_share = cfg_.taker_fee_rate * price * (1.0 - price);
+        const double sizing_price = side == K_SIDE_BUY
+            ? std::min(0.999999, price + fee_per_share)
+            : std::max(0.000001, price - fee_per_share);
+        const double kelly = side == K_SIDE_BUY
+            ? KellyEngine::kelly_buy(signal.p_win, sizing_price)
+            : KellyEngine::kelly_sell(signal.p_win, sizing_price);
+        double usd = KellyEngine::position_usd(
+            kelly, cfg_.kelly_fraction, cfg_.bankroll_usd);
+        double available_budget = cfg_.max_order_usd;
+        if (side == K_SIDE_BUY) {
+            available_budget = std::min(
+                available_budget,
+                std::max(0.0, cfg_.max_exposure_usd - committed_exposure_usd_));
+            available_budget = std::min(
+                available_budget,
+                std::max(0.0, cfg_.max_daily_loss_usd - worst_case_loss_usd_));
+        }
+        usd = std::min(usd, available_budget);
+        uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, price);
+
+        const uint64_t visible = side == K_SIDE_BUY ? top.ask.size : top.bid.size;
+        requested_shares = std::min(requested_shares, visible);
+        if (side == K_SIDE_SELL)
+            requested_shares = std::min(requested_shares, confirmed_inventory_);
+        if (requested_shares < cfg_.min_size_shares)
             return TickResult::TOO_SMALL;
 
-        // ── 6. Try the pre-signed pool (≈1 µs), else inline sign (~3-5 µs). ──
-        WireBody body;
-        bool ok = pool_.acquire(side, price_raw, shares, body);
-        if (!ok) {
-            OrderV2 o{};
-            o.salt = rng_.next_salt();
-            o.timestamp_ms = PresignedOrderPool::now_ms();
-            std::memcpy(o.maker, cfg_.maker, 20);
-            std::memcpy(o.signer, cfg_.signer, 20);
-            std::memcpy(o.token_id, cfg_.token_id_be, 32);
-            o.maker_amount = maker_amt;
-            o.taker_amount = taker_amt;
-            o.side = side;
-            o.signature_type = cfg_.signature_type;
+        const bool market_order = std::strcmp(cfg_.order_type, "FAK") == 0 ||
+                                  std::strcmp(cfg_.order_type, "FOK") == 0;
+        uint64_t maker_amount = 0, taker_amount = 0, effective_shares = 0;
+        if (!compute_order_amounts(side, price_raw, requested_shares, tick,
+                                   market_order, maker_amount, taker_amount,
+                                   effective_shares) ||
+            effective_shares < cfg_.min_size_shares)
+            return TickResult::TOO_SMALL;
 
-            uint8_t sig65[65];
-            if (!signer_.sign_order(o, sig65)) return TickResult::SIGN_FAILED;
-            if (!build_wire_body(o, sig65, cfg_.token_id_dec, cfg_.maker_hex,
-                                 cfg_.signer_hex, cfg_.owner_api_key,
-                                 cfg_.order_type, body))
+        // Local circuit breaker is conservative until user-channel fill
+        // reconciliation lands: accepted BUYs reserve their full worst-case
+        // cost and are not credited as sellable inventory.
+        const double order_notional = static_cast<double>(
+            side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+        if (order_notional > cfg_.max_order_usd + 1e-9 ||
+            (side == K_SIDE_BUY &&
+             (committed_exposure_usd_ + order_notional > cfg_.max_exposure_usd ||
+              worst_case_loss_usd_ + order_notional > cfg_.max_daily_loss_usd)))
+            return TickResult::RISK_REJECTED;
+
+        WireBody body{};
+        uint64_t pool_size = 0, pool_maker = 0, pool_taker = 0;
+        bool presigned = pool_.acquire_at_most(
+            side, price_raw, tick, effective_shares, body,
+            pool_size, pool_maker, pool_taker);
+        if (presigned) {
+            effective_shares = pool_size;
+            maker_amount = pool_maker;
+            taker_amount = pool_taker;
+        } else {
+            OrderV2 order{};
+            fill_order(order, side, maker_amount, taker_amount);
+            uint8_t signature[65];
+            if (!signer_.sign_order(order, signature))
+                return TickResult::SIGN_FAILED;
+            const uint64_t expiration = cfg_.wire_expiration(order.timestamp_ms / 1000ULL);
+            if (!build_wire_body(order, signature, cfg_.token_id_dec,
+                                 cfg_.maker_hex, cfg_.signer_hex,
+                                 cfg_.owner_api_key, cfg_.order_type, body,
+                                 expiration))
                 return TickResult::BODY_FAILED;
         }
 
-        // ── 7. Submit (HMAC + TLS write on the persistent connection). ───────
-        const auto res = client_.submit(body);
-        if (res.ok) {
-            stats_.submitted.fetch_add(1, std::memory_order_relaxed);
-            return TickResult::SUBMITTED;
+        const SubmitResult response = client_.submit(body);
+        if (!response.ok) {
+            ++submit_failed_;
+            return TickResult::SUBMIT_FAILED;
         }
-        stats_.submit_failed.fetch_add(1, std::memory_order_relaxed);
-        return TickResult::SUBMIT_FAILED;
+
+        const double accepted_notional = static_cast<double>(
+            side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+        if (side == K_SIDE_BUY) {
+            committed_exposure_usd_ += accepted_notional;
+            worst_case_loss_usd_ += accepted_notional;
+        } else {
+            // Reserve as if fully filled; never permit two sells against the
+            // same confirmed inventory while fills are not reconciled.
+            confirmed_inventory_ = effective_shares >= confirmed_inventory_
+                ? 0 : confirmed_inventory_ - effective_shares;
+        }
+        if (!response.final) {
+            ++queued_;
+            return TickResult::QUEUED;
+        }
+        ++submitted_;
+        return TickResult::SUBMITTED;
     }
 
-    struct Stats {
-        std::atomic<uint64_t> submitted{0};
-        std::atomic<uint64_t> submit_failed{0};
-    };
-    const Stats& stats() const { return stats_; }
+    uint64_t submitted() const noexcept { return submitted_; }
+    uint64_t queued() const noexcept { return queued_; }
+    uint64_t submit_failed() const noexcept { return submit_failed_; }
+    uint64_t confirmed_inventory() const noexcept { return confirmed_inventory_; }
+    double committed_exposure_usd() const noexcept { return committed_exposure_usd_; }
 
 private:
+    static uint64_t realtime_ns() noexcept {
+        timespec ts{};
+        clock_gettime(CLOCK_REALTIME, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+               static_cast<uint64_t>(ts.tv_nsec);
+    }
+
+    double net_edge(uint8_t side, double p_win, double price) const noexcept {
+        const double fee = cfg_.taker_fee_rate * price * (1.0 - price);
+        return side == K_SIDE_BUY ? p_win - price - fee
+                                  : price - p_win - fee;
+    }
+
+    static uint64_t dedupe_hash(uint64_t value) noexcept {
+        value += 0x9e3779b97f4a7c15ULL;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31);
+    }
+
+    static bool bloom_contains(
+            const std::array<uint64_t, 65536>& filter,
+            const std::array<size_t, 3>& positions) noexcept {
+        for (const size_t position : positions)
+            if ((filter[position >> 6] & (1ULL << (position & 63U))) == 0)
+                return false;
+        return true;
+    }
+
+    bool seen_before(uint64_t id, uint64_t now_ns,
+                     uint64_t ttl_ns) noexcept {
+        if (id == 0 || ttl_ns == 0) return true;
+        const uint64_t epoch = now_ns / ttl_ns;
+        if (dedupe_epoch_ == 0) {
+            dedupe_epoch_ = epoch;
+        } else if (epoch > dedupe_epoch_) {
+            if (epoch == dedupe_epoch_ + 1) {
+                dedupe_previous_ = dedupe_current_;
+            } else {
+                dedupe_previous_.fill(0);
+            }
+            dedupe_current_.fill(0);
+            dedupe_epoch_ = epoch;
+        }
+
+        static constexpr size_t MASK = (1U << 22) - 1U;
+        const std::array<size_t, 3> positions = {
+            static_cast<size_t>(dedupe_hash(id)) & MASK,
+            static_cast<size_t>(dedupe_hash(id ^ 0xa0761d6478bd642fULL)) & MASK,
+            static_cast<size_t>(dedupe_hash(id ^ 0xe7037ed1a0b428dbULL)) & MASK};
+        if (bloom_contains(dedupe_current_, positions) ||
+            bloom_contains(dedupe_previous_, positions))
+            return true;
+        for (const size_t position : positions)
+            dedupe_current_[position >> 6] |= 1ULL << (position & 63U);
+        return false;
+    }
+
+    void fill_order(OrderV2& order, uint8_t side,
+                    uint64_t maker_amount, uint64_t taker_amount) {
+        order.salt = rng_.next_salt();
+        order.timestamp_ms = PresignedOrderPool::now_ms();
+        std::memcpy(order.maker, cfg_.maker, 20);
+        std::memcpy(order.signer, cfg_.signer, 20);
+        std::memcpy(order.token_id, cfg_.token_id_be, 32);
+        order.maker_amount = maker_amount;
+        order.taker_amount = taker_amount;
+        order.side = side;
+        order.signature_type = cfg_.signature_type;
+    }
+
     const MarketConfig& cfg_;
     OrderBookL2& book_;
     SPSC_RingBuffer<AlphaSignal>& signals_;
     const EIP712Signer& signer_;
     PresignedOrderPool& pool_;
     Client& client_;
+    const std::atomic<bool>* trading_enabled_;
     FastRandom rng_;
-    Stats stats_;
+    // Two rotating Bloom epochs guarantee no false negatives inside the
+    // configured TTL. False positives only reject work, which is fail-safe.
+    std::array<uint64_t, 65536> dedupe_current_{};
+    std::array<uint64_t, 65536> dedupe_previous_{};
+    uint64_t dedupe_epoch_ = 0;
+    uint64_t confirmed_inventory_ = 0;
+    double committed_exposure_usd_ = 0.0;
+    double worst_case_loss_usd_ = 0.0;
+    uint64_t submitted_ = 0;
+    uint64_t queued_ = 0;
+    uint64_t submit_failed_ = 0;
 };
 
-#endif // EXECUTION_ENGINE_HPP
+#endif  // EXECUTION_ENGINE_HPP
