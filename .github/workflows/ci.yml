@@ -86,8 +86,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Build production image and run build-stage tests
         run: |
-          docker build --pull --file infra/docker/Dockerfile.prod \
-            --tag crowdintel:ci .
+          # Keep Actions' rendered log bounded while preserving the failure tail.
+          # Full BuildKit progress can otherwise be truncated before the useful error.
+          if ! docker build --pull --progress=plain \
+              --file infra/docker/Dockerfile.prod \
+              --tag crowdintel:ci . >/tmp/docker-build.log 2>&1; then
+            tail -n 200 /tmp/docker-build.log
+            exit 1
+          fi
+          tail -n 30 /tmp/docker-build.log
       - name: Verify non-root runtime identity and executable image
         run: |
           test "$(docker image inspect crowdintel:ci --format '{{.Config.User}}')" = "10001:10001"
