@@ -21,12 +21,23 @@ public:
         return result;
     }
 
+    // Cold-path REST surface used by the reconcile thread (mock equivalents).
+    size_t rest_get(const char*, char*, size_t) { return 0; }
+    bool cancel_all() {
+        cancellations_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     uint64_t submissions() const {
         return submissions_.load(std::memory_order_relaxed);
+    }
+    uint64_t cancellations() const {
+        return cancellations_.load(std::memory_order_relaxed);
     }
 
 private:
     std::atomic<uint64_t> submissions_{0};
+    std::atomic<uint64_t> cancellations_{0};
 };
 
 #endif  // MOCK_CLIENT_HPP

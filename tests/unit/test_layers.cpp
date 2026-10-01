@@ -1,0 +1,678 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// test_layers: unit/integration tests for the second-generation layers.
+//
+//   P1 eyes:    PositionTracker accounting, dedup, VWAP, seqlock snapshots,
+//               user-channel message parser, engine/tracker integration
+//               (no double exposure on partial fills).
+//   P2 brakes:  RiskManager caps, stop-loss, kill switch, hedging.
+//   P3 adverse: VolatilityGate regimes, pool slippage/TTL policy.
+//   P4 brain:   BayesianEngine posterior math, source reliability gating.
+//
+// Exit code 0 = all pass.  No external framework (matches test_core).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <thread>
+
+#include "../../core/include/account_events.hpp"
+#include "../../core/include/journal.hpp"
+#include "../../core/include/order_book.hpp"
+#include "../../core/include/position_tracker.hpp"
+#include "../../core/include/risk_manager.hpp"
+#include "../../core/include/spsc_ring_buffer.hpp"
+#include "../../core/include/time_utils.hpp"
+#include "../../core/src/execution_engine.hpp"
+#include "../../core/src/market_config.hpp"
+#include "../../core/src/mock_client.hpp"
+#include "../../core/src/presigned_pool.hpp"
+#include "../../core/src/user_event_parser.hpp"
+#include "../../core/crypto/eip712_signer.hpp"
+#include "../../core/crypto/secure_zero.hpp"
+#include "alpha_parser.hpp"
+
+// Phase headers are included as their phases land (P3 adverse-selection,
+// P4 brain):
+//   #include "../../core/include/volatility_gate.hpp"
+//   #include "bayesian_engine.hpp" / "evidence.hpp"
+
+static int g_failures = 0;
+#define CHECK(cond, name)                                                     \
+    do {                                                                      \
+        if (cond) { std::printf("  PASS %s\n", name); }                       \
+        else { std::printf("  FAIL %s (line %d)\n", name, __LINE__);         \
+               ++g_failures; }                                                \
+    } while (0)
+
+static AccountEvent make_fill(uint8_t side, double price, double shares,
+                              uint64_t order_hash, uint64_t event_id,
+                              uint8_t asset = 0) {
+    AccountEvent ev{};
+    ev.type = AccountEvent::Type::FILL;
+    ev.side = side;
+    ev.asset = asset;
+    ev.price = static_cast<uint64_t>(price * 1000000.0);
+    ev.size = static_cast<uint64_t>(shares * 1000000.0);
+    ev.order_hash = order_hash;
+    ev.event_id = event_id;
+    ev.market_hash = 7;
+    ev.timestamp_ns = crowdintel::realtime_ns();
+    return ev;
+}
+
+// ── P1: PositionTracker ──────────────────────────────────────────────────────
+static void test_tracker_partial_fill() {
+    std::printf("tracker_partial_fill\n");
+    PositionTracker tracker;
+    const uint64_t price = 550000;
+    tracker.reserve_buy(10000000000ULL, price);  // 10,000 shares
+    CHECK(tracker.open_buy() == 10000000000ULL, "reservation visible pre-fill");
+
+    const uint64_t t0 = crowdintel::mono_ns();
+    AccountEvent partial =
+        make_fill(0, 0.55, 3000.0, /*order=*/11, /*event=*/101);
+    partial.remaining = 7000000000ULL;
+    tracker.apply(partial);
+    const uint64_t applied_ns = crowdintel::mono_ns() - t0;
+
+    CHECK(tracker.net_yes() == 3000000000ULL, "3,000 of 10,000 tracked as inventory");
+    CHECK(tracker.open_buy() == 7000000000ULL, "7,000 remain pending");
+    CHECK(applied_ns < 1000000ULL, "fill applied in <1 ms");
+
+    AccountEvent rest = make_fill(0, 0.55, 7000.0, /*order=*/11, /*event=*/102);
+    tracker.apply(rest);
+    CHECK(tracker.net_yes() == 10000000000ULL && tracker.open_buy() == 0,
+          "second fill completes the order without residue");
+    CHECK(tracker.yes_avg() == 550000, "single-price VWAP is exact");
+
+    // Worst-cost exposure must never double count reservation + inventory.
+    PositionTracker t2;
+    t2.reserve_buy(4000000000ULL, 500000);  // $2,000 worst cost
+    CHECK(t2.exposure_worst_cost() == 2000000000ULL, "worst cost reserved");
+    AccountEvent fill = make_fill(0, 0.50, 4000.0, 12, 103);
+    t2.apply(fill);
+    CHECK(t2.open_buy() == 0 && t2.open_buy_cost() == 0 &&
+              t2.exposure_worst_cost() == 2000000000ULL,
+          "fill moves reservation into inventory without double counting");
+}
+
+static void test_tracker_vwap_pnl_dedup() {
+    std::printf("tracker_vwap_pnl_dedup\n");
+    PositionTracker tracker;
+    tracker.apply(make_fill(0, 0.40, 1000.0, 1, 201));
+    tracker.apply(make_fill(0, 0.60, 1000.0, 2, 202));
+    CHECK(tracker.net_yes() == 2000000000ULL, "two buys accumulate");
+    CHECK(tracker.yes_avg() == 500000, "VWAP of 0.40/0.60 equals 0.50");
+
+    tracker.apply(make_fill(1, 0.80, 500.0, 3, 203));  // sell 500 @ 0.80
+    CHECK(tracker.net_yes() == 1500000000ULL, "sell reduces inventory");
+    CHECK(tracker.realized_pnl() == 150000000LL,  // (0.80-0.50)*500 = $150
+          "realized P&L uses tracked VWAP");
+
+    // Duplicate delivery of trade 203 (e.g. MATCHED then re-sent) is dropped.
+    tracker.apply(make_fill(1, 0.80, 500.0, 3, 203));
+    CHECK(tracker.fills() == 3 && tracker.realized_pnl() == 150000000LL &&
+              tracker.anomalies() == 1,
+          "duplicate trade id cannot double-count a fill");
+
+    // Oversold inventory saturates and is flagged for reconciliation.
+    tracker.apply(make_fill(1, 0.10, 99999.0, 4, 204));
+    CHECK(tracker.net_yes() == 0 && tracker.anomalies() >= 2,
+          "sell beyond inventory clamps net position and flags anomaly");
+}
+
+static void test_tracker_reservations_snapshot() {
+    std::printf("tracker_reservations_snapshot\n");
+    PositionTracker tracker(2000000000ULL, 450000);  // 2,000 YES @ 0.45
+    CHECK(tracker.sellable() == 2000000000ULL, "initial inventory sellable");
+    tracker.reserve_sell(500000000ULL);
+    CHECK(tracker.sellable() == 1500000000ULL,
+          "sell reservation cannot be spent twice");
+    tracker.release_sell(500000000ULL);
+    CHECK(tracker.sellable() == 2000000000ULL, "release restores inventory");
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> bad{0};
+    std::thread writer([&] {
+        uint64_t id = 1000;
+        while (!stop.load(std::memory_order_acquire)) {
+            tracker.apply(make_fill(0, 0.50, 10.0, id, id));
+            ++id;
+        }
+    });
+    std::thread reader([&] {
+        PositionTracker::Snapshot view{};
+        while (!stop.load(std::memory_order_acquire)) {
+            if (tracker.snapshot(view)) {
+                const bool coherent =
+                    view.open_buy == 0 || view.open_buy_cost != 0;
+                if (!coherent) bad.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+    CHECK(bad.load() == 0, "cold snapshots stay coherent under hot writes");
+}
+
+// ── P1: user-channel parser ─────────────────────────────────────────────────
+static void test_user_event_parser() {
+    std::printf("user_event_parser\n");
+    const char* token = "71321045679252212594626395510336467040167069592778062791519851593659551227755";
+    UserEventParser parser(token, nullptr, 42);
+
+    const char* trade =
+        "{\"event_type\":\"trade\",\"type\":\"MATCHED\","
+        "\"id\":\"0xtrade1\",\"taker_order_id\":\"0xorder9\","
+        "\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"market\":\"0xbd31dc69a81dc0b5e6b5b9bb6d2e2ebf\",\"side\":\"BUY\","
+        "\"size\":\"3000\",\"price\":\"0.55\",\"fee_rate_bps\":\"0\","
+        "\"status\":\"MATCHED\",\"matchtime\":\"1727000000000\","
+        "\"maker_orders\":[],\"trader_side\":\"TAKER\"}";
+    AccountEvent ev{};
+    CHECK(parser.parse(trade, std::strlen(trade), ev),
+          "MATCHED trade parses");
+    CHECK(ev.type == AccountEvent::Type::FILL && ev.side == 0 &&
+              ev.size == 3000000000ULL && ev.price == 550000 &&
+              ev.event_id != 0 && ev.order_hash != 0,
+          "partial fill normalized with fixed-point size/price and hashed ids");
+
+    const char* mined =
+        "{\"event_type\":\"trade\",\"type\":\"MINED\","
+        "\"id\":\"0xtrade1\",\"taker_order_id\":\"0xorder9\","
+        "\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"side\":\"BUY\",\"size\":\"3000\",\"price\":\"0.55\","
+        "\"status\":\"MINED\"}";
+    AccountEvent dup{};
+    CHECK(parser.parse(mined, std::strlen(mined), dup) &&
+              dup.type == AccountEvent::Type::FILL_MINED &&
+              dup.event_id == ev.event_id,
+          "MINED restatement keeps the same trade id for dedup");
+
+    const char* placement =
+        "{\"event_type\":\"order\",\"type\":\"PLACEMENT\","
+        "\"id\":\"0xorder9\",\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"side\":\"BUY\",\"original_size\":\"10000\",\"size_matched\":\"3000\","
+        "\"price\":\"0.55\",\"outcome\":\"YES\",\"status\":\"LIVE\"}";
+    AccountEvent open{};
+    CHECK(parser.parse(placement, std::strlen(placement), open) &&
+              open.type == AccountEvent::Type::OPEN &&
+              open.remaining == 7000000000ULL,
+          "PLACEMENT normalizes remaining 7,000 of 10,000");
+
+    const char* cancel =
+        "{\"event_type\":\"order\",\"type\":\"CANCELLATION\","
+        "\"id\":\"0xorder9\",\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"side\":\"BUY\",\"original_size\":\"10000\",\"size_matched\":\"3000\","
+        "\"price\":\"0.55\"}";
+    AccountEvent canc{};
+    CHECK(parser.parse(cancel, std::strlen(cancel), canc) &&
+              canc.type == AccountEvent::Type::CANCEL &&
+              canc.order_hash == open.order_hash,
+          "CANCELLATION maps to a reservation release for the same order");
+
+    const char* other_asset =
+        "{\"event_type\":\"trade\",\"type\":\"MATCHED\",\"id\":\"0xt2\","
+        "\"asset_id\":\"42\",\"side\":\"SELL\",\"size\":\"5\","
+        "\"price\":\"0.5\",\"status\":\"MATCHED\"}";
+    AccountEvent ignored{};
+    CHECK(!parser.parse(other_asset, std::strlen(other_asset), ignored),
+          "events for other assets are filtered");
+
+    const char* dup_key =
+        "{\"event_type\":\"trade\",\"event_type\":\"trade\",\"type\":\"MATCHED\","
+        "\"id\":\"0xt3\",\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"side\":\"BUY\",\"size\":\"5\",\"price\":\"0.5\"}";
+    AccountEvent hostile{};
+    CHECK(!parser.parse(dup_key, std::strlen(dup_key), hostile),
+          "duplicate semantic keys fail closed");
+
+    const char* failed =
+        "{\"event_type\":\"trade\",\"type\":\"FAILED\","
+        "\"id\":\"0xt4\",\"taker_order_id\":\"0xorder9\","
+        "\"asset_id\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\","
+        "\"side\":\"BUY\",\"size\":\"7000\",\"price\":\"0.55\","
+        "\"status\":\"FAILED\"}";
+    AccountEvent fail{};
+    CHECK(parser.parse(failed, std::strlen(failed), fail) &&
+              fail.type == AccountEvent::Type::FAILED,
+          "FAILED trade normalizes as a release, never as a fill");
+}
+
+// ── P1: engine + tracker integration (no double exposure) ───────────────────
+static void init_fixture(MarketConfig& cfg, EIP712Signer& signer) {
+    const char* key_text =
+        "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b";
+    uint8_t key[32];
+    if (!parse_hex_bytes(key_text, 64, key, sizeof(key))) std::abort();
+    if (!signer.init(key, false)) std::abort();
+    secure_zero(key, sizeof(key));
+    const char* token =
+        "71321045679252212594626395510336467040167069592778062791519851593659551227755";
+    std::snprintf(cfg.token_id_dec, sizeof(cfg.token_id_dec), "%s", token);
+    if (!parse_uint256_dec(token, std::strlen(token), cfg.token_id_be))
+        std::abort();
+    if (cfg.finalize_identity(signer.signer_address()) != nullptr) std::abort();
+    std::snprintf(cfg.owner_api_key, sizeof(cfg.owner_api_key), "test-owner");
+    std::snprintf(cfg.market_slug, sizeof(cfg.market_slug), "layers-market");
+    cfg.market_hash = alpha_hash_bytes(cfg.market_slug,
+                                       std::strlen(cfg.market_slug));
+}
+
+static AlphaSignal make_buy_signal(const MarketConfig& cfg, double p_win,
+                                   uint64_t id) {
+    AlphaSignal signal{};
+    signal.direction_hint = K_SIDE_BUY;
+    signal.p_win = p_win;
+    signal.confidence = 0.95;
+    signal.q_value = 0.01;
+    signal.timestamp_ns = AlphaParser::realtime_ns();
+    signal.market_hash = cfg.market_hash;
+    signal.signal_id = id;
+    return signal;
+}
+
+static void test_engine_tracker_integration() {
+    std::printf("engine_tracker_integration\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.max_order_usd = 200.0;
+    cfg.max_exposure_usd = 300.0;
+    cfg.max_daily_loss_usd = 500.0;
+    cfg.bankroll_usd = 10000.0;
+    cfg.min_size_shares = 5000000;
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    const Level2Entry bids[] = {{470000, 5000000000ULL}};
+    const Level2Entry asks[] = {{530000, 5000000000ULL}};
+    book.set_book(bids, 1, asks, 1);
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<AccountEvent> account_q;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    PositionTracker tracker;
+    EngineLayers layers{};
+    layers.account_q = &account_q;
+    layers.tracker = &tracker;
+    layers.journal_q = &journal_q;
+
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    pool.rebuild(470000, 530000, 400000000ULL, 10000);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, nullptr, &layers);
+
+    // Signal 1: BUY ~54,716 @ 0.53 → reserved (mock accepts, no fill yet).
+    signals.try_push(make_buy_signal(cfg, 0.75, 1));
+    CHECK(engine.run_tick() == TickResult::SUBMITTED,
+          "first buy signal submits");
+    CHECK(tracker.open_buy() > 0 && tracker.net_yes() == 0,
+          "accepted order is a reservation, not inventory");
+    const uint64_t reserved = tracker.open_buy();
+
+    // Signal 2: an identical buy is budget-capped; the tracker must account
+    // for both reservations before the partial fill below is applied.
+    signals.try_push(make_buy_signal(cfg, 0.75, 2));
+    const TickResult second = engine.run_tick();
+    CHECK(second == TickResult::SUBMITTED || second == TickResult::TOO_SMALL ||
+              second == TickResult::RISK_REJECTED,
+          "second buy respects budget caps");
+    const uint64_t reserved_total = tracker.open_buy();
+    CHECK(reserved_total >= reserved,
+          "both accepted buys accumulate reservations (no overwrite)");
+
+    // Partial fill arrives through the user channel: 40% of the reservation.
+    const uint64_t fill_qty = reserved_total * 2 / 5;
+    AccountEvent fill = make_fill(0, 0.53, 0.0, 5, 9001);
+    fill.size = fill_qty;
+    account_q.try_push(fill);
+    CHECK(engine.run_tick() == TickResult::ACCOUNT_APPLIED,
+          "account event is processed in housekeeping");
+    CHECK(tracker.net_yes() == fill_qty &&
+              tracker.open_buy() == reserved_total - fill_qty,
+          "partial fill splits reservation/inventory exactly");
+
+    // SELL signal with inventory now available: must succeed, reserving at
+    // most the reconciled (filled) inventory.
+    AlphaSignal sell = make_buy_signal(cfg, 0.20, 3);
+    sell.direction_hint = K_SIDE_SELL;
+    signals.try_push(sell);
+    CHECK(engine.run_tick() == TickResult::SUBMITTED,
+          "sell uses reconciled inventory, not bootstrap guesses");
+    const uint64_t first_sell_reserved = tracker.open_sell();
+    CHECK(first_sell_reserved > 0 && first_sell_reserved <= fill_qty,
+          "sell reservation never exceeds filled inventory");
+
+    // A second SELL can only take the remainder; cumulative reservations must
+    // never exceed the filled inventory (no duplicated exposure).
+    AlphaSignal sell2 = make_buy_signal(cfg, 0.20, 4);
+    sell2.direction_hint = K_SIDE_SELL;
+    signals.try_push(sell2);
+    const TickResult sell2_result = engine.run_tick();
+    CHECK(sell2_result == TickResult::SUBMITTED ||
+              sell2_result == TickResult::NO_INVENTORY,
+          "second sell either takes the exact remainder or finds nothing");
+    CHECK(tracker.open_sell() <= tracker.net_yes(),
+          "cumulative sell reservations never duplicate inventory");
+    CHECK(tracker.sellable() == 0,
+          "inventory is fully reserved after both sells");
+
+    // A third SELL must find nothing sellable at all.
+    AlphaSignal sell3 = make_buy_signal(cfg, 0.20, 5);
+    sell3.direction_hint = K_SIDE_SELL;
+    signals.try_push(sell3);
+    CHECK(engine.run_tick() == TickResult::NO_INVENTORY,
+          "third sell cannot duplicate exposure of the same inventory");
+
+    // Journal captured fill + orders.
+    JournalEvent jrn{};
+    unsigned seen = 0;
+    while (journal_q.try_pop(jrn)) ++seen;
+    CHECK(seen >= 3, "journal recorded fills and order outcomes");
+}
+
+// ── P2: RiskManager units ────────────────────────────────────────────────────
+static void test_risk_units() {
+    std::printf("risk_manager_units\n");
+    RiskLimits limits{};
+    limits.stop_loss_pct = 0.20;
+    limits.max_daily_loss_usd = 50.0;
+    limits.max_market_exposure_usd = 100.0;
+    limits.max_portfolio_exposure_usd = 200.0;
+    RiskManager risk(limits);
+    CHECK(!risk.killed(), "kill starts unlatched");
+    CHECK(risk.authorize(0, 50.0, 40.0, 60.0), "order within caps authorized");
+    CHECK(!risk.authorize(0, 70.0, 40.0, 60.0),
+          "market exposure cap denies order");
+    CHECK(!risk.authorize(0, 50.0, 40.0, 160.0),
+          "portfolio exposure cap denies order");
+    CHECK(RiskManager::unrealized_pnl(100000000, 700000, 400000) ==
+              -30000000LL,
+          "long 100 @0.70 marked at bid 0.40 is -30 USD floating");
+    CHECK(RiskManager::unrealized_pnl(0, 700000, 400000) == 0,
+          "flat book has no floating P&L");
+
+    CHECK(risk.maintain_day_anchor(-10000000LL), "first day anchors base");
+    CHECK(!risk.maintain_day_anchor(-5000000LL), "same day keeps its base");
+    CHECK(risk.day_realized(-5000000LL) == 5000000LL,
+          "day realized is measured from the anchored base");
+
+    risk.latch_kill();
+    CHECK(risk.killed() && !risk.authorize(0, 1.0, 0.0, 0.0),
+          "latched kill denies every new order");
+}
+
+static void test_risk_evaluate_ladder() {
+    std::printf("risk_evaluate_ladder\n");
+    RiskLimits limits{};
+    limits.stop_loss_pct = 0.30;
+    limits.hedge_trigger_pct = 0.10;
+    limits.max_daily_loss_usd = 1000.0;
+    limits.max_market_exposure_usd = 100000.0;
+    limits.max_portfolio_exposure_usd = 100000.0;
+    RiskManager risk(limits);
+    risk.maintain_day_anchor(0);
+
+    PositionTracker tracker(100000000ULL, 700000);  // 100 YES @ 0.70
+    OrderBookL2::Top top{};
+    top.bid = {660000, 1000000};   // drop 5.7% — no action
+    top.ask = {680000, 1000000};
+    top.updated_ns = crowdintel::mono_ns();
+    RiskDecision decision = risk.evaluate(top, tracker, 300000, 320000);
+    CHECK(decision.action == RiskAction::NONE, "small dip triggers nothing");
+
+    top.bid = {620000, 1000000};   // drop 11.4% — hedge triggers first
+    decision = risk.evaluate(top, tracker, 300000, 320000);
+    CHECK(decision.action == RiskAction::HEDGE &&
+              decision.shares == 100000000ULL,
+          "hedge trigger fires before the stop-loss");
+
+    top.bid = {450000, 1000000};   // drop 35.7% — stop-loss takes priority
+    decision = risk.evaluate(top, tracker, 300000, 320000);
+    CHECK(decision.action == RiskAction::CLOSE &&
+              decision.shares == 100000000ULL &&
+              decision.projected_loss == -25000000LL,
+          "stop-loss closes the whole position and projects the loss");
+
+    // Daily-loss kill: realized −80 against a 1000 budget does nothing…
+    PositionTracker burnt(100000000ULL, 900000);
+    burnt.apply(make_fill(1, 0.10, 100.0, 1, 77));  // realize −80 USD
+    RiskLimits tight = limits;
+    tight.max_daily_loss_usd = 50.0;
+    risk.configure(tight);
+    decision = risk.evaluate(top, burnt, 0, 0);
+    CHECK(decision.action == RiskAction::KILL && risk.killed(),
+          "day loss beyond budget latches the kill switch");
+}
+
+// ── P2: engine stop-loss integration (acceptance: 0.70 → 0.10 crash) ────────
+static void test_engine_stop_loss_on_crash() {
+    std::printf("engine_stop_loss_on_crash\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.stop_loss_pct = 0.30;
+    cfg.max_daily_loss_usd = 500.0;
+    cfg.max_exposure_usd = 10000.0;
+    cfg.max_portfolio_exposure_usd = 10000.0;
+    cfg.initial_position_shares = 100000000ULL;  // 100 YES
+    cfg.initial_position_avg_price = 0.70;
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    Level2Entry bids[1] = {{690000, 100000000000ULL}};
+    Level2Entry asks[1] = {{710000, 100000000000ULL}};
+    book.set_book(bids, 1, asks, 1);
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<AccountEvent> account_q;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    PositionTracker tracker(cfg.initial_position_shares, 700000);
+    RiskLimits limits{};
+    limits.stop_loss_pct = cfg.stop_loss_pct;
+    limits.max_daily_loss_usd = cfg.max_daily_loss_usd;
+    limits.max_market_exposure_usd = cfg.max_exposure_usd;
+    limits.max_portfolio_exposure_usd = cfg.max_portfolio_exposure_usd;
+    RiskManager risk(limits);
+    EngineLayers layers{};
+    layers.account_q = &account_q;
+    layers.tracker = &tracker;
+    layers.journal_q = &journal_q;
+    layers.risk = &risk;
+
+    std::atomic<bool> trading_enabled{true};
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, &trading_enabled, &layers);
+
+    CHECK(engine.run_tick() == TickResult::NO_SIGNAL,
+          "calm book at entry price triggers no protective action");
+
+    // Crash 0.70 → 0.10 across fast steps (the 2-second window of the
+    // acceptance criterion, compressed: marks only move through set_book).
+    bool stop_seen = false;
+    const uint64_t marks[] = {610000, 500000, 390000, 240000, 100000};
+    for (const uint64_t mark : marks) {
+        bids[0] = {mark, 100000000000ULL};
+        asks[0] = {mark + 10000, 100000000000ULL};
+        book.set_book(bids, 1, asks, 1);
+        const TickResult result = engine.run_tick();
+        if (result == TickResult::RISK_STOP_LOSS) {
+            stop_seen = true;
+            break;
+        }
+    }
+    CHECK(stop_seen, "stop-loss fires on the way down without human input");
+    CHECK(client.submissions() == 1,
+          "exactly one protective close order was emitted");
+    CHECK(tracker.open_sell() == 100000000ULL,
+          "the close reserves the entire sellable inventory once");
+
+    // Next ticks do not duplicate the close: reservation exhausts sellable.
+    const TickResult again = engine.run_tick();
+    CHECK(again != TickResult::RISK_STOP_LOSS && client.submissions() == 1,
+          "protective close is not duplicated while in flight");
+
+    // The venue fill lands through the user channel; P&L is realized.
+    account_q.try_push(make_fill(1, 0.10, 100.0, 91, 9101));
+    engine.run_tick();
+    CHECK(tracker.net_yes() == 0 &&
+              tracker.realized_pnl() == -60000000LL,
+          "stop-loss exit realizes the loss: P&L recorded (-60 USD)");
+
+    // Journal proves the trigger and the fill.
+    JournalEvent last{};
+    bool stop_event = false, fill_event = false;
+    while (journal_q.try_pop(last)) {
+        if (last.type == JournalEvent::Type::STOP_LOSS_TRIGGERED) {
+            stop_event = true;
+            CHECK(last.pnl < 0, "stop-loss journal carries projected loss");
+        }
+        if (last.type == JournalEvent::Type::ACCOUNT_FILL) fill_event = true;
+    }
+    CHECK(stop_event && fill_event, "journal contains trigger and exit fill");
+}
+
+static void test_engine_kill_freezes_orders() {
+    std::printf("engine_kill_freezes_orders\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.max_daily_loss_usd = 50.0;
+    cfg.max_exposure_usd = 10000.0;
+    cfg.max_portfolio_exposure_usd = 10000.0;
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    const Level2Entry bids[] = {{470000, 1000000000ULL}};
+    const Level2Entry asks[] = {{530000, 1000000000ULL}};
+    book.set_book(bids, 1, asks, 1);
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<AccountEvent> account_q;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    PositionTracker tracker;  // starts flat; losses happen during this session
+    RiskLimits limits{};
+    limits.max_daily_loss_usd = cfg.max_daily_loss_usd;
+    limits.max_market_exposure_usd = cfg.max_exposure_usd;
+    limits.max_portfolio_exposure_usd = cfg.max_portfolio_exposure_usd;
+    RiskManager risk(limits);
+    EngineLayers layers{};
+    layers.account_q = &account_q;
+    layers.tracker = &tracker;
+    layers.journal_q = &journal_q;
+    layers.risk = &risk;
+
+    std::atomic<bool> trading_enabled{true};
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, &trading_enabled, &layers);
+
+    // Tick 1 anchors the day at zero realized P&L (no position yet).
+    (void)engine.run_tick();
+    // Realize an −$80 loss inside the session: buy 100 @0.90, sell 100 @0.10.
+    account_q.try_push(make_fill(0, 0.90, 100.0, 1, 81));
+    account_q.try_push(make_fill(1, 0.10, 100.0, 2, 82));
+    const TickResult killed = engine.run_tick();
+    CHECK(killed == TickResult::RISK_KILL_SWITCH && !trading_enabled.load(),
+          "day-loss kill latches and freezes the trading flag");
+    CHECK(risk.killed(), "kill state persists in the manager");
+
+    signals.try_push(make_buy_signal(cfg, 0.90, 9));
+    CHECK(engine.run_tick() == TickResult::RISK_REJECTED &&
+              client.submissions() == 0,
+          "post-kill alpha signals are denied before signing");
+}
+
+static void test_engine_hedge_on_dip() {
+    std::printf("engine_hedge_on_dip\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.hedge_trigger_pct = 0.10;
+    cfg.stop_loss_pct = 0.30;
+    cfg.max_daily_loss_usd = 500.0;
+    cfg.max_exposure_usd = 10000.0;
+    cfg.max_portfolio_exposure_usd = 10000.0;
+    std::strcpy(cfg.hedge_token_id_dec, "98765432109876543210");
+    std::memset(cfg.hedge_token_id_be, 0x07, sizeof(cfg.hedge_token_id_be));
+    cfg.initial_position_shares = 100000000ULL;  // 100 YES
+    cfg.initial_position_avg_price = 0.70;
+
+    OrderBookL2 book, hedge_book;
+    book.set_tick_size(10000);
+    hedge_book.set_tick_size(10000);
+    Level2Entry bids[1] = {{600000, 100000000000ULL}};   // drop 14.3% vs 0.70
+    Level2Entry asks[1] = {{610000, 100000000000ULL}};
+    book.set_book(bids, 1, asks, 1);
+    const Level2Entry hbids[] = {{340000, 100000000000ULL}};
+    const Level2Entry hasks[] = {{350000, 100000000000ULL}};
+    hedge_book.set_book(hbids, 1, hasks, 1);
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<AccountEvent> account_q;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    PositionTracker tracker(cfg.initial_position_shares, 700000);
+    RiskLimits limits{};
+    limits.stop_loss_pct = cfg.stop_loss_pct;
+    limits.hedge_trigger_pct = cfg.hedge_trigger_pct;
+    limits.max_daily_loss_usd = cfg.max_daily_loss_usd;
+    limits.max_market_exposure_usd = cfg.max_exposure_usd;
+    limits.max_portfolio_exposure_usd = cfg.max_portfolio_exposure_usd;
+    RiskManager risk(limits);
+    EngineLayers layers{};
+    layers.account_q = &account_q;
+    layers.tracker = &tracker;
+    layers.journal_q = &journal_q;
+    layers.risk = &risk;
+    layers.hedge_book = &hedge_book;
+
+    std::atomic<bool> trading_enabled{true};
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, &trading_enabled, &layers);
+
+    const TickResult result = engine.run_tick();
+    CHECK(result == TickResult::RISK_HEDGE && client.submissions() == 1,
+          "dip below hedge trigger emits one hedge buy on the complement");
+    CHECK(tracker.net_yes() == 100000000ULL && tracker.net_hedge() == 0,
+          "YES inventory untouched; hedge not yet filled");
+
+    // The dip persists but the hedge is already complete: no duplicate hedge
+    // (shares = net - net_hedge becomes zero after the hedge fill lands).
+    account_q.try_push(make_fill(0, 0.35, 100.0, 55, 5501, 1));  // hedge fill
+    const TickResult after = engine.run_tick();
+    CHECK(after != TickResult::RISK_HEDGE && client.submissions() == 1,
+          "no duplicate hedge once the complement leg is covered");
+    CHECK(tracker.net_hedge() == 100000000ULL &&
+              tracker.net_yes() == 100000000ULL,
+          "hedge fill builds complement inventory at venue truth");
+    CHECK(tracker.realized_pnl() == 0,
+          "hedging locks the spread: nothing realized until resolution");
+}
+
+int main() {
+    std::printf("== CROWDINTEL layer tests ==\n");
+    test_tracker_partial_fill();
+    test_tracker_vwap_pnl_dedup();
+    test_tracker_reservations_snapshot();
+    test_user_event_parser();
+    test_engine_tracker_integration();
+    test_risk_units();
+    test_risk_evaluate_ladder();
+    test_engine_stop_loss_on_crash();
+    test_engine_kill_freezes_orders();
+    test_engine_hedge_on_dip();
+    std::printf("== %s (%d failures) ==\n", g_failures ? "FAILED" : "ALL PASS",
+                g_failures);
+    return g_failures ? 1 : 0;
+}

@@ -163,9 +163,19 @@ add_executable(l2_backtester ../tests/replay/l2_backtester.cpp)
 crowdintel_target(l2_backtester)
 set_target_properties(l2_backtester PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(test_layers ../tests/unit/test_layers.cpp)
+crowdintel_target(test_layers)
+if(HAVE_NETWORK)
+    target_compile_definitions(test_layers PRIVATE CROWDINTEL_HAVE_NETWORK=1)
+    target_link_libraries(test_layers PRIVATE
+        CURL::libcurl OpenSSL::SSL OpenSSL::Crypto)
+endif()
+set_target_properties(test_layers PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 enable_testing()
 add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
 add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
+add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
 # latency_bench is a benchmark, not a correctness test; CI invokes it explicitly.

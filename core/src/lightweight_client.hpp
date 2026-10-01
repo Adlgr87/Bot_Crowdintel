@@ -45,6 +45,7 @@ public:
 
     ~LightweightCLOBClient() {
         if (curl_) curl_easy_cleanup(curl_);
+        if (rest_curl_) curl_easy_cleanup(rest_curl_);
         secure_zero(secret_raw_, sizeof(secret_raw_));
         secure_zero(&hmac_, sizeof(hmac_));
         secure_zero(resp_, sizeof(resp_));
@@ -77,51 +78,8 @@ public:
             return result;
         }
 
-        char timestamp[24];
-        const size_t timestamp_len = u64_to_dec(now_unix_seconds(), timestamp);
-
-        // L2 HMAC: timestamp + method + path + exact body bytes.
-        uint8_t digest[32];
-        char message[1600 + 64];
-        size_t message_len = 0;
-        std::memcpy(message + message_len, timestamp, timestamp_len);
-        message_len += timestamp_len;
-        std::memcpy(message + message_len, "POST/order", 10);
-        message_len += 10;
-        std::memcpy(message + message_len, body.buf, body.len);
-        message_len += body.len;
-        hmac_.compute(reinterpret_cast<const uint8_t*>(message), message_len, digest);
-        secure_zero(message, message_len);
-
-        char signature_b64[48];
-        const size_t signature_len = base64url_encode(digest, 32, signature_b64);
-        signature_b64[signature_len] = '\0';
-        secure_zero(digest, sizeof(digest));
-
-        char address_header[80], signature_header[96], timestamp_header[48];
-        char api_key_header[96], passphrase_header[160];
-        std::snprintf(address_header, sizeof(address_header),
-                      "POLY_ADDRESS: %s", cfg_.api_address_hex);
-        std::snprintf(signature_header, sizeof(signature_header),
-                      "POLY_SIGNATURE: %s", signature_b64);
-        std::snprintf(timestamp_header, sizeof(timestamp_header),
-                      "POLY_TIMESTAMP: %.*s", static_cast<int>(timestamp_len), timestamp);
-        std::snprintf(api_key_header, sizeof(api_key_header),
-                      "POLY_API_KEY: %s", cfg_.owner_api_key);
-        std::snprintf(passphrase_header, sizeof(passphrase_header),
-                      "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
-
         curl_slist* headers = nullptr;
-        bool headers_ok = append_header(headers, address_header);
-        headers_ok = append_header(headers, signature_header) && headers_ok;
-        headers_ok = append_header(headers, timestamp_header) && headers_ok;
-        headers_ok = append_header(headers, api_key_header) && headers_ok;
-        headers_ok = append_header(headers, passphrase_header) && headers_ok;
-        headers_ok = append_header(headers, "Content-Type: application/json") &&
-                     headers_ok;
-        if (!headers_ok) {
-            curl_slist_free_all(headers);
-            secure_zero(signature_b64, sizeof(signature_b64));
+        if (!build_l2_headers(headers, "POST", "/order", body.buf, body.len)) {
             std::snprintf(result.error, sizeof(result.error), "header allocation failed");
             return result;
         }
@@ -152,6 +110,115 @@ public:
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
         secure_zero(signature_b64, sizeof(signature_b64));
         return result;
+    }
+
+    // ── Cold-path REST (reconciliation thread only) ─────────────────────────
+    // Authenticated GET with L2 HMAC over timestamp+method+path.  Uses its own
+    // curl handle: the order handle is owned by the gateway worker.
+    // Returns bytes written (0 on failure); the body is NUL-terminated.
+    size_t rest_get(const char* path, char* out, size_t cap) {
+        if (!out || cap < 2 || !rest_ready()) return 0;
+        char url[224];
+        const int n = std::snprintf(url, sizeof(url), "%s%s", cfg_.clob_host,
+                                    path);
+        if (n <= 0 || static_cast<size_t>(n) >= sizeof(url)) return 0;
+        curl_easy_setopt(rest_curl_, CURLOPT_URL, url);
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPGET, 1L);
+        curl_slist* headers = nullptr;
+        if (!build_l2_headers(headers, "GET", path, nullptr, 0))
+            return 0;
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, headers);
+        const CURLcode code = curl_easy_perform(rest_curl_);
+        curl_slist_free_all(headers);
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, nullptr);
+        if (code != CURLE_OK || rest_resp_overflow_) return 0;
+        long http_code = 0;
+        curl_easy_getinfo(rest_curl_, CURLINFO_RESPONSE_CODE, &http_code);
+        if (http_code < 200 || http_code >= 300 || rest_resp_len_ >= cap)
+            return 0;
+        std::memcpy(out, rest_resp_, rest_resp_len_);
+        out[rest_resp_len_] = '\0';
+        return rest_resp_len_;
+    }
+
+    // DELETE /cancel-all — venue cancels every resting order of the account.
+    // Called from the reconcile/kill thread; never from the hot path.
+    bool cancel_all() {
+        static constexpr char PATH[] = "/cancel-all";
+        if (!rest_ready()) return false;
+        char url[224];
+        const int n = std::snprintf(url, sizeof(url), "%s%s", cfg_.clob_host,
+                                    PATH);
+        if (n <= 0 || static_cast<size_t>(n) >= sizeof(url)) return false;
+        curl_easy_setopt(rest_curl_, CURLOPT_URL, url);
+        curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, "DELETE");
+        curl_slist* headers = nullptr;
+        if (!build_l2_headers(headers, "DELETE", PATH, nullptr, 0)) {
+            curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, nullptr);
+            return false;
+        }
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, headers);
+        const CURLcode code = curl_easy_perform(rest_curl_);
+        curl_slist_free_all(headers);
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, nullptr);
+        curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, nullptr);
+        long http_code = 0;
+        curl_easy_getinfo(rest_curl_, CURLINFO_RESPONSE_CODE, &http_code);
+        return code == CURLE_OK && http_code >= 200 && http_code < 300;
+    }
+
+    // Extract total size and VWAP for one asset from GET /data/positions.
+    // Offline-testable pure parser: top-level array of objects.
+    static bool parse_positions_for_asset(const char* json, size_t len,
+                                          const char* asset_id,
+                                          uint64_t& shares_out,
+                                          uint64_t& avg_price_out) {
+        shares_out = 0;
+        avg_price_out = 0;
+        if (!json || !asset_id || len == 0 ||
+            !bounded_json::valid_document(json, len))
+            return false;
+        size_t begin = 0;
+        while (begin < len &&
+               std::isspace(static_cast<unsigned char>(json[begin]))) ++begin;
+        if (begin == len || json[begin] != '[') return false;
+        const char* end = json + len;
+        const char* cursor = json + begin + 1;
+        bool found = false;
+        crowd_uint128_t total_cost = 0;
+        uint64_t total_shares = 0;
+        while (cursor < end) {
+            const char* open = static_cast<const char*>(
+                std::memchr(cursor, '{', static_cast<size_t>(end - cursor)));
+            if (!open) break;
+            const char* close = find_matching_static(open, end, '{', '}');
+            if (!close) break;
+            char asset[96]{}, size_text[32]{}, avg_text[32]{};
+            const size_t object_len = static_cast<size_t>(close + 1 - open);
+            const bool has_asset =
+                key_occurrences(open, object_len, "asset") == 1 &&
+                extract_json_string(open, object_len, "asset", asset,
+                                    sizeof(asset));
+            if (has_asset && std::strcmp(asset, asset_id) == 0 &&
+                extract_json_string(open, object_len, "size", size_text,
+                                    sizeof(size_text)) &&
+                extract_json_string(open, object_len, "avgPrice", avg_text,
+                                    sizeof(avg_text))) {
+                uint64_t size = 0, avg = 0;
+                if (parse_fixed1e6(size_text, std::strlen(size_text), size) &&
+                    parse_fixed1e6(avg_text, std::strlen(avg_text), avg)) {
+                    total_cost += static_cast<crowd_uint128_t>(size) * avg;
+                    total_shares += size;
+                    found = true;
+                }
+            }
+            cursor = close + 1;
+        }
+        if (!found || total_shares == 0) return false;
+        shares_out = total_shares;
+        avg_price_out = static_cast<uint64_t>(
+            total_cost / static_cast<crowd_uint128_t>(total_shares));
+        return true;
     }
 
     // Pure semantic classifier used by submit() and response fixtures. HTTP
@@ -226,6 +293,139 @@ public:
     }
 
 private:
+    // L2 authentication headers: HMAC(timestamp + method + path + body).
+    // Shared by order submission, authenticated GETs and DELETE /cancel-all.
+    bool build_l2_headers(curl_slist*& headers, const char* method,
+                          const char* path, const char* body,
+                          size_t body_len) {
+        headers = nullptr;
+        char timestamp[24];
+        const size_t timestamp_len = u64_to_dec(now_unix_seconds(), timestamp);
+
+        uint8_t digest[32];
+        char message[1600 + 64];
+        size_t message_len = 0;
+        std::memcpy(message + message_len, timestamp, timestamp_len);
+        message_len += timestamp_len;
+        const size_t method_len = std::strlen(method);
+        const size_t path_len = std::strlen(path);
+        if (message_len + method_len + path_len + body_len >= sizeof(message))
+            return false;
+        std::memcpy(message + message_len, method, method_len);
+        message_len += method_len;
+        std::memcpy(message + message_len, path, path_len);
+        message_len += path_len;
+        if (body && body_len) {
+            std::memcpy(message + message_len, body, body_len);
+            message_len += body_len;
+        }
+        hmac_.compute(reinterpret_cast<const uint8_t*>(message), message_len,
+                      digest);
+        secure_zero(message, message_len);
+
+        char signature_b64[48];
+        const size_t signature_len = base64url_encode(digest, 32, signature_b64);
+        signature_b64[signature_len] = '\0';
+        secure_zero(digest, sizeof(digest));
+
+        char address_header[80], signature_header[96], timestamp_header[48];
+        char api_key_header[96], passphrase_header[160];
+        std::snprintf(address_header, sizeof(address_header),
+                      "POLY_ADDRESS: %s", cfg_.api_address_hex);
+        std::snprintf(signature_header, sizeof(signature_header),
+                      "POLY_SIGNATURE: %s", signature_b64);
+        std::snprintf(timestamp_header, sizeof(timestamp_header),
+                      "POLY_TIMESTAMP: %.*s", static_cast<int>(timestamp_len),
+                      timestamp);
+        std::snprintf(api_key_header, sizeof(api_key_header),
+                      "POLY_API_KEY: %s", cfg_.owner_api_key);
+        std::snprintf(passphrase_header, sizeof(passphrase_header),
+                      "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
+        secure_zero(signature_b64, sizeof(signature_b64));
+
+        bool ok = append_header(headers, address_header);
+        ok = append_header(headers, signature_header) && ok;
+        ok = append_header(headers, timestamp_header) && ok;
+        ok = append_header(headers, api_key_header) && ok;
+        ok = append_header(headers, passphrase_header) && ok;
+        ok = append_header(headers, "Content-Type: application/json") && ok;
+        if (!ok) curl_slist_free_all(headers);
+        return ok;
+    }
+
+    // Lazy REST handle for the reconciliation thread (cold path only).
+    bool rest_ready() {
+        if (rest_curl_) {
+            rest_resp_len_ = 0;
+            rest_resp_overflow_ = false;
+            rest_resp_[0] = '\0';
+            return true;
+        }
+        rest_curl_ = curl_easy_init();
+        if (!rest_curl_) return false;
+        curl_easy_setopt(rest_curl_, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(rest_curl_, CURLOPT_TCP_NODELAY, 1L);
+        curl_easy_setopt(rest_curl_, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
+        curl_easy_setopt(rest_curl_, CURLOPT_TIMEOUT_MS, 3000L);
+        curl_easy_setopt(rest_curl_, CURLOPT_WRITEFUNCTION, rest_write_cb);
+        curl_easy_setopt(rest_curl_, CURLOPT_WRITEDATA, this);
+        curl_easy_setopt(rest_curl_, CURLOPT_ACCEPT_ENCODING, "identity");
+        curl_easy_setopt(rest_curl_, CURLOPT_USERAGENT, "crowdintel-bot/2.1");
+        curl_easy_setopt(rest_curl_, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(rest_curl_, CURLOPT_SSL_VERIFYHOST, 2L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(rest_curl_, CURLOPT_PROTOCOLS_STR, "https");
+        curl_easy_setopt(rest_curl_, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+        curl_easy_setopt(rest_curl_, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        curl_easy_setopt(rest_curl_, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+        curl_easy_setopt(rest_curl_, CURLOPT_FOLLOWLOCATION, 0L);
+        if (cfg_.tls_pin[0])
+            curl_easy_setopt(rest_curl_, CURLOPT_PINNEDPUBLICKEY, cfg_.tls_pin);
+        rest_resp_len_ = 0;
+        rest_resp_overflow_ = false;
+        return true;
+    }
+
+    static size_t rest_write_cb(char* ptr, size_t size, size_t nmemb,
+                                void* userdata) {
+        auto* self = static_cast<LightweightCLOBClient*>(userdata);
+        if (size != 0 && nmemb > SIZE_MAX / size) {
+            self->rest_resp_overflow_ = true;
+            return 0;
+        }
+        const size_t total = size * nmemb;
+        const size_t available =
+            sizeof(self->rest_resp_) - self->rest_resp_len_ - 1;
+        const size_t take = total < available ? total : available;
+        if (total > available) self->rest_resp_overflow_ = true;
+        if (take) {
+            std::memcpy(self->rest_resp_ + self->rest_resp_len_, ptr, take);
+            self->rest_resp_len_ += take;
+            self->rest_resp_[self->rest_resp_len_] = '\0';
+        }
+        return total;
+    }
+
+    static const char* find_matching_static(const char* open, const char* end,
+                                            char open_char, char close_char) {
+        int depth = 0;
+        bool in_string = false, escaped = false;
+        for (const char* p = open; p < end; ++p) {
+            if (in_string) {
+                if (escaped) escaped = false;
+                else if (*p == '\\') escaped = true;
+                else if (*p == '"') in_string = false;
+                continue;
+            }
+            if (*p == '"') in_string = true;
+            else if (*p == open_char) ++depth;
+            else if (*p == close_char && --depth == 0) return p;
+        }
+        return nullptr;
+    }
+
     void configure_common() {
         curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl_, CURLOPT_TCP_NODELAY, 1L);
@@ -381,6 +581,7 @@ private:
 
     const MarketConfig& cfg_;
     CURL* curl_ = nullptr;
+    CURL* rest_curl_ = nullptr;  // reconcile thread only
     char order_url_[192]{};
     char warmup_url_[192]{};
     HmacSha256 hmac_{};
@@ -389,6 +590,9 @@ private:
     char resp_[2048]{};
     size_t resp_len_ = 0;
     bool resp_overflow_ = false;
+    char rest_resp_[8192]{};
+    size_t rest_resp_len_ = 0;
+    bool rest_resp_overflow_ = false;
 };
 
 #endif  // LIGHTWEIGHT_CLIENT_HPP
