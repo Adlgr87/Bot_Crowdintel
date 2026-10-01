@@ -14,6 +14,9 @@
 
 #include "../../core/crypto/eip712_signer.hpp"
 #include "../../core/include/order_book.hpp"
+#include "../../core/include/bayesian_engine.hpp"
+#include "../../core/include/evidence.hpp"
+#include "../../core/include/source_reliability.hpp"
 #include "../../core/include/spsc_ring_buffer.hpp"
 #include "../../core/src/bench_engine.hpp"
 #include "alpha_parser.hpp"
@@ -98,10 +101,11 @@ int main() {
     }
 
     std::vector<uint64_t> pool_hit, inline_sign, sign_only, pool_lookup,
-        layered_hit;
+        layered_hit, bayes_update, bayes_read;
     pool_hit.reserve(SAMPLES); inline_sign.reserve(SAMPLES);
     sign_only.reserve(SAMPLES); pool_lookup.reserve(SAMPLES);
-    layered_hit.reserve(SAMPLES);
+    layered_hit.reserve(SAMPLES); bayes_update.reserve(SAMPLES);
+    bayes_read.reserve(SAMPLES);
 
     size_t successful = 0;
     for (size_t i = 0; i < SAMPLES; ++i) {
@@ -154,10 +158,16 @@ int main() {
     llimits.max_portfolio_exposure_usd = 1000000000.0;
     RiskManager lrisk(llimits);
     VolatilityGate lgate(lcfg);
+    BayesianEngine lbayes;
+    SourceReliability lsources;
+    auto levidence = std::make_unique<SPSC_RingBuffer<EvidenceEvent>>();
     EngineLayers llayers{};
     llayers.tracker = &ltracker;
     llayers.risk = &lrisk;
     llayers.volatility = &lgate;
+    llayers.evidence_q = levidence.get();
+    llayers.bayes = &lbayes;
+    llayers.sources = &lsources;
     BenchEngine lengine(lcfg, lbook, *lsignals, signer, lpool, &llayers);
     for (size_t i = 0; i < WARMUP; ++i) {
         if (i % PresignedOrderPool::SIZE_BUCKETS == 0)
@@ -215,6 +225,26 @@ int main() {
         pool_lookup.push_back(end - begin);
     }
 
+    // P4 brain microbench: closed-form Beta-Binomial COUNT update and the
+    // posterior read the hot loop performs per drain/tick.  These are the
+    // ONLY brain costs on the steady path and must stay in the tens of ns.
+    BayesianEngine beng;
+    beng.ensure_prior(0.40, 24.0);
+    for (size_t i = 0; i < SAMPLES; ++i) {
+        const uint64_t begin = clock_ns();
+        beng.update_count(0, 32, 22, 900000);
+        const uint64_t end = clock_ns();
+        bayes_update.push_back(end - begin);
+    }
+    double acc = 0.0;
+    for (size_t i = 0; i < SAMPLES; ++i) {
+        const uint64_t begin = clock_ns();
+        acc += beng.posterior();
+        const uint64_t end = clock_ns();
+        bayes_read.push_back(end - begin);
+    }
+    if (acc < 0.0) std::printf("unreachable %f\n", acc);  // keep the reads live
+
     auto report = [](const char* name, std::vector<uint64_t>& samples) {
         std::sort(samples.begin(), samples.end());
         auto percentile = [&](double p) {
@@ -238,6 +268,8 @@ int main() {
     report("decision+inline-sign+mock-submit", inline_sign);
     report("sign only (Keccak+ECDSA)", sign_only);
     report("consumable pool lookup+copy", pool_lookup);
+    report("bayes posterior update", bayes_update);
+    report("bayes posterior read", bayes_read);
     std::printf("No network, HMAC, DNS, TCP or TLS is included in these values.\n");
     return 0;
 }

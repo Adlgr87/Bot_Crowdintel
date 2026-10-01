@@ -88,6 +88,7 @@ struct MarketConfig {
     double bayes_min_reliability = 0.35;  // source weight gate [0,1]
     char bayes_sources[512]{};            // "id:weight,id:weight,…" (0..1)
     char bayes_recal_file[192]{};         // optional cold recalibration file
+    char evidence_file[192]{};            // NDJSON evidence replay/tail file
     bool bayes_enable = true;
 
     // Alpha HTTP receiver (designed to sit behind a TLS/auth reverse proxy).
@@ -315,6 +316,7 @@ struct MarketConfig {
                       mock_mode ? "mock-market" : "") ||
             !copy_env(bayes_sources, "BOT_BAYES_SOURCES", "") ||
             !copy_env(bayes_recal_file, "BOT_BAYES_RECAL_FILE", "") ||
+            !copy_env(evidence_file, "BOT_EVIDENCE_FILE", "") ||
             !copy_env(alpha_bind, "BOT_ALPHA_BIND", alpha_bind))
             return "configuration string exceeds its bounded capacity";
         if (!valid_bayes_sources(bayes_sources))

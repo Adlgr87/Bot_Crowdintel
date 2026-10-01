@@ -11,6 +11,9 @@ checks = {
     "decision+pool+layers+mock-submit": 25_000,
     "decision+inline-sign+mock-submit": 500_000,
     "sign only (Keccak+ECDSA)": 500_000,
+    # P4 brain: closed-form conjugate update/read must stay in tens of ns.
+    "bayes posterior update": 1_000,
+    "bayes posterior read": 1_000,
 }
 failed = False
 for label, budget_ns in checks.items():

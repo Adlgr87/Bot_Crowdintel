@@ -18,13 +18,17 @@
 #include <thread>
 
 #include "../../core/include/account_events.hpp"
+#include "../../core/include/bayesian_engine.hpp"
+#include "../../core/include/evidence.hpp"
 #include "../../core/include/journal.hpp"
+#include "../../core/include/source_reliability.hpp"
 #include "../../core/include/order_book.hpp"
 #include "../../core/include/position_tracker.hpp"
 #include "../../core/include/risk_manager.hpp"
 #include "../../core/include/spsc_ring_buffer.hpp"
 #include "../../core/include/time_utils.hpp"
 #include "../../core/include/volatility_gate.hpp"
+#include <cmath>
 #include "../../core/src/execution_engine.hpp"
 #include "../../core/src/market_config.hpp"
 #include "../../core/src/mock_client.hpp"
@@ -830,6 +834,174 @@ static void test_engine_shock_acceptance() {
           "after the cooldown the gate adapts: flow resumes at new prices");
 }
 
+// ── P4: BayesianEngine posterior math ────────────────────────────────────────
+static void test_bayes_math() {
+    std::printf("bayes_math\n");
+    {   // Prior from mid × N0 is an exact Beta(N0·p, N0·(1−p)).
+        BayesianEngine eng;
+        eng.ensure_prior(0.40, 24.0);
+        CHECK(eng.has_prior(), "prior anchored at the book mid");
+        CHECK(std::fabs(eng.posterior() - 0.40) < 1e-12,
+              "prior posterior equals the mid that seeded it");
+        // Acceptance-style COUNT evidence: 32 trials, 22 YES, weight 0.9.
+        // α0: 9.6 + 22·0.9 = 29.4;  α1: 14.4 + 10·0.9 = 23.4.
+        eng.update_count(0, 32, 22, 900000);
+        const double p = eng.posterior();
+        CHECK(std::fabs(p - (29.4 / 52.8)) < 1e-12 && p > 0.55 && p < 0.56,
+              "beta-binomial posterior lands at 0.557 ($0.40 + high-rel)");
+        CHECK(eng.count_events() == 1 && eng.events() == 1 &&
+                  eng.lr_events() == 0,
+              "event accounting is exact");
+    }
+    {   // LR evidence multiplies the log-odds exactly through the sigmoid.
+        BayesianEngine eng;
+        eng.ensure_prior(0.40, 24.0);
+        eng.update_lr(693147, 1000000);  // +ln2 at full weight
+        const double g = std::log(0.4 / 0.6) + 0.693147;
+        const double expected = 1.0 / (1.0 + std::exp(-g));
+        CHECK(std::fabs(eng.posterior() - expected) < 1e-9,
+              "lr evidence shifts the posterior via the closed sigmoid");
+        CHECK(eng.count_events() == 0 && eng.lr_events() == 1,
+              "lr accounting kept separate from counts");
+    }
+    {   // Dirichlet: complement mass renormalizes proportionally over the
+        // other slots; totals and shape stay conjugate-exact.
+        BayesianEngine eng;
+        eng.ensure_prior(0.40, 24.0);
+        eng.update_count(2, 12, 9, 1000000);  // 9 of 12 hits on outcome 2
+        // α0 = 9.6 + 3·(9.6/24) = 10.8; α1 = 14.4 + 3·(14.4/24) = 16.2;
+        // α2 = 9;  total 36 → 0.30 / 0.45 / 0.25.
+        CHECK(std::fabs(eng.posterior(0) - 0.30) < 1e-12 &&
+                  std::fabs(eng.posterior(1) - 0.45) < 1e-12 &&
+                  std::fabs(eng.posterior(2) - 0.25) < 1e-12,
+              "dirichlet-multinomial keeps shape-preserving conjugacy");
+        const double sum = eng.posterior(0) + eng.posterior(1) +
+                           eng.posterior(2);
+        CHECK(std::fabs(sum - 1.0) < 1e-12,
+              "multi-outcome posteriors stay normalized");
+    }
+    {   // Structural guards: no prior, bad slots, zero weight are inert.
+        BayesianEngine eng;
+        eng.update_count(0, 10, 5, 1000000);  // no prior yet
+        CHECK(eng.posterior() < 0.0, "no posterior before the prior seeds");
+        eng.ensure_prior(0.5, 10.0);
+        eng.update_count(0, 10, 5, 0);   // zero weight
+        eng.update_count(9, 10, 5, 1000000);  // out-of-range slot
+        eng.update_count(0, 10, 11, 1000000); // k > n
+        CHECK(std::fabs(eng.posterior() - 0.5) < 1e-12 &&
+                  eng.events() == 0,
+              "invalid evidence is ignored without touching the state");
+        // Idempotent seeding: a second call cannot move the anchor.
+        eng.ensure_prior(0.9, 100.0);
+        CHECK(std::fabs(eng.posterior() - 0.5) < 1e-12,
+              "prior seeding is one-shot by design");
+    }
+}
+
+// ── P4 engine integration: reliability gating + posterior trigger ────────────
+static EvidenceEvent make_count_evidence(uint32_t source, uint32_t n,
+                                         uint32_t k, uint32_t hash) {
+    EvidenceEvent ev{};
+    ev.kind = EvidenceEvent::Kind::COUNT;
+    ev.outcome = 0;
+    ev.source_id = source;
+    ev.count_n = n;
+    ev.count_k = k;
+    ev.event_hash = hash;
+    ev.timestamp_ns = crowdintel::realtime_ns();
+    return ev;
+}
+
+static void test_engine_brain_acceptance() {
+    std::printf("engine_brain_acceptance\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.bayes_prior_strength = 24.0;
+    cfg.bayes_signal_threshold = 0.03;
+    cfg.bayes_min_reliability = 0.35;
+    cfg.bayes_enable = true;
+    cfg.max_exposure_usd = 10000.0;
+    cfg.max_portfolio_exposure_usd = 10000.0;
+    cfg.max_daily_loss_usd = 10000.0;
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    Level2Entry bids[1] = {{395000, 100000000000ULL}};
+    Level2Entry asks[1] = {{405000, 100000000000ULL}};
+    book.set_book(bids, 1, asks, 1);  // mid exactly 0.40
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<EvidenceEvent> evidence_q;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    BayesianEngine bayes;
+    SourceReliability sources;
+    sources.set_weight(1, 0.90);    // reliable polling source
+    sources.set_weight(2, 0.10);    // unreliable source
+    EngineLayers layers{};
+    layers.journal_q = &journal_q;
+    layers.evidence_q = &evidence_q;
+    layers.bayes = &bayes;
+    layers.sources = &sources;
+
+    std::atomic<bool> trading_enabled{true};
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, &trading_enabled, &layers);
+
+    // Tick 1 seeds the prior from the mid (0.40); nothing fires.
+    CHECK(engine.run_tick() == TickResult::NO_SIGNAL,
+          "prior seeding alone never fires");
+    CHECK(bayes.has_prior() &&
+              std::fabs(bayes.posterior() - 0.40) < 1e-12,
+          "posterior anchored at 0.40");
+
+    // Reliability gate FIRST: untrusted source evidence never moves the
+    // posterior (acceptance: no order with low reliability).
+    evidence_q.try_push(make_count_evidence(2, 32, 22, 9901));
+    CHECK(engine.run_tick() == TickResult::NO_SIGNAL &&
+              client.submissions() == 0 &&
+              std::fabs(bayes.posterior() - 0.40) < 1e-12,
+          "low-reliability evidence stalls at the gate");
+
+    // Trusted evidence: 32 trials / 22 YES at weight 0.9 → posterior 0.557,
+    // buy divergence = 0.557 − 0.405 ≫ 0.03 → BAYES_SIGNAL order emitted.
+    evidence_q.try_push(make_count_evidence(1, 32, 22, 9902));
+    const TickResult fired = engine.run_tick();
+    CHECK(fired == TickResult::BAYES_SIGNAL && client.submissions() == 1,
+          "posterior 0.557 with ask 0.405 emits exactly one buy order");
+    CHECK(bayes.posterior() > 0.42,
+          "posterior actually moved above the ask");
+
+    // One shot per batch: no new evidence means no re-fire next tick.
+    CHECK(engine.run_tick() == TickResult::NO_SIGNAL &&
+              client.submissions() == 1,
+          "signal fires once per evidence batch, never repeatedly");
+
+    // Journal captures the whole story: gate rejection, posterior update,
+    // and the emitted bayesian order.
+    JournalEvent ev{};
+    bool low_rel = false, update_seen = false, signal_seen = false;
+    double journaled_posterior = 0.0;
+    while (journal_q.try_pop(ev)) {
+        if (ev.type == JournalEvent::Type::BAYES_LOW_RELIABILITY) {
+            low_rel = true;
+            CHECK(ev.aux0 == 2, "untrusted source id journaled");
+        }
+        if (ev.type == JournalEvent::Type::BAYES_UPDATE)
+            update_seen = true;
+        if (ev.type == JournalEvent::Type::BAYES_SIGNAL) {
+            signal_seen = true;
+            journaled_posterior = static_cast<double>(ev.aux0) * 1e-6;
+        }
+    }
+    CHECK(low_rel && update_seen && signal_seen,
+          "journal holds gate, update, and emitted-signal records");
+    CHECK(journaled_posterior > 0.42 && journaled_posterior < 0.60,
+          "journaled signal carries the firing posterior");
+}
+
 int main() {
     std::printf("== CROWDINTEL layer tests ==\n");
     test_tracker_partial_fill();
@@ -845,6 +1017,8 @@ int main() {
     test_vol_gate_units();
     test_pool_dynamic_ttl();
     test_engine_shock_acceptance();
+    test_bayes_math();
+    test_engine_brain_acceptance();
     std::printf("== %s (%d failures) ==\n", g_failures ? "FAILED" : "ALL PASS",
                 g_failures);
     return g_failures ? 1 : 0;
