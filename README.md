@@ -2,7 +2,7 @@
 
 A low-latency C++20 research and execution engine for Polymarket's CLOB V2. It combines authenticated alpha ingress, an L2 WebSocket book, exact fixed-point order construction, EIP-712 signing, a consumable pre-signed ladder, bounded SPSC queues, risk gates, and asynchronous HTTPS submission.
 
-> **Deployment status:** offline and mock paths are tested. This repository is **not approved for unattended live trading**: private-channel fill/order reconciliation and automatic inventory recovery are still missing, and signature type 3 intentionally fails closed until correct ERC-7739 wrapping is implemented. See [the deployment runbook](docs/DEPLOYMENT.md) and [remediation ledger](docs/REMEDIATION_STATUS.md).
+> **Deployment status:** offline and mock paths are tested. The engine now ships four protective layers over the hot path: private user-channel accounting with venue reconciliation (P1), an always-on risk manager with stop-loss/hedging/day-loss kill switch (P2), an adverse-selection volatility gate with dynamic pre-signed-ladder TTL and a >5%/100ms shock cooldown (P3); a Bayesian signal brain is landing as P4. Signature type 3 intentionally fails closed until correct ERC-7739 wrapping is implemented. See [the deployment runbook](docs/DEPLOYMENT.md) and [remediation ledger](docs/REMEDIATION_STATUS.md).
 
 ## Safety model
 

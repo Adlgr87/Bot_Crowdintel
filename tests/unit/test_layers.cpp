@@ -24,6 +24,7 @@
 #include "../../core/include/risk_manager.hpp"
 #include "../../core/include/spsc_ring_buffer.hpp"
 #include "../../core/include/time_utils.hpp"
+#include "../../core/include/volatility_gate.hpp"
 #include "../../core/src/execution_engine.hpp"
 #include "../../core/src/market_config.hpp"
 #include "../../core/src/mock_client.hpp"
@@ -660,6 +661,175 @@ static void test_engine_hedge_on_dip() {
           "hedging locks the spread: nothing realized until resolution");
 }
 
+// ── P3: VolatilityGate ───────────────────────────────────────────────────────
+static void test_vol_gate_units() {
+    std::printf("vol_gate_units\n");
+    {   // Regime sampler: NORMAL → ELEVATED (wide spread) → EXTREME → NORMAL.
+        MarketConfig cfg;  // defaults: dev 200bps, wide 1500bps, tick 200Hz
+        VolatilityGate gate(cfg);
+        const uint64_t base_ttl = cfg.presign_ttl_ms;  // 3000
+        const uint64_t t0 = 1000000000ULL;
+        gate.sample(495000, 505000, t0, base_ttl);  // spread 100bps of mid
+        CHECK(gate.regime() == 0 && gate.effective_ttl_ms() == base_ttl &&
+                  gate.size_permille() == 1000 && !gate.paused(),
+              "normal regime keeps full ladder TTL and size");
+        gate.sample(460000, 540000, t0 + 10000000ULL, base_ttl);  // 1600bps
+        CHECK(gate.regime() == 1 && gate.effective_ttl_ms() == 500 &&
+                  gate.size_permille() == 500 && !gate.paused(),
+              "wide spread elevates: TTL shrinks to vol TTL, size halves");
+        // Mid churning 450 times in-window while spread stays wide → rate
+        // >= 2*200 → EXTREME: paused, deepest shrink and TTL.
+        uint64_t t = t0 + 20000000ULL;
+        for (int i = 0; i < 450; ++i) {
+            const uint64_t mid = 500000 + (i & 1 ? 1000 : 0);
+            gate.sample(mid - 40000, mid + 40000, t, base_ttl);
+            t += 1000000ULL;
+        }
+        gate.sample(460000, 540000, t + 1200000000ULL, base_ttl);
+        CHECK(gate.regime() == 2 && gate.paused() &&
+                  gate.effective_ttl_ms() <= 250 &&
+                  gate.size_permille() <= 250,
+              "extreme churn pauses passive flow with deepest shrink");
+        // Cool-off: narrow spread and quiet mid restore the full ladder.
+        gate.sample(495000, 505000, t + 2600000000ULL, base_ttl);
+        CHECK(gate.regime() == 0 && !gate.paused() &&
+                  gate.effective_ttl_ms() == base_ttl &&
+                  gate.size_permille() == 1000,
+              "calm book restores full ladder parameters");
+    }
+    {   // Shock guard: >5% mid jump inside 100 ms arms a 250 ms cooldown.
+        MarketConfig cfg;
+        VolatilityGate gate(cfg);  // default mid gap 500 bps = 5%
+        const uint64_t t0 = 1000000000ULL;
+        CHECK(!gate.observe_mid(500000, t0), "first mid arms nothing");
+        CHECK(gate.observe_mid(527000, t0 + 50000000ULL),
+              "5.4% jump in 50 ms arms the cooldown");
+        CHECK(gate.observe_mid(530000, t0 + 60000000ULL),
+              "cooldown keeps blocking while armed");
+        CHECK(!gate.observe_mid(531000, t0 + 400000000ULL),
+              "cooldown lapses after 250 ms");
+        CHECK(gate.shocks() == 1, "exactly one shock was counted");
+        // A small move inside the window never arms.
+        CHECK(!gate.observe_mid(531000, t0 + 500000000ULL), "quiet re-arm");
+        CHECK(!gate.observe_mid(535000, t0 + 510000000ULL),
+              "0.75% move stays under the 5% bar");
+        CHECK(gate.shocks() == 1, "no phantom shocks on small moves");
+    }
+    {   // Slippage-vs-mid gate honours BOT_POOL_MAX_DEV_BPS (0 = off).
+        MarketConfig cfg;  // default 200 bps
+        VolatilityGate gate(cfg);
+        CHECK(gate.slippage_ok(0, 506000, 500000), "buy 120bps from mid ok");
+        CHECK(!gate.slippage_ok(0, 511000, 500000), "buy 220bps rejected");
+        CHECK(gate.slippage_ok(1, 494000, 500000), "sell 120bps from mid ok");
+        CHECK(!gate.slippage_ok(1, 489000, 500000), "sell 220bps rejected");
+        MarketConfig off_cfg;
+        off_cfg.pool_max_dev_bps = 0.0;
+        VolatilityGate off_gate(off_cfg);
+        CHECK(off_gate.slippage_ok(0, 900000, 500000),
+              "dev=0 disables the gate explicitly");
+    }
+}
+
+static void test_pool_dynamic_ttl() {
+    std::printf("pool_dynamic_ttl\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    PresignedOrderPool pool(cfg, signer, 60000);  // 60 s static TTL
+    const uint64_t target =
+        KellyEngine::usd_to_shares_fixed(cfg.max_order_usd, 0.505);
+    CHECK(pool.rebuild(495000, 505000, target, 10000),
+          "ladder builds for the TTL experiment");
+    WireBody body{};
+    uint64_t size = 0, maker = 0, taker = 0;
+    CHECK(pool.acquire_at_most(0, 505000, 10000, target, body, size, maker,
+                               taker, 0),
+          "static TTL admits a fresh slot (max_age=0)");
+    CHECK(pool.rebuild(495000, 505000, target, 10000),
+          "second ladder builds");
+    std::this_thread::sleep_for(std::chrono::milliseconds(6));
+    WireBody body2{};
+    CHECK(pool.acquire_at_most(0, 505000, 10000, target, body2, size, maker,
+                               taker, 60000),
+          "wide dynamic TTL still admits a fresh slot");
+    CHECK(pool.rebuild(495000, 505000, target, 10000),
+          "third ladder builds");
+    std::this_thread::sleep_for(std::chrono::milliseconds(6));
+    WireBody body3{};
+    CHECK(!pool.acquire_at_most(0, 505000, 10000, target, body3, size, maker,
+                                taker, 1),
+          "1 ms dynamic TTL expires the rebuiltslot after 6 ms");
+}
+
+// ── P3 engine integration: 5%+ jump in <100 ms must not fire a stale order ──
+static void test_engine_shock_acceptance() {
+    std::printf("engine_shock_acceptance\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_fixture(cfg, signer);
+    cfg.max_exposure_usd = 10000.0;
+    cfg.max_portfolio_exposure_usd = 10000.0;
+    cfg.max_daily_loss_usd = 10000.0;  // second signal must fit the budget
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    Level2Entry bids[1] = {{495000, 100000000000ULL}};
+    Level2Entry asks[1] = {{505000, 100000000000ULL}};
+    book.set_book(bids, 1, asks, 1);  // tight 1 c spread around mid 0.50
+
+    SPSC_RingBuffer<AlphaSignal> signals;
+    SPSC_RingBuffer<JournalEvent> journal_q;
+    VolatilityGate gate(cfg);
+    EngineLayers layers{};
+    layers.journal_q = &journal_q;
+    layers.volatility = &gate;
+
+    std::atomic<bool> trading_enabled{true};
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client, &trading_enabled, &layers);
+
+    // 1. Calm tight book: the gate must not alter the baseline behavior.
+    signals.try_push(make_buy_signal(cfg, 0.90, 301));
+    CHECK(engine.run_tick() == TickResult::SUBMITTED &&
+              client.submissions() == 1,
+          "calm tight book trades through the gate untouched");
+
+    // 2. Mid jumps +6% (0.50 -> 0.53) between two consecutive ticks
+    // (microseconds apart in wall clock, far under the 100 ms window).
+    bids[0] = {525000, 100000000000ULL};
+    asks[0] = {535000, 100000000000ULL};
+    book.set_book(bids, 1, asks, 1);
+    signals.try_push(make_buy_signal(cfg, 0.90, 302));
+    const TickResult shocked = engine.run_tick();
+    CHECK(shocked == TickResult::VOLATILITY_PAUSED &&
+              client.submissions() == 1,
+          ">5% jump in <100ms: stale order NOT consumed, flow paused");
+    CHECK(gate.shocks() == 1 && gate.aborts() == 0,
+          "shock counted exactly once, no slippage aborts on the way");
+
+    // The journal records the suppression (acceptance: "logs and adapts").
+    JournalEvent ev{};
+    bool stale_logged = false;
+    while (journal_q.try_pop(ev)) {
+        if (ev.type == JournalEvent::Type::POOL_STALE_DROP) {
+            stale_logged = true;
+            CHECK(ev.aux0 == 530000 || ev.aux0 == 500000,
+                  "journal carries the mid at shock time");
+        }
+    }
+    CHECK(stale_logged, "suppressed stale ladder consumption is journaled");
+
+    // 3. Cooldown lapses (250 ms real time); the new book becomes the new
+    // normal and passive flow resumes at the refreshed prices.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    signals.try_push(make_buy_signal(cfg, 0.90, 303));
+    const TickResult resumed = engine.run_tick();
+    CHECK(resumed == TickResult::SUBMITTED && client.submissions() == 2,
+          "after the cooldown the gate adapts: flow resumes at new prices");
+}
+
 int main() {
     std::printf("== CROWDINTEL layer tests ==\n");
     test_tracker_partial_fill();
@@ -672,6 +842,9 @@ int main() {
     test_engine_stop_loss_on_crash();
     test_engine_kill_freezes_orders();
     test_engine_hedge_on_dip();
+    test_vol_gate_units();
+    test_pool_dynamic_ttl();
+    test_engine_shock_acceptance();
     std::printf("== %s (%d failures) ==\n", g_failures ? "FAILED" : "ALL PASS",
                 g_failures);
     return g_failures ? 1 : 0;

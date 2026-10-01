@@ -23,6 +23,7 @@
 #include "../include/order_book.hpp"
 #include "../include/position_tracker.hpp"
 #include "../include/risk_manager.hpp"
+#include "../include/volatility_gate.hpp"
 #include "../include/spsc_ring_buffer.hpp"
 #include "../include/time_utils.hpp"
 #include "alpha_parser.hpp"
@@ -246,6 +247,11 @@ int main() {
     layers.risk = &risk;
     if (hedge_book) layers.hedge_book = hedge_book.get();
 
+    // P3 — adverse-selection brake.  The presign thread samples the book;
+    // the hot loop reads the published regime and owns the shock FSM.
+    VolatilityGate volatility(cfg);
+    layers.volatility = &volatility;
+
     PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
     MockCLOBClient mock_client(cfg);
     std::atomic<bool> workers_running{true};
@@ -384,6 +390,10 @@ int main() {
         while (workers_running.load(std::memory_order_acquire)) {
             OrderBookL2::Top top{};
             if (book->read_top(top) && top.bid.size && top.ask.size) {
+                // Feed the adverse-selection regime sampler (P3) on every
+                // observed top, ~100 Hz while the book is fresh.
+                volatility.sample(top.bid.price, top.ask.price,
+                                  crowdintel::mono_ns(), cfg.presign_ttl_ms);
                 const uint64_t tick = book->tick_size(cfg.tick_size);
                 const uint64_t now = PresignedOrderPool::now_ms();
                 if (top.bid.price != last_bid || top.ask.price != last_ask ||
