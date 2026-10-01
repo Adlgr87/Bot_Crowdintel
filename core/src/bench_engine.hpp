@@ -15,9 +15,12 @@ class BenchEngine {
 public:
     BenchEngine(const MarketConfig& cfg, OrderBookL2& book,
                 SPSC_RingBuffer<AlphaSignal>& signals,
-                const EIP712Signer& signer, PresignedOrderPool& pool)
+                const EIP712Signer& signer, PresignedOrderPool& pool,
+                const EngineLayers* layers = nullptr)
         : cfg_(cfg), signer_(signer), pool_(pool), client_(cfg),
-          enabled_(true), engine_(cfg, book, signals, signer, pool, client_, &enabled_) {}
+          enabled_(true),
+          engine_(cfg, book, signals, signer, pool, client_, &enabled_,
+                  layers) {}
 
     int run_tick() {
         const TickResult result = engine_.run_tick();

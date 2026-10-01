@@ -53,6 +53,47 @@ The deployment unit maps root-only files through systemd `LoadCredential=`. Do n
 
 A conservative default is not a verified venue value. Tick, fee schedule, minimum size, negative-risk status, token ID, balances, allowances, open orders, and inventory must come from current market/account metadata during preflight.
 
+## Eyes — accounting and reconciliation (P1)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_RESERVATION_TTL_MS` | `10000` | Unconfirmed local reservations are released after this age (unfilled maker orders, dead venues). |
+| `BOT_RECONCILE_INTERVAL_SEC` | `30` | Periodic REST positions reconciliation; `0` disables. |
+| `BOT_RECONCILE_MAX_DRIFT_SHARES` | `0.01` | Max tolerated \|REST−local\| inventory drift; larger drift restates state and latches the kill switch. |
+
+## Brakes — risk manager (P2)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_STOP_LOSS_PCT` | `0.15` | Stop-loss: liquidation-mark drop vs VWAP entry that closes the position. `0` disables. |
+| `BOT_HEDGE_TRIGGER_PCT` | `0` | Earlier trigger that buys the complement token (`BOT_HEDGE_TOKEN_ID`). Must fire strictly before the stop-loss; `0` disables. |
+| `BOT_MAX_PORTFOLIO_EXPOSURE_USD` | `250` | Portfolio-wide exposure cap enforced pre-signature. |
+
+## Adverse selection — volatility gate (P3)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_POOL_MAX_DEV_BPS` | `200` | Max deviation of an order's price vs the CURRENT mid; a stale pool slot or toxic spread is refused. `0` disables. |
+| `BOT_POOL_VOL_TTL_MS` | `500` | Pre-signed ladder TTL while the regime is volatile. |
+| `BOT_VOL_MAX_SPREAD_BPS` | `1500` | Spread width (bps of mid) that flags a volatile regime. |
+| `BOT_VOL_MAX_TICKS_PER_SEC` | `200` | Mid-change rate (Hz) that flags a volatile regime. `0` disables. |
+| `BOT_VOL_MID_GAP_BPS` | `500` | Mid jump arming the 100 ms shock window; cooldown suppresses passive flow for 250 ms. |
+| `BOT_VOL_SIZE_MULTIPLIER` | `0.5` | Passive size scale while the regime is volatile (halved again when extreme). |
+
+## Brain — Bayesian edge engine (P4)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_BAYES_ENABLE` | `1` | Bayes brain active (prior seeding, evidence drain, posterior trigger). `0` cold-paths everything; the hot tick then only bounds-empties the evidence queue. |
+| `BOT_BAYES_SOURCES` | empty | `id:weight` pairs, e.g. `"1:0.9,2:0.5"`. Weight = source reliability floor for evidence gating; at least one valid pair enables Beta-Binomial slots per source. |
+| `BOT_BAYES_RECAL_FILE` | empty | Hot-reloaded reliability table (same `id:weight` format), re-read by the evidence replayer thread. |
+| `BOT_EVIDENCE_FILE` | empty | NDJSON evidence replay/tail input. Lines: `{"source":1,"kind":"count","n":32,"k":22,"hash":N}` (binomial counts, `k<=n`) or `{"source":3,"kind":"lr","lr":693147,"hash":N}` (log-LR ×1e6). `hash` ≠ 0 required (dedup). |
+| `BOT_BAYES_PRIOR_STRENGTH` | `24.0` | N₀ pseudo-count of the market mid as prior: α=N₀·mid, β=N₀·(1−mid). |
+| `BOT_BAYES_SIGNAL_THRESHOLD` | `0.03` | Emit a synthetic signal when \|posterior − executable side\| exceeds this and reliability clears the floor. |
+| `BOT_BAYES_MIN_RELIABILITY` | `0.35` | Evidence below this source weight is journaled `BAYES_LOW_RELIABILITY` and never updates the posterior. |
+
+Paper trading (`BOT_MODE=mock`) synthesizes venue fills for every accepted mock order into the account queue, so tracker, exposure, stop-loss and brain observe the same flow they will see live. The mock feeds a tight, continuously refreshed book (~100 bps execution slip, mid pinned) alternating BUY/SELL hints.
+
 ## Transport and runtime
 
 | Variable | Default | Notes |

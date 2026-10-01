@@ -7,12 +7,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
 
 #include "../../core/crypto/eip712_signer.hpp"
 #include "../../core/include/order_book.hpp"
+#include "../../core/include/bayesian_engine.hpp"
+#include "../../core/include/evidence.hpp"
+#include "../../core/include/source_reliability.hpp"
 #include "../../core/include/spsc_ring_buffer.hpp"
 #include "../../core/src/bench_engine.hpp"
 #include "alpha_parser.hpp"
@@ -96,9 +100,12 @@ int main() {
         (void)engine.run_tick();
     }
 
-    std::vector<uint64_t> pool_hit, inline_sign, sign_only, pool_lookup;
+    std::vector<uint64_t> pool_hit, inline_sign, sign_only, pool_lookup,
+        layered_hit, bayes_update, bayes_read;
     pool_hit.reserve(SAMPLES); inline_sign.reserve(SAMPLES);
     sign_only.reserve(SAMPLES); pool_lookup.reserve(SAMPLES);
+    layered_hit.reserve(SAMPLES); bayes_update.reserve(SAMPLES);
+    bayes_read.reserve(SAMPLES);
 
     size_t successful = 0;
     for (size_t i = 0; i < SAMPLES; ++i) {
@@ -111,6 +118,78 @@ int main() {
         if (result == 1) { pool_hit.push_back(end - begin); ++successful; }
     }
     std::printf("consumable-pool batches: %zu/%zu productive\n", successful, SAMPLES);
+
+    // Hot path with EVERY protective layer attached (P1 tracker, P2 brakes,
+    // P3 adverse-selection gate).  Inert layer state and huge caps so every
+    // signal trades; the measurement is the steady alpha path — protective
+    // housekeeping is the actual production cost included here.
+    setenv("BOT_PRIVATE_KEY_HEX",
+        "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b", 1);
+    MarketConfig lcfg;
+    if (const char* error = lcfg.load(false, true)) {
+        std::printf("FATAL: %s\n", error); return 1;
+    }
+    lcfg.bankroll_usd = 10000.0;
+    lcfg.kelly_fraction = 0.25;
+    lcfg.max_order_usd = 100.0;
+    lcfg.pool_max_dev_bps = 5000.0;      // fixture spread is 6c by design
+    lcfg.max_exposure_usd = 1000000000.0;
+    lcfg.max_daily_loss_usd = 1000000000.0;
+    lcfg.max_portfolio_exposure_usd = 1000000000.0;
+    lcfg.taker_fee_rate = 0.0;
+    std::strcpy(lcfg.order_type, "FAK");
+    secure_zero(lcfg.private_key_hex, sizeof(lcfg.private_key_hex));
+    if (const char* error = lcfg.finalize_identity(signer.signer_address())) {
+        std::printf("FATAL: %s\n", error); return 1;
+    }
+    OrderBookL2 lbook;
+    lbook.set_tick_size(lcfg.tick_size);
+    const Level2Entry lbids[2] = {{470000, 2000000000}, {460000, 2000000000}};
+    const Level2Entry lasts[2] = {{530000, 2000000000}, {540000, 2000000000}};
+    lbook.set_book(lbids, 2, lasts, 2);
+    auto lsignals = std::make_unique<SPSC_RingBuffer<AlphaSignal>>();
+    PresignedOrderPool lpool(lcfg, signer, 60000);
+    PositionTracker ltracker;
+    RiskLimits llimits{};
+    llimits.stop_loss_pct = 0.0;
+    llimits.hedge_trigger_pct = 0.0;
+    llimits.max_daily_loss_usd = 1000000000.0;
+    llimits.max_market_exposure_usd = 1000000000.0;
+    llimits.max_portfolio_exposure_usd = 1000000000.0;
+    RiskManager lrisk(llimits);
+    VolatilityGate lgate(lcfg);
+    BayesianEngine lbayes;
+    SourceReliability lsources;
+    auto levidence = std::make_unique<SPSC_RingBuffer<EvidenceEvent>>();
+    EngineLayers llayers{};
+    llayers.tracker = &ltracker;
+    llayers.risk = &lrisk;
+    llayers.volatility = &lgate;
+    llayers.evidence_q = levidence.get();
+    llayers.bayes = &lbayes;
+    llayers.sources = &lsources;
+    BenchEngine lengine(lcfg, lbook, *lsignals, signer, lpool, &llayers);
+    for (size_t i = 0; i < WARMUP; ++i) {
+        if (i % PresignedOrderPool::SIZE_BUCKETS == 0)
+            lpool.rebuild(470000, 530000, target_shares, lcfg.tick_size);
+        lsignals->try_push(make_signal(lcfg, 0.75, signal_id++));
+        (void)lengine.run_tick();
+    }
+    size_t layered_successful = 0;
+    for (size_t i = 0; i < SAMPLES; ++i) {
+        if (i % PresignedOrderPool::SIZE_BUCKETS == 0)
+            lpool.rebuild(470000, 530000, target_shares, lcfg.tick_size);
+        lsignals->try_push(make_signal(lcfg, 0.75, signal_id++));
+        const uint64_t begin = clock_ns();
+        const int result = lengine.run_tick();
+        const uint64_t end = clock_ns();
+        if (result == 1) {
+            layered_hit.push_back(end - begin);
+            ++layered_successful;
+        }
+    }
+    std::printf("layered batches: %zu/%zu productive\n",
+                layered_successful, SAMPLES);
 
     // Move top-of-book to a price absent from the active ladder, forcing the
     // exact production fallback path (amount build + Keccak + ECDSA + JSON).
@@ -146,6 +225,26 @@ int main() {
         pool_lookup.push_back(end - begin);
     }
 
+    // P4 brain microbench: closed-form Beta-Binomial COUNT update and the
+    // posterior read the hot loop performs per drain/tick.  These are the
+    // ONLY brain costs on the steady path and must stay in the tens of ns.
+    BayesianEngine beng;
+    beng.ensure_prior(0.40, 24.0);
+    for (size_t i = 0; i < SAMPLES; ++i) {
+        const uint64_t begin = clock_ns();
+        beng.update_count(0, 32, 22, 900000);
+        const uint64_t end = clock_ns();
+        bayes_update.push_back(end - begin);
+    }
+    double acc = 0.0;
+    for (size_t i = 0; i < SAMPLES; ++i) {
+        const uint64_t begin = clock_ns();
+        acc += beng.posterior();
+        const uint64_t end = clock_ns();
+        bayes_read.push_back(end - begin);
+    }
+    if (acc < 0.0) std::printf("unreachable %f\n", acc);  // keep the reads live
+
     auto report = [](const char* name, std::vector<uint64_t>& samples) {
         std::sort(samples.begin(), samples.end());
         auto percentile = [&](double p) {
@@ -165,9 +264,12 @@ int main() {
     };
 
     report("decision+pool+mock-submit", pool_hit);
+    report("decision+pool+layers+mock-submit", layered_hit);
     report("decision+inline-sign+mock-submit", inline_sign);
     report("sign only (Keccak+ECDSA)", sign_only);
     report("consumable pool lookup+copy", pool_lookup);
+    report("bayes posterior update", bayes_update);
+    report("bayes posterior read", bayes_read);
     std::printf("No network, HMAC, DNS, TCP or TLS is included in these values.\n");
     return 0;
 }
