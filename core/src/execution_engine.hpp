@@ -15,7 +15,10 @@
 #include "../include/journal.hpp"
 #include "../include/order_book.hpp"
 #include "../include/position_tracker.hpp"
+#include "../include/bayesian_engine.hpp"
+#include "../include/evidence.hpp"
 #include "../include/risk_manager.hpp"
+#include "../include/source_reliability.hpp"
 #include "../include/volatility_gate.hpp"
 #include "../include/spsc_ring_buffer.hpp"
 #include "../include/time_utils.hpp"
@@ -190,16 +193,35 @@ public:
             }
         }
 
+        // ── P4 (brain) ────────────────────────────────────────────────────
+        // Evidence ingestion precedes the alpha pop on every tick: posterior
+        // state must track facts even while trading flow is busy.  Each
+        // event folds into the closed form in tens of nanoseconds.
+        drain_evidence();
+
         AlphaSignal signal{};
-        if (!signals_.try_pop(signal))
-            return housework != TickResult::NO_SIGNAL ? housework
-                                                      : TickResult::NO_SIGNAL;
+        if (signals_.try_pop(signal)) {
+            if (volatility_ && flow_suppressed)
+                return TickResult::VOLATILITY_PAUSED;
+            return execute_signal_pipeline(signal, false);
+        }
 
-        // Suppressed flow consumes and discards the signal so the producer
-        // queue drains; the signal's own TTL explicitly expires it.
-        if (volatility_ && flow_suppressed)
-            return TickResult::VOLATILITY_PAUSED;
+        // No queued alpha: evaluate the posterior trigger against the book.
+        if (bayes_ && sources_ && cfg_.bayes_enable &&
+            !(volatility_ && flow_suppressed)) {
+            const TickResult brain = evaluate_posterior_trigger();
+            if (brain != TickResult::NO_SIGNAL) return brain;
+        }
 
+        return housework != TickResult::NO_SIGNAL ? housework
+                                                  : TickResult::NO_SIGNAL;
+    }
+
+    // Shared dispatch for queued alpha and posterior-synthesized signals.
+    // A bayesian-tagged signal maps SUBMITTED to BAYES_SIGNAL so the brain's
+    // orders stay accountable against plain alpha in the session report.
+    TickResult execute_signal_pipeline(const AlphaSignal& signal,
+                                       bool from_bayes) {
         if (risk_ && risk_->killed()) return TickResult::RISK_REJECTED;
 
         if (!std::isfinite(signal.p_win) || !std::isfinite(signal.confidence) ||
@@ -405,6 +427,12 @@ public:
             return TickResult::QUEUED;
         }
         ++submitted_;
+        if (from_bayes && bayes_) {
+            journal(JournalEvent::Type::BAYES_SIGNAL, 0,
+                    static_cast<uint64_t>(bayes_->posterior() * 1000000.0),
+                    price_raw, effective_shares);
+            return TickResult::BAYES_SIGNAL;
+        }
         return TickResult::SUBMITTED;
     }
 
@@ -421,6 +449,85 @@ public:
 private:
     static uint64_t realtime_ns() noexcept {
         return crowdintel::realtime_ns();
+    }
+
+    // ── Brain (P4) ──────────────────────────────────────────────────────────
+    // Fold queued evidence into the closed-form posterior.  Cost when idle:
+    // one atomic load; per event: one weight load + conjugate update.
+    void drain_evidence() noexcept {
+        if (!evidence_q_ || !bayes_ || !sources_ || !cfg_.bayes_enable)
+            return;
+        EvidenceEvent ev{};
+        const uint32_t floor_x1e6 = static_cast<uint32_t>(
+            cfg_.bayes_min_reliability * 1000000.0);
+        while (evidence_q_->try_pop(ev)) {
+            const uint32_t w = sources_->weight_x1e6(ev.source_id);
+            if (w < floor_x1e6) {
+                // Reliable-source gate: untrusted evidence never moves the
+                // posterior; it lands in the journal for later calibration.
+                journal(JournalEvent::Type::BAYES_LOW_RELIABILITY, 0,
+                        ev.source_id, w, ev.event_hash);
+                continue;
+            }
+            if (ev.event_hash != 0 && seen_evidence_before(ev.event_hash))
+                continue;
+            if (ev.kind == EvidenceEvent::Kind::COUNT)
+                bayes_->update_count(ev.outcome, ev.count_n, ev.count_k, w);
+            else
+                bayes_->update_lr(ev.lr_x1e6, w);
+            ++evidence_generation_;
+            journal(JournalEvent::Type::BAYES_UPDATE, 0,
+                    static_cast<uint64_t>(bayes_->posterior() * 1000000.0),
+                    ev.source_id, ev.event_hash);
+        }
+    }
+
+    bool seen_evidence_before(uint32_t hash) noexcept {
+        for (const uint32_t seen : seen_evidence_)
+            if (seen == hash) return true;
+        seen_evidence_[evidence_seen_idx_++ & 31] = hash;
+        return false;
+    }
+
+    // Fire exactly one signal per new batch of trusted evidence when the
+    // posterior diverges from executable prices beyond the threshold.  The
+    // synthesized signal traverses the SAME alpha pipeline, so Kelly sizing,
+    // risk authorization, the volatility gate, and inventory caps all apply
+    // with no special case — the brain can never outmaneuver the brakes.
+    TickResult evaluate_posterior_trigger() noexcept {
+        if (evidence_generation_ == bayes_trigger_gen_)
+            return TickResult::NO_SIGNAL;  // one shot per new evidence batch
+        OrderBookL2::Top top{};
+        const uint64_t max_age_ns = cfg_.max_book_age_ms * 1000000ULL;
+        if (!book_.read_top(top, max_age_ns) || top.bid.size == 0 ||
+            top.ask.size == 0 || top.bid.price >= top.ask.price)
+            return TickResult::NO_SIGNAL;
+        if (!bayes_->has_prior()) {
+            const double mid = static_cast<double>(
+                (top.bid.price + top.ask.price) / 2) * 1e-6;
+            bayes_->ensure_prior(mid, cfg_.bayes_prior_strength);
+            return TickResult::NO_SIGNAL;  // seed only; trigger on next fact
+        }
+        const double posterior = bayes_->posterior();
+        if (posterior < 0.0) return TickResult::NO_SIGNAL;
+        const double ask = static_cast<double>(top.ask.price) * 1e-6;
+        const double bid = static_cast<double>(top.bid.price) * 1e-6;
+        uint8_t direction = 255;
+        if (posterior - ask > cfg_.bayes_signal_threshold)
+            direction = K_SIDE_BUY;
+        else if (bid - posterior > cfg_.bayes_signal_threshold)
+            direction = K_SIDE_SELL;
+        if (direction == 255) return TickResult::NO_SIGNAL;
+        bayes_trigger_gen_ = evidence_generation_;
+        AlphaSignal syn{};
+        syn.direction_hint = direction;
+        syn.p_win = posterior;
+        syn.confidence = 1.0;
+        syn.q_value = 0.0;
+        syn.timestamp_ns = realtime_ns();
+        syn.market_hash = cfg_.market_hash;
+        syn.signal_id = 0xB4E5000000000000ULL ^ (++bayes_synth_seq_);
+        return execute_signal_pipeline(syn, true);
     }
 
     // Drain all pending user-channel facts into the tracker, then run the
@@ -724,6 +831,11 @@ private:
     SPSC_RingBuffer<EvidenceEvent>* evidence_q_ = nullptr;
     BayesianEngine* bayes_ = nullptr;
     SourceReliability* sources_ = nullptr;
+    uint32_t seen_evidence_[32]{};
+    uint32_t evidence_seen_idx_ = 0;
+    uint64_t evidence_generation_ = 0;
+    uint64_t bayes_trigger_gen_ = UINT64_MAX;
+    uint64_t bayes_synth_seq_ = 0;
     OrderBookL2* hedge_book_ = nullptr;
     FastRandom rng_;
     // Two rotating Bloom epochs guarantee no false negatives inside the

@@ -19,7 +19,10 @@
 #include "../crypto/eip712_signer.hpp"
 #include "../crypto/secure_zero.hpp"
 #include "../include/account_events.hpp"
+#include "../include/bayesian_engine.hpp"
+#include "../include/evidence.hpp"
 #include "../include/journal.hpp"
+#include "../include/source_reliability.hpp"
 #include "../include/order_book.hpp"
 #include "../include/position_tracker.hpp"
 #include "../include/risk_manager.hpp"
@@ -27,6 +30,7 @@
 #include "../include/spsc_ring_buffer.hpp"
 #include "../include/time_utils.hpp"
 #include "alpha_parser.hpp"
+#include "evidence_ingress.hpp"
 #include "execution_engine.hpp"
 #include "market_config.hpp"
 #include "mock_client.hpp"
@@ -71,25 +75,36 @@ void pin_to_cpu(int cpu) {
 
 void mock_feed(SPSC_RingBuffer<AlphaSignal>& queue, OrderBookL2& book,
                const MarketConfig& cfg, std::atomic<bool>& running) {
-    Level2Entry bids[3] = {
-        {470000, 40000000}, {460000, 60000000}, {450000, 90000000}};
-    Level2Entry asks[3] = {
-        {530000, 30000000}, {540000, 55000000}, {550000, 80000000}};
+    // Paper-honest mock market: a tight, tradeable book (~100 bps execution
+    // slippage vs mid — inside the P3 gate) that is refreshed continuously so
+    // the staleness guard never gates the demo.  Mid never moves, so the
+    // volatility regime stays NORMAL.  p_win alternates 0.65 / 0.35 so both
+    // BUY and SELL edges fire: with paper fills enabled, positions round-trip
+    // and the brakes (P2) observe real mark-to-market.
+    const Level2Entry bids[3] = {
+        {495000, 40000000}, {494000, 60000000}, {493000, 90000000}};
+    const Level2Entry asks[3] = {
+        {505000, 30000000}, {506000, 55000000}, {507000, 80000000}};
     book.set_tick_size(cfg.tick_size);
     book.set_book(bids, 3, asks, 3);
     uint64_t id = 1;
     while (running.load(std::memory_order_acquire)) {
+        book.set_book(const_cast<Level2Entry*>(bids), 3,
+                      const_cast<Level2Entry*>(asks), 3);
         AlphaSignal signal{};
         signal.type = AlphaSignal::Type::WHALE_TRADE;
-        signal.direction_hint = 0;  // explicitly exercise BUY-hint semantics
-        signal.p_win = (id % 2) ? 0.65 : 0.50;
+        // Alternate BUY (0.65 vs 0.505 ask) and SELL (0.35 vs 0.495 bid)
+        // hints so paper positions open and close.
+        const bool buy_leg = (id % 2) != 0;
+        signal.direction_hint = buy_leg ? 0 : 1;
+        signal.p_win = buy_leg ? 0.65 : 0.35;
         signal.confidence = 0.92;
         signal.q_value = 0.01;
         signal.timestamp_ns = AlphaParser::realtime_ns();
         signal.market_hash = cfg.market_hash;
         signal.signal_id = id++;
         (void)queue.try_push(signal);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 }
 
@@ -252,8 +267,35 @@ int main() {
     VolatilityGate volatility(cfg);
     layers.volatility = &volatility;
 
+    // P4 — the brain.  Source trust comes from BOT_BAYES_SOURCES plus the
+    // optional recalibration file; evidence arrives on its own SPSC queue
+    // from whatever cold producer runs (replayer, poller, mock script).
+    auto evidence_q = std::make_unique<SPSC_RingBuffer<EvidenceEvent>>();
+    BayesianEngine bayes;
+    SourceReliability sources;
+    const size_t sources_configured =
+        evidence_ingress::parse_sources_text(cfg.bayes_sources, sources);
+    if (cfg.bayes_enable && cfg.bayes_sources[0] && sources_configured == 0) {
+        std::fprintf(stderr, "FATAL: BOT_BAYES_SOURCES is set but no valid "
+                             "id:weight pairs were parsed\n");
+        return 1;
+    }
+    if (cfg.bayes_enable) {
+        layers.evidence_q = evidence_q.get();
+        layers.bayes = &bayes;
+        layers.sources = &sources;
+        std::fprintf(stdout, "bayes brain: %zu sources, prior strength %.1f, "
+                     "threshold %.3f, min reliability %.2f\n",
+                     sources_configured, cfg.bayes_prior_strength,
+                     cfg.bayes_signal_threshold, cfg.bayes_min_reliability);
+    }
+
     PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
     MockCLOBClient mock_client(cfg);
+    // Paper trading: accepted mock orders synthesize venue fills into the
+    // account queue, so tracker/exposure/move-stop/brain all see real flow.
+    // Live mode never attaches (fills come from the private WSS channel).
+    if (mock) mock_client.attach_fill_queue(account_q.get());
     std::atomic<bool> workers_running{true};
     std::atomic<bool> trading_enabled{true};
 
@@ -280,8 +322,21 @@ int main() {
     });
 
     std::thread mock_thread;
+    std::thread mock_evidence_thread;
     std::thread kill_switch_thread;
     std::thread reconcile_thread;
+    std::unique_ptr<EvidenceFileReplayer> evidence_replayer;
+    if (cfg.bayes_enable && cfg.evidence_file[0]) {
+        // Paper-trading/backfill substrate: replay recorded NDJSON evidence,
+        // then tail new lines; recalibrates source weights from the recal
+        // file on the same cold thread.
+        evidence_replayer = std::make_unique<EvidenceFileReplayer>(
+            cfg.evidence_file, *evidence_q, &sources, cfg.bayes_recal_file);
+        const bool ok = evidence_replayer->start();
+        std::fprintf(stdout, ok ? "evidence replay: %s\n"
+                                : "evidence replay: %s (not found yet; "
+                                  "tailing)\n", cfg.evidence_file);
+    }
 #if defined(CROWDINTEL_LIVE)
     std::unique_ptr<WsMarketListener> market_listener;
     std::unique_ptr<WsMarketListener> hedge_listener;  // complement book (P2)
@@ -297,6 +352,41 @@ int main() {
             pin_to_cpu(cfg.cold_cpu);
             mock_feed(*signals, *book, cfg, workers_running);
         });
+        if (cfg.bayes_enable && sources_configured > 0) {
+            // Paper-trading brain demo: scripted COUNT observations on the
+            // FIRST configured source.  Alternating hit rates exercise both
+            // trigger directions against the synthetic book; each batch is
+            // dedup-proof (unique hash) and fires at most once.
+            mock_evidence_thread = std::thread([&] {
+                pin_to_cpu(cfg.cold_cpu);
+                const char* scan = cfg.bayes_sources;
+                uint32_t source = 0;
+                while (*scan && !std::isdigit(
+                           static_cast<unsigned char>(*scan)))
+                    ++scan;
+                char* end = nullptr;
+                const long parsed = std::strtol(scan, &end, 10);
+                if (end && end != scan) source = static_cast<uint32_t>(parsed);
+                uint32_t round = 0;
+                while (workers_running.load(std::memory_order_acquire)) {
+                    EvidenceEvent ev{};
+                    ev.kind = EvidenceEvent::Kind::COUNT;
+                    ev.source_id = source;
+                    ev.count_n = 32;
+                    ev.count_k = (round % 2) ? 10 : 22;  // sell / buy leans
+                    ev.event_hash = 0xE1000000U + round;
+                    ev.timestamp_ns = crowdintel::realtime_ns();
+                    (void)evidence_q->try_push(ev);
+                    ++round;
+                    for (uint32_t i = 0;
+                         i < 2500 &&
+                            workers_running.load(std::memory_order_acquire);
+                         i += 50)
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(50));
+                }
+            });
+        }
     }
 #if defined(CROWDINTEL_LIVE)
     else {
@@ -443,9 +533,23 @@ int main() {
     if (hedge_listener) hedge_listener->stop();
     if (gateway) gateway->stop();
 #endif
+    if (mock_evidence_thread.joinable()) mock_evidence_thread.join();
     if (mock_thread.joinable()) mock_thread.join();
     if (kill_switch_thread.joinable()) kill_switch_thread.join();
     if (reconcile_thread.joinable()) reconcile_thread.join();
+    if (evidence_replayer) {
+        evidence_replayer->stop();
+        std::fprintf(stdout, "  evidence replay parsed=%llu dropped=%llu\n",
+            static_cast<unsigned long long>(evidence_replayer->parsed()),
+            static_cast<unsigned long long>(evidence_replayer->dropped()));
+    }
+    if (cfg.bayes_enable)
+        std::fprintf(stdout,
+            "  bayes events=%llu count=%llu lr=%llu posterior=%.4f\n",
+            static_cast<unsigned long long>(bayes.events()),
+            static_cast<unsigned long long>(bayes.count_events()),
+            static_cast<unsigned long long>(bayes.lr_events()),
+            bayes.posterior());
     presign_thread.join();
     journal_thread.join();
 
@@ -471,6 +575,10 @@ int main() {
             static_cast<unsigned long long>(tracker_view.anomalies),
             static_cast<double>(tracker_view.realized_pnl) * 1e-6);
     }
+    if (mock) std::fprintf(stdout,
+        "  paper orders=%llu fills=%llu\n",
+        static_cast<unsigned long long>(mock_client.submissions()),
+        static_cast<unsigned long long>(mock_client.paper_fills()));
 #if defined(CROWDINTEL_LIVE)
     if (gateway) std::fprintf(stdout,
         "  gateway enqueued=%llu accepted=%llu rejected=%llu dropped=%llu retries=%llu cancelled=%llu\n",
