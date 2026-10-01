@@ -42,6 +42,11 @@ struct MarketConfig {
     uint64_t gtd_ttl_seconds = 0;
     char clob_host[128] = "https://clob.polymarket.com";
     char ws_host[192] = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+    // Private user channel (order/fill reconciliation) and hedge complement.
+    char ws_user_host[192] = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
+    char market_condition_id[80]{};  // optional 0x…64hex for subscription scoping
+    char hedge_token_id_dec[80]{};   // optional complement token id (binary pair)
+    uint8_t hedge_token_id_be[32]{};
 
     // Strategy / risk.  Values are deliberately conservative until account
     // reconciliation is implemented.
@@ -55,10 +60,35 @@ struct MarketConfig {
     double max_exposure_usd = 250.0;
     double max_daily_loss_usd = 50.0;
     uint64_t initial_position_shares = 0;
+    double initial_position_avg_price = 0.50;  // VWAP of supplied inventory
     uint64_t min_size_shares = 5000000;
     uint64_t presign_ttl_ms = 3000;
     uint64_t signal_ttl_ms = 2000;
     uint64_t max_book_age_ms = 3000;
+
+    // ── Brakes (P2) ─────────────────────────────────────────────────────────
+    double stop_loss_pct = 0.15;      // mark drop vs VWAP entry; 0 disables
+    double hedge_trigger_pct = 0.0;   // hedge trigger before stop; 0 disables
+    double max_portfolio_exposure_usd = 250.0;
+    uint64_t reservation_ttl_ms = 10000;   // unconfirmed reservation release
+    uint64_t reconcile_interval_sec = 30;  // REST reconciliation; 0 disables
+    double reconcile_max_drift_shares = 0.01;  // max tolerated |REST−local|
+
+    // ── Adverse selection (P3) ──────────────────────────────────────────────
+    double pool_max_dev_bps = 200.0;    // signed-price vs current mid guard
+    uint64_t pool_vol_ttl_ms = 500;     // ladder TTL while volatility is high
+    double vol_max_spread_bps = 1500.0; // spread regime threshold
+    uint64_t vol_max_ticks_per_sec = 200;    // markdown tick-rate threshold
+    double vol_mid_gap_bps = 500.0;     // EMA mid-gap regime threshold
+    double vol_size_multiplier = 0.5;   // passive size scale in volatile regime
+
+    // ── Brain (P4) ──────────────────────────────────────────────────────────
+    double bayes_prior_strength = 24.0;   // prior pseudo-count N0
+    double bayes_signal_threshold = 0.03; // posterior-vs-price edge gate
+    double bayes_min_reliability = 0.35;  // source weight gate [0,1]
+    char bayes_sources[512]{};            // "id:weight,id:weight,…" (0..1)
+    char bayes_recal_file[192]{};         // optional cold recalibration file
+    bool bayes_enable = true;
 
     // Alpha HTTP receiver (designed to sit behind a TLS/auth reverse proxy).
     char alpha_bind[64] = "127.0.0.1";
@@ -129,7 +159,10 @@ struct MarketConfig {
         long neg_risk_l = 0, sig = 0, presign_l = 0, signal_l = 0;
         long book_age_l = 0, pin_l = -1, cold_l = -1, ticks_l = 0;
         long armed_l = 0, gtd_l = 0;
+        long reservation_ttl_l = 10000, reconcile_l = 30, pool_vol_ttl_l = 500;
+        long vol_ticks_l = 200, bayes_on_l = 1;
         double tick = 0, min_size = 0, initial_position = 0;
+        double initial_avg = 0.50;
         if (!env_l("BOT_NEG_RISK", 0, neg_risk_l) ||
             !env_l("BOT_SIGNATURE_TYPE", 0, sig) ||
             !env_d("BOT_TICK_SIZE", 0.01, tick) ||
@@ -145,6 +178,27 @@ struct MarketConfig {
                    max_daily_loss_usd) ||
             !env_d("BOT_MIN_SIZE_SHARES", 5.0, min_size) ||
             !env_d("BOT_INITIAL_POSITION_SHARES", 0.0, initial_position) ||
+            !env_d("BOT_INITIAL_POSITION_AVG_PRICE", 0.50, initial_avg) ||
+            !env_d("BOT_STOP_LOSS_PCT", stop_loss_pct, stop_loss_pct) ||
+            !env_d("BOT_HEDGE_TRIGGER_PCT", hedge_trigger_pct,
+                   hedge_trigger_pct) ||
+            !env_d("BOT_MAX_PORTFOLIO_EXPOSURE_USD",
+                   max_portfolio_exposure_usd, max_portfolio_exposure_usd) ||
+            !env_d("BOT_POOL_MAX_DEV_BPS", pool_max_dev_bps,
+                   pool_max_dev_bps) ||
+            !env_d("BOT_VOL_MAX_SPREAD_BPS", vol_max_spread_bps,
+                   vol_max_spread_bps) ||
+            !env_d("BOT_VOL_MID_GAP_BPS", vol_mid_gap_bps, vol_mid_gap_bps) ||
+            !env_d("BOT_VOL_SIZE_MULTIPLIER", vol_size_multiplier,
+                   vol_size_multiplier) ||
+            !env_d("BOT_BAYES_PRIOR_STRENGTH", bayes_prior_strength,
+                   bayes_prior_strength) ||
+            !env_d("BOT_BAYES_SIGNAL_THRESHOLD", bayes_signal_threshold,
+                   bayes_signal_threshold) ||
+            !env_d("BOT_BAYES_MIN_RELIABILITY", bayes_min_reliability,
+                   bayes_min_reliability) ||
+            !env_d("BOT_RECONCILE_MAX_DRIFT_SHARES",
+                   reconcile_max_drift_shares, reconcile_max_drift_shares) ||
             !env_l("BOT_PRESIGN_TTL_MS", static_cast<long>(presign_ttl_ms),
                    presign_l) ||
             !env_l("BOT_SIGNAL_TTL_MS", static_cast<long>(signal_ttl_ms),
@@ -155,7 +209,12 @@ struct MarketConfig {
             !env_l("BOT_COLD_CPU", -1, cold_l) ||
             !env_l("BOT_TICKS", 0, ticks_l) ||
             !env_l("BOT_ENABLE_LIVE_TRADING", 0, armed_l) ||
-            !env_l("BOT_GTD_TTL_SECONDS", 0, gtd_l))
+            !env_l("BOT_GTD_TTL_SECONDS", 0, gtd_l) ||
+            !env_l("BOT_RESERVATION_TTL_MS", 10000, reservation_ttl_l) ||
+            !env_l("BOT_RECONCILE_INTERVAL_SEC", 30, reconcile_l) ||
+            !env_l("BOT_POOL_VOL_TTL_MS", 500, pool_vol_ttl_l) ||
+            !env_l("BOT_VOL_MAX_TICKS_PER_SEC", 200, vol_ticks_l) ||
+            !env_l("BOT_BAYES_ENABLE", 1, bayes_on_l))
             return "invalid numeric configuration value";
 
         if ((neg_risk_l != 0 && neg_risk_l != 1) ||
@@ -188,6 +247,38 @@ struct MarketConfig {
             pin_l < -1 || cold_l < -1 || pin_l > INT_MAX || cold_l > INT_MAX)
             return "runtime duration/CPU configuration is out of range";
 
+        if (!(initial_avg >= 0.0 && initial_avg <= 1.0))
+            return "BOT_INITIAL_POSITION_AVG_PRICE must be within [0, 1]";
+        constexpr uint64_t MAX_SAFE_MS2 = UINT64_MAX / 1000000ULL;
+        if (reservation_ttl_l < 1000 ||
+                static_cast<uint64_t>(reservation_ttl_l) > MAX_SAFE_MS2 ||
+            reconcile_l < 0 || reconcile_l > 86400 ||
+            pool_vol_ttl_l <= 0 ||
+                static_cast<uint64_t>(pool_vol_ttl_l) > MAX_SAFE_MS2 ||
+            vol_ticks_l < 0 || vol_ticks_l > 1000000 ||
+            (bayes_on_l != 0 && bayes_on_l != 1))
+            return "layer2+ duration/rate configuration is out of range";
+        if (stop_loss_pct < 0.0 || stop_loss_pct > 1.0 ||
+            hedge_trigger_pct < 0.0 || hedge_trigger_pct > 1.0 ||
+            max_portfolio_exposure_usd <= 0.0 ||
+            pool_max_dev_bps < 0.0 || pool_max_dev_bps > 5000.0 ||
+            vol_max_spread_bps <= 0.0 || vol_max_spread_bps > 9000.0 ||
+            vol_mid_gap_bps <= 0.0 || vol_mid_gap_bps > 5000.0 ||
+            vol_size_multiplier < 0.0 || vol_size_multiplier > 1.0 ||
+            bayes_prior_strength <= 0.0 || bayes_prior_strength > 100000.0 ||
+            bayes_signal_threshold <= 0.0 || bayes_signal_threshold >= 1.0 ||
+            bayes_min_reliability < 0.0 || bayes_min_reliability > 1.0 ||
+            reconcile_max_drift_shares < 0.0 ||
+            reconcile_max_drift_shares > 1000000.0)
+            return "invalid brakes/adverse-selection/brain configuration value";
+        if (hedge_trigger_pct > 0.0 && stop_loss_pct > 0.0 &&
+            hedge_trigger_pct >= stop_loss_pct)
+            return "BOT_HEDGE_TRIGGER_PCT must fire strictly before BOT_STOP_LOSS_PCT";
+        reservation_ttl_ms = static_cast<uint64_t>(reservation_ttl_l);
+        reconcile_interval_sec = static_cast<uint64_t>(reconcile_l);
+        pool_vol_ttl_ms = static_cast<uint64_t>(pool_vol_ttl_l);
+        vol_max_ticks_per_sec = static_cast<uint64_t>(vol_ticks_l);
+        bayes_enable = bayes_on_l == 1;
         neg_risk = neg_risk_l == 1;
         signature_type = static_cast<uint8_t>(sig);
         if (signature_type == 3)
@@ -196,6 +287,7 @@ struct MarketConfig {
         min_size_shares = static_cast<uint64_t>(std::round(min_size_scaled));
         initial_position_shares =
             static_cast<uint64_t>(std::round(initial_position_scaled));
+        initial_position_avg_price = initial_avg;
         presign_ttl_ms = static_cast<uint64_t>(presign_l);
         signal_ttl_ms = static_cast<uint64_t>(signal_l);
         max_book_age_ms = static_cast<uint64_t>(book_age_l);
@@ -213,13 +305,22 @@ struct MarketConfig {
         if (!copy_env(order_type, "BOT_ORDER_TYPE", order_type) ||
             !copy_env(clob_host, "CLOB_HOST", clob_host) ||
             !copy_env(ws_host, "WS_HOST", ws_host) ||
+            !copy_env(ws_user_host, "BOT_WS_USER_HOST", ws_user_host) ||
+            !copy_env(market_condition_id, "BOT_MARKET_CONDITION_ID", "") ||
+            !copy_env(hedge_token_id_dec, "BOT_HEDGE_TOKEN_ID", "") ||
             !copy_env(tls_pin, "BOT_TLS_PIN", "") ||
             !copy_env(kill_switch_file, "BOT_KILL_SWITCH_FILE",
                       kill_switch_file) ||
             !copy_env(market_slug, "BOT_MARKET_SLUG",
                       mock_mode ? "mock-market" : "") ||
+            !copy_env(bayes_sources, "BOT_BAYES_SOURCES", "") ||
+            !copy_env(bayes_recal_file, "BOT_BAYES_RECAL_FILE", "") ||
             !copy_env(alpha_bind, "BOT_ALPHA_BIND", alpha_bind))
             return "configuration string exceeds its bounded capacity";
+        if (!valid_bayes_sources(bayes_sources))
+            return "BOT_BAYES_SOURCES must be 'id:weight' pairs (weight in [0,1])";
+        if (!safe_config_text(bayes_recal_file))
+            return "BOT_BAYES_RECAL_FILE cannot contain control characters";
         if (!safe_config_text(order_type) || !safe_config_text(clob_host) ||
             !safe_config_text(ws_host) || !safe_config_text(tls_pin) ||
             !safe_config_text(kill_switch_file) ||
@@ -261,6 +362,11 @@ struct MarketConfig {
             return "CLOB_HOST must be an origin-only https:// URL in live mode";
         if (!mock_mode && !valid_secure_url(ws_host, "wss://", true))
             return "WS_HOST must be a valid wss:// URL in live mode";
+        if (!mock_mode && !valid_secure_url(ws_user_host, "wss://", true))
+            return "BOT_WS_USER_HOST must be a valid wss:// URL in live mode";
+        if (market_condition_id[0] &&
+            !valid_condition_id(market_condition_id))
+            return "BOT_MARKET_CONDITION_ID must be 0x followed by 64 lowercase hex chars";
 
         if (need_trading_creds) {
             if (!live_armed)
@@ -304,6 +410,19 @@ struct MarketConfig {
         for (const uint8_t byte : token_id_be) token_nonzero |= byte != 0;
         if (!token_nonzero) return "BOT_TOKEN_ID cannot be zero";
         std::memcpy(token_id_dec, tok, token_len + 1);
+        if (hedge_token_id_dec[0]) {
+            const size_t hedge_len = std::strlen(hedge_token_id_dec);
+            if (hedge_len >= sizeof(hedge_token_id_dec) ||
+                (hedge_len > 1 && hedge_token_id_dec[0] == '0') ||
+                !parse_uint256_dec(hedge_token_id_dec, hedge_len,
+                                   hedge_token_id_be) ||
+                std::strcmp(hedge_token_id_dec, token_id_dec) == 0)
+                return "BOT_HEDGE_TOKEN_ID is not a canonical nonzero uint256 distinct from BOT_TOKEN_ID";
+            bool hedge_nonzero = false;
+            for (const uint8_t byte : hedge_token_id_be)
+                hedge_nonzero |= byte != 0;
+            if (!hedge_nonzero) return "BOT_HEDGE_TOKEN_ID cannot be zero";
+        }
         return nullptr;
     }
 
@@ -343,6 +462,45 @@ struct MarketConfig {
     }
 
 private:
+    static bool valid_bayes_sources(const char* sources) noexcept {
+        if (!sources) return false;
+        if (!*sources) return true;  // empty = all sources at default weight
+        const char* p = sources;
+        while (*p) {
+            const char* colon = std::strchr(p, ':');
+            if (!colon || colon == p) return false;
+            long id = 0;
+            for (const char* c = p; c < colon; ++c) {
+                if (*c < '0' || *c > '9') return false;
+                id = id * 10 + (*c - '0');
+                if (id > 255) return false;
+            }
+            const char* v = colon + 1;
+            if (*v == '\0') return false;
+            char* end = nullptr;
+            errno = 0;
+            const double w = std::strtod(v, &end);
+            if (errno == ERANGE || !end || !std::isfinite(w) ||
+                w < 0.0 || w > 1.0)
+                return false;
+            if (*end == '\0') return true;
+            if (*end != ',') return false;
+            p = end + 1;
+            if (*p == '\0') return false;
+        }
+        return true;
+    }
+
+    static bool valid_condition_id(const char* id) noexcept {
+        if (!id || id[0] != '0' || id[1] != 'x' || std::strlen(id) != 66)
+            return false;
+        for (size_t i = 2; i < 66; ++i)
+            if (!(id[i] >= '0' && id[i] <= '9') &&
+                !(id[i] >= 'a' && id[i] <= 'f'))
+                return false;
+        return true;
+    }
+
     static bool valid_market_slug(const char* slug) noexcept {
         if (!slug || !*slug) return false;
         for (const unsigned char* p =
