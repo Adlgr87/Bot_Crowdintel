@@ -16,6 +16,7 @@
 #include "../include/order_book.hpp"
 #include "../include/position_tracker.hpp"
 #include "../include/risk_manager.hpp"
+#include "../include/volatility_gate.hpp"
 #include "../include/spsc_ring_buffer.hpp"
 #include "../include/time_utils.hpp"
 #include "alpha_receiver.hpp"
@@ -44,7 +45,7 @@ enum class TickResult : uint8_t {
     RISK_STOP_LOSS,      // protective close emitted without alpha input
     RISK_HEDGE,          // hedge order emitted on the complement token
     RISK_KILL_SWITCH,    // daily-loss kill switch was latched this tick
-    STALE_PRICE_ABORT,   // post-sign top recheck rejected a stale order
+    STALE_PRICE_ABORT,   // slippage-vs-mid guard rejected a stale/toxic order
     VOLATILITY_PAUSED,   // volatility regime suppressed passive flow
     BAYES_SIGNAL,        // a bayesian posterior fired an order this tick
     COUNT
@@ -154,10 +155,50 @@ public:
             housework == TickResult::RISK_HEDGE)
             return housework;  // protective action owns this tick
 
+        // ── P3 (adverse selection) ─────────────────────────────────────────
+        // Mid observation must be CONTINUOUS: the shock FSM only detects a
+        // >5%/100ms jump if it sees the mid every tick, not only when alpha
+        // happens to arrive.  One extra best-effort seqlock read (~tens of
+        // ns) far from the +5us budget, and only when the gate is attached.
+        bool flow_suppressed = false;
+        if (volatility_) {
+            OrderBookL2::Top obs{};
+            const uint64_t max_age_ns = cfg_.max_book_age_ms * 1000000ULL;
+            if (book_.read_top(obs, max_age_ns) && obs.bid.size != 0 &&
+                obs.ask.size != 0 && obs.bid.price < obs.ask.price) {
+                const uint64_t mid_obs = (obs.bid.price + obs.ask.price) / 2;
+                const bool shocked = volatility_->observe_mid(
+                    mid_obs, crowdintel::mono_ns());
+                flow_suppressed = shocked || volatility_->paused();
+                const uint32_t regime = volatility_->regime();
+                if (regime != last_regime_) {
+                    journal(regime != 0 ? JournalEvent::Type::VOLATILITY_ENTER
+                                        : JournalEvent::Type::VOLATILITY_EXIT,
+                            0, regime,
+                            obs.ask.price - obs.bid.price, 0);
+                    last_regime_ = regime;
+                }
+                // Every newly-armed shock is journaled exactly once: the
+                // discarded ladder slots are auditable (P3 acceptance:
+                // "logs and adapts" on a >5% jump inside 100 ms).
+                const uint64_t shock_count = volatility_->shocks();
+                if (shock_count != shocks_seen_) {
+                    journal(JournalEvent::Type::POOL_STALE_DROP, 0,
+                            mid_obs, shock_count, 0);
+                    shocks_seen_ = shock_count;
+                }
+            }
+        }
+
         AlphaSignal signal{};
         if (!signals_.try_pop(signal))
             return housework != TickResult::NO_SIGNAL ? housework
                                                       : TickResult::NO_SIGNAL;
+
+        // Suppressed flow consumes and discards the signal so the producer
+        // queue drains; the signal's own TTL explicitly expires it.
+        if (volatility_ && flow_suppressed)
+            return TickResult::VOLATILITY_PAUSED;
 
         if (risk_ && risk_->killed()) return TickResult::RISK_REJECTED;
 
@@ -216,6 +257,19 @@ public:
         const double edge = net_edge(side, signal.p_win, price);
         if (edge < cfg_.min_edge) return TickResult::NO_EDGE;
 
+        // Pre-sign slippage guard (P3): the signed target may never sit
+        // further than BOT_POOL_MAX_DEV_BPS from the CURRENT mid.  A pool
+        // slot whose price drifted that far away is a stale order; firing it
+        // would realize exactly the adverse selection this layer exists for.
+        const uint64_t mid_now = (top.bid.price + top.ask.price) / 2;
+        if (volatility_ &&
+            !volatility_->slippage_ok(side, price_raw, mid_now)) {
+            volatility_->note_stale_abort();
+            journal(JournalEvent::Type::STALE_PRICE_ABORT, 0, price_raw,
+                    mid_now, 0);
+            return TickResult::STALE_PRICE_ABORT;
+        }
+
         // Size against the fee-adjusted execution price.  This is conservative:
         // fees reduce both the gate and the Kelly fraction.
         const double fee_per_share = cfg_.taker_fee_rate * price * (1.0 - price);
@@ -237,6 +291,13 @@ public:
                 std::max(0.0, cfg_.max_daily_loss_usd - worst_loss_now_usd()));
         }
         usd = std::min(usd, available_budget);
+        // Volatile regime shrinks passive size (P3): the cold sampler scales
+        // by BOT_VOL_SIZE_MULTIPLIER; a pause never reaches this line.
+        if (volatility_) {
+            const uint32_t shrink = volatility_->size_permille();
+            if (shrink < 1000)
+                usd = usd * static_cast<double>(shrink) / 1000.0;
+        }
         uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, price);
 
         const uint64_t visible = side == K_SIDE_BUY ? top.ask.size : top.bid.size;
@@ -276,9 +337,12 @@ public:
 
         WireBody body{};
         uint64_t pool_size = 0, pool_maker = 0, pool_taker = 0;
+        // Dynamic ladder TTL (P3): volatile regimes tighten the freshness
+        // window (BOT_POOL_VOL_TTL_MS); volatile=off keeps the static TTL.
         bool presigned = pool_.acquire_at_most(
             side, price_raw, tick, effective_shares, body,
-            pool_size, pool_maker, pool_taker);
+            pool_size, pool_maker, pool_taker,
+            volatility_ ? volatility_->effective_ttl_ms() : 0);
         if (presigned) {
             effective_shares = pool_size;
             maker_amount = pool_maker;
@@ -655,6 +719,8 @@ private:
     SPSC_RingBuffer<TrackerRestate, 16>* restate_q_ = nullptr;
     RiskManager* risk_ = nullptr;
     VolatilityGate* volatility_ = nullptr;
+    uint32_t last_regime_ = 0;
+    uint64_t shocks_seen_ = 0;
     SPSC_RingBuffer<EvidenceEvent>* evidence_q_ = nullptr;
     BayesianEngine* bayes_ = nullptr;
     SourceReliability* sources_ = nullptr;

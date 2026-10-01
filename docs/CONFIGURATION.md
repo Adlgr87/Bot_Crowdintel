@@ -53,6 +53,33 @@ The deployment unit maps root-only files through systemd `LoadCredential=`. Do n
 
 A conservative default is not a verified venue value. Tick, fee schedule, minimum size, negative-risk status, token ID, balances, allowances, open orders, and inventory must come from current market/account metadata during preflight.
 
+## Eyes — accounting and reconciliation (P1)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_RESERVATION_TTL_MS` | `10000` | Unconfirmed local reservations are released after this age (unfilled maker orders, dead venues). |
+| `BOT_RECONCILE_INTERVAL_SEC` | `30` | Periodic REST positions reconciliation; `0` disables. |
+| `BOT_RECONCILE_MAX_DRIFT_SHARES` | `0.01` | Max tolerated \|REST−local\| inventory drift; larger drift restates state and latches the kill switch. |
+
+## Brakes — risk manager (P2)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_STOP_LOSS_PCT` | `0.15` | Stop-loss: liquidation-mark drop vs VWAP entry that closes the position. `0` disables. |
+| `BOT_HEDGE_TRIGGER_PCT` | `0` | Earlier trigger that buys the complement token (`BOT_HEDGE_TOKEN_ID`). Must fire strictly before the stop-loss; `0` disables. |
+| `BOT_MAX_PORTFOLIO_EXPOSURE_USD` | `250` | Portfolio-wide exposure cap enforced pre-signature. |
+
+## Adverse selection — volatility gate (P3)
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BOT_POOL_MAX_DEV_BPS` | `200` | Max deviation of an order's price vs the CURRENT mid; a stale pool slot or toxic spread is refused. `0` disables. |
+| `BOT_POOL_VOL_TTL_MS` | `500` | Pre-signed ladder TTL while the regime is volatile. |
+| `BOT_VOL_MAX_SPREAD_BPS` | `1500` | Spread width (bps of mid) that flags a volatile regime. |
+| `BOT_VOL_MAX_TICKS_PER_SEC` | `200` | Mid-change rate (Hz) that flags a volatile regime. `0` disables. |
+| `BOT_VOL_MID_GAP_BPS` | `500` | Mid jump arming the 100 ms shock window; cooldown suppresses passive flow for 250 ms. |
+| `BOT_VOL_SIZE_MULTIPLIER` | `0.5` | Passive size scale while the regime is volatile (halved again when extreme). |
+
 ## Transport and runtime
 
 | Variable | Default | Notes |

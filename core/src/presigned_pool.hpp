@@ -116,10 +116,15 @@ public:
     }
 
     // Largest unconsumed bucket <= max_size.  Returns signed amounts so the
-    // risk ledger reserves exactly what will be submitted.
+    // risk ledger reserves exactly what will be submitted.  `max_age_ms` is an
+    // optional dynamic TTL cap from the volatility gate (P3): when non-zero
+    // and tighter than the static pool TTL, it wins.  0 = static TTL only.
     bool acquire_at_most(uint8_t side, uint64_t price, uint64_t tick_size,
                          uint64_t max_size, WireBody& out, uint64_t& actual_size,
-                         uint64_t& maker_amount, uint64_t& taker_amount) const {
+                         uint64_t& maker_amount, uint64_t& taker_amount,
+                         uint64_t max_age_ms = 0) const {
+        const uint64_t ttl_ms =
+            max_age_ms != 0 && max_age_ms < ttl_ms_ ? max_age_ms : ttl_ms_;
         for (int retry = 0; retry < 8; ++retry) {
             const uint32_t index = active_.load(std::memory_order_acquire);
             uint32_t access = access_[index].load(std::memory_order_acquire);
@@ -142,7 +147,7 @@ public:
                 if (meta.side == side && meta.price == price &&
                     meta.tick_size == tick_size && meta.size <= max_size &&
                     meta.size > best_size &&
-                    now >= meta.built_ms && now - meta.built_ms <= ttl_ms_ &&
+                    now >= meta.built_ms && now - meta.built_ms <= ttl_ms &&
                     meta.consumed.load(std::memory_order_relaxed) == 0) {
                     best = i;
                     best_size = meta.size;
