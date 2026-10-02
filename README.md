@@ -74,3 +74,4 @@ This is the public KAT key used only for local deterministic startup. Never reus
 - [Polymarket production plan and official parameter matrix (Spanish)](docs/POLYMARKET_PRODUCTION_PLAN.es.md)
 - [Reviewed production policy](config.prod.toml)
 - [Kernel/chrony tuning policy](infra/config/kernel_tuning.conf)
+- [Auditoría de preparación para escenario real](docs/AUDIT_REAL_SCENARIO_2026-10-02.md)
