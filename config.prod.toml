@@ -1,0 +1,75 @@
+# CrowdIntel production policy (reference configuration).
+# The current C++ binary consumes environment variables, not TOML directly.
+# Keep this file as the reviewed source of non-secret policy and project it to
+# /etc/crowdintel/config only after translating keys with the deployment owner.
+# Live arming remains impossible without a real market/token and credentials.
+
+[venue]
+chain_id = 137
+clob_rest = "https://clob.polymarket.com"
+market_ws = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+user_ws = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+# Use an operator-selected Polygon HTTPS RPC; Polymarket does not publish a
+# privileged RPC endpoint. Do not hard-code a provider key in this repository.
+rpc_url = "https://polygon-rpc.com"
+standard_exchange = "0xE111180000d2663C0091e4f400237545B87B996B"
+negative_risk_exchange = "0xe2222d279d744050d28e00520010520000310F59"
+collateral = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB" # pUSD, CLOB V2
+ctf = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+[arming]
+mode = "mock"
+enable_live_trading = false
+order_type = "FAK"
+post_only = false
+avoid_close_seconds = 30
+simulation_hours_required = 24
+
+[market_filter]
+# 0 means the live market metadata must be read; no stale venue assumption.
+min_liquidity_usd = 10000.0
+min_24h_volume_usd = 25000.0
+allowed_categories = ["politics", "crypto", "sports", "finance"]
+max_taker_fee_rate = 0.07
+require_active = true
+require_order_enabled = true
+
+[risk]
+bankroll_usd = 1000.0
+kelly_fraction = 0.10
+max_daily_loss_usd = 50.0
+max_order_usd = 100.0
+max_exposure_usd = 250.0
+min_edge = 0.02
+min_confidence = 0.85
+max_q_value = 0.05
+min_size_shares = 5.0
+max_book_age_ms = 3000
+max_signal_age_ms = 2000
+stop_loss_fraction = 0.05
+
+[execution]
+# These are policies, not guarantees. Venue tick/min-size are authoritative per market.
+max_spread = 0.03
+default_tick_size = 0.01
+price_min = 0.001
+price_max = 0.999
+max_order_rate_per_second = 150
+cancel_scope = "market"
+reconnect_initial_ms = 100
+reconnect_max_ms = 5000
+full_snapshot_after_reconnect = true
+heartbeat_interval_seconds = 5
+
+[alpha]
+method = "benjamini_hochberg"
+fdr_q = 0.05
+min_observations = 200
+insider_volume_zscore = 4.0
+temporal_window_seconds = 120
+
+[observability]
+latency_clock = "CLOCK_MONOTONIC_RAW"
+record_rdtsc_calibration = true
+telegram_alerts = false
+state_checkpoint_seconds = 60

@@ -71,3 +71,6 @@ This is the public KAT key used only for local deterministic startup. Never reus
 - [Security and threat model](docs/SECURITY.md)
 - [Benchmark methodology](docs/BENCHMARKING.md)
 - [Observation-by-observation remediation status](docs/REMEDIATION_STATUS.md)
+- [Polymarket production plan and official parameter matrix (Spanish)](docs/POLYMARKET_PRODUCTION_PLAN.es.md)
+- [Reviewed production policy](config.prod.toml)
+- [Kernel/chrony tuning policy](infra/config/kernel_tuning.conf)
