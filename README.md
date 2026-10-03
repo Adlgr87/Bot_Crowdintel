@@ -2,11 +2,11 @@
 
 A low-latency C++20 research and execution engine for Polymarket's CLOB V2. It combines authenticated alpha ingress, an L2 WebSocket book, exact fixed-point order construction, EIP-712 signing, a consumable pre-signed ladder, bounded SPSC queues, risk gates, and asynchronous HTTPS submission.
 
-> **Deployment status:** offline and mock paths are tested. This repository is **not approved for unattended live trading**: private-channel fill/order reconciliation and automatic inventory recovery are still missing, and signature type 3 intentionally fails closed until correct ERC-7739 wrapping is implemented. See [the deployment runbook](docs/DEPLOYMENT.md) and [remediation ledger](docs/REMEDIATION_STATUS.md).
+> **Deployment status:** offline/replay paths are tested and paper shares the live data path without order egress. This repository is **not approved for unattended live trading**: private-channel fill/order reconciliation and automatic inventory recovery are still missing, and signature type 3 intentionally fails closed until correct ERC-7739 wrapping is implemented. See [the deployment runbook](docs/DEPLOYMENT.md) and [remediation ledger](docs/REMEDIATION_STATUS.md).
 
 ## Safety model
 
-The executable starts in mock mode unless built with network dependencies and invoked without `BOT_MODE=mock`. Live startup additionally requires `BOT_ENABLE_LIVE_TRADING=1`, credentials, market identity, and a valid alpha bearer token. Unknown ticks, stale books/signals, exhausted signatures, invalid responses, unsupported signature type 3, and active kill switches fail closed.
+`BOT_MODE` is mandatory and names exactly one execution mode: `replay` (offline, synthetic feed, simulated fills), `paper` (live public market data and metadata, simulated fills, no order egress) or `live` (real orders). The historical `mock` value is rejected. `live` additionally requires `BOT_ENABLE_LIVE_TRADING=1`, L2 credentials, a journal, market identity, and a valid alpha bearer token; `paper`/`replay` reject the arming flag, the journal and the venue parameters that the market document provides. Unknown configuration names, unknown ticks, stale books/signals, exhausted signatures, invalid responses, unsupported signature type 3, and active kill switches fail closed.
 
 An enqueued order is **not** an accepted order. Final semantic acceptance requires HTTP 2xx plus a successful CLOB response. Ambiguous timeouts are not retried blindly.
 
@@ -53,15 +53,24 @@ build/bin/latency_bench
 
 CI covers GCC and Clang, network/offline builds, ASan+UBSan, TSan, the production container/non-root identity, the independent signer reference, replay, and loose gross-regression latency budgets.
 
-## Mock run
+## Replay and paper runs
 
 ```bash
-BOT_MODE=mock BOT_TICKS=20 \
+# Deterministic offline replay: no socket is opened.
+BOT_MODE=replay BOT_TICKS=20 \
 BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b \
+  build/bin/crowdintel_bot
+
+# Paper: live market data and metadata, simulated fills, no order egress.
+BOT_MODE=paper BOT_TICKS=200 BOT_MARKET_SLUG=<slug> BOT_OUTCOME=Yes \
+BOT_ALPHA_BEARER_TOKEN=<at least 16 printable chars> \
+BOT_PRIVATE_KEY_HEX=<64 hex chars> \
   build/bin/crowdintel_bot
 ```
 
-This is the public KAT key used only for local deterministic startup. Never reuse it for funds.
+The key is the public KAT key used only for local deterministic startup (a
+replay/paper key is never transmitted in replay and never produces a wire order
+in paper). Never reuse it for funds.
 
 ## Documentation
 

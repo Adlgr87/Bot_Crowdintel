@@ -114,7 +114,7 @@ jobs:
         run: |
           test "$(docker image inspect crowdintel:ci --format '{{.Config.User}}')" = "10001:10001"
           docker run --rm \
-            -e BOT_MODE=mock -e BOT_TICKS=1 \
+            -e BOT_MODE=replay -e BOT_TICKS=1 \
             -e BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b \
             crowdintel:ci
 

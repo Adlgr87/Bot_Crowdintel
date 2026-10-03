@@ -22,9 +22,9 @@ Status vocabulary:
 | 11 | Presigned orders were detached from actual side/price/size | Added bid/ask ladders, eight risk buckets per side, explicit tick-generation/market/price/TTL matching, largest safe bucket selection, and one-time CAS consumption. Unknown tick changes invalidate the book, and a pool miss falls back rather than crossing generations. | Implemented/tested offline. |
 | 12 | Benchmark omitted HMAC/network while headline implied full submit | Renamed/documented CPU measurements and separated mock enqueue from semantic venue acceptance. | Corrected; target-host e2e instrumentation still required. |
 | 13 | Pool/benchmark signature counts were inconsistent | Benchmark now reports measured production/rejections, consumes actual slots, and replenishes by batch. | Implemented/tested offline. |
-| 14 | No open-order/fill/inventory reconciliation | Engine no longer credits reservations as fills and SELL requires confirmed inventory. Service does not auto-restart after ambiguity. | **Unresolved production blocker.** Add authenticated private channel plus REST startup/periodic reconciliation. |
+| 14 | No open-order/fill/inventory reconciliation | Engine no longer credits reservations as fills and SELL requires confirmed inventory. Service does not auto-restart after ambiguity. Phases 3-6 added the authenticated user channel, the order heartbeat, the append-only journal with a mandatory `UNKNOWN` state, the startup/post-disconnect REST reconciliation gate and the account preflight (`crowdintel-preflight`); live startup stops before the signer exists while anything is unproven. | Implemented/tested offline. Residual: *continuous* reconciliation and inventory/PnL accounting, plus the live SDK/account validation in the runbook. |
 | 15 | Health check/unit could report healthy while unusable | Docker health is explicitly liveness-only; readiness must use metrics. systemd is fail-closed and no-auto-restart. Deployment checklist verifies feed/account separately. | Partial: native machine-readable readiness endpoint is still desirable. |
-| 16 | Configuration and README disagreed with code | Added one environment reference, non-secret production template, architecture, security, deployment, benchmark, and status documents. | Implemented; keep docs in CI/review scope. |
+| 16 | Configuration and README disagreed with code | Added one environment reference, non-secret production template, architecture, security, deployment, benchmark, and status documents. Phase 7 removed the remaining ambiguity: `BOT_MODE` is mandatory (`replay`/`paper`/`live`, `mock` rejected), replay/paper/live requirements are explicit, the order journal and the arming flag are live-only, venue parameters are rejected outside replay, and every unknown `BOT_`/`CLOB_`/`GAMMA_`/`WS_` name aborts startup. The deployed file remains the systemd `EnvironmentFile` (`KEY=value`, no TOML, no second parser); the deploy script and runbook no longer tell operators to set live-rejected variables. | Implemented/tested offline; keep docs in CI/review scope. |
 | 17 | Backtester booked artificial same-tick spread PnL | Changed to next-tick marking, V2 fees, and exclusion of an unmarkable final trade. | Implemented/tested smoke. Still not a fill/impact simulator. |
 | 18 | WSS parser handled only a narrow obsolete schema | Supports current `book`, `price_change(s)`, best bid/ask, tick-size changes, object arrays and legacy pair fixtures; filters assets and bounds length. | Implemented/tested fixtures; fuzzing and live schema monitoring remain. |
 | 19 | Signature type 3 was treated as ordinary 65-byte ECDSA | Type 3 now fails startup with an ERC-7739-specific error. Signature storage/wire must become variable-length before support is added. | Fail-closed. Use official V2 sidecar or implement/verify wrapper; never fake it. |
@@ -46,6 +46,23 @@ The repository does not claim that:
 - fees/ticks/minimums stay constant across markets;
 - target-host end-to-end latency meets any SLO;
 - DNS, TLS pin rotation, exchange outage, packet loss, or clock-jump behavior is production-proven;
-- replay PnL predicts live profitability.
+- replay PnL predicts live profitability;
+- a public-market `paper` run or a `live` run has ever completed a session against
+  the venue: this sandbox cannot reach `gamma-api.polymarket.com` /
+  `clob.polymarket.com`, so both stop at the first authenticated request
+  (`READINESS = BLOCKED reason=gamma request failed: SSL connect error`). Every
+  network path added in phases 3-7 is exercised through scripted transports in
+  the unit suites, not against the venue;
+- the `max` allowance sentinel is what the CLOB returns for an unlimited
+  approval (it is documented for the Data API approvals endpoint only), nor that
+  the `allowances` map is keyed by the exchange address for a live account;
+- the venue accepts this build's TLS stack, its WSS subscribe frames, or its
+  heartbeat body: the request/response shapes are taken from the published
+  OpenAPI/AsyncAPI documents, which is not the same as a live acknowledgement;
+- `BOT_ENABLE_LIVE_TRADING=1` and the journal cannot be reached by a replay or
+  paper run in ways other than the validated configuration paths;
+- the paper mode's "no order egress" claim is enforced by anything other than
+  the absence of a gateway object in that topology (a live run of the same
+  binary with `BOT_MODE=live` does build one).
 
 These require current credentials, the exact market/account, independent SDK output, controlled capital, and/or target hardware. The deployment runbook defines the evidence needed before changing those statuses.

@@ -33,4 +33,4 @@ _Last updated: 2026-09-30. The authoritative observation-by-observation ledger i
 3. Automated readiness that includes public feed and private account-state health.
 4. Controlled canary evidence against the current official SDK and exact account/market.
 
-Until those are resolved, the project is suitable for offline research, mock/shadow validation, and tightly supervised disposable canaries only—not unattended real-money deployment. Follow [DEPLOYMENT.md](DEPLOYMENT.md).
+Until those are resolved, the project is suitable for offline research, replay/paper shadow validation, and tightly supervised disposable canaries only—not unattended real-money deployment. Follow [DEPLOYMENT.md](DEPLOYMENT.md).

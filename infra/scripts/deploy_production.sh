@@ -107,6 +107,8 @@ LoadCredential=clob_passphrase:/etc/crowdintel/credentials/clob_passphrase
 LoadCredential=alpha_bearer_token:/etc/crowdintel/credentials/alpha_bearer_token
 RuntimeDirectory=crowdintel
 RuntimeDirectoryMode=0750
+StateDirectory=crowdintel
+StateDirectoryMode=0750
 UMask=0077
 Restart=no
 LimitMEMLOCK=64M
@@ -147,26 +149,34 @@ EOF
 cat <<EOF
 Deployment staged but NOT started.
 
-1. Create /etc/crowdintel/config (root:crowdintel, mode 0640) with non-secret values:
+1. Create /etc/crowdintel/config (root:crowdintel, mode 0640) from
+   infra/config/production.env.example. It is a plain KEY=value file consumed by
+   EnvironmentFile= ; there is no TOML and every BOT_/CLOB_/GAMMA_/WS_ name the
+   build does not read aborts startup. Non-secret values:
    BOT_MODE=live
-   BOT_ENABLE_LIVE_TRADING=1
-   BOT_TOKEN_ID=...
-   BOT_MARKET_SLUG=...
+   BOT_ENABLE_LIVE_TRADING=0   # set to 1 last, after the preflight passes
+   BOT_MARKET_SLUG=...         # or BOT_CONDITION_ID=0x...
+   BOT_OUTCOME=Yes             # multi-outcome markets only
    BOT_SIGNATURE_TYPE=0        # type 3 intentionally fails closed
    BOT_PIN_CPU=$HOT_CORE
    BOT_COLD_CPU=$COLD_CORE
    BOT_KILL_SWITCH_FILE=/run/crowdintel/kill
-   BOT_TAKER_FEE_RATE=...      # fetch from market metadata
+   BOT_LEDGER_PATH=/var/lib/crowdintel/orders.journal
    BOT_INITIAL_POSITION_SHARES=...
    BOT_MAX_ORDER_USD=...
    BOT_MAX_EXPOSURE_USD=...
    BOT_MAX_DAILY_LOSS_USD=...
+   # Tick size, minimum size, fee curve, negative-risk flag and token id are
+   # venue metadata: do NOT set them here (only replay mode accepts fixtures).
 
 2. Put one value (optional trailing newline) in each root-only file under
    /etc/crowdintel/credentials/: bot_private_key, clob_api_key, clob_secret,
-   clob_passphrase, alpha_bearer_token; chmod 0400.
+   clob_passphrase, alpha_bearer_token; chmod 0400. The preflight refuses to run
+   with the signing key present, so run it from an environment that carries the
+   config and the L2 credentials only.
 
-3. Complete balance/allowance and paper-order preflight, then:
+3. Validate the document with `crowdintel-metadata`, prove the account with
+   `crowdintel-preflight`, then set BOT_ENABLE_LIVE_TRADING=1 and start:
    sudo systemctl daemon-reload
    sudo systemctl enable --now crowdintel
 
