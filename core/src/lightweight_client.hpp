@@ -13,6 +13,7 @@
 #include "../crypto/secure_zero.hpp"
 #include "../crypto/sha256_engine.hpp"
 #include "../include/bounded_json.hpp"
+#include "l2_auth.hpp"
 #include "market_config.hpp"
 #include "polymarket_order.hpp"
 
@@ -78,50 +79,31 @@ public:
         }
 
         char timestamp[24];
-        const size_t timestamp_len = u64_to_dec(now_unix_seconds(), timestamp);
+        u64_to_dec(now_unix_seconds(), timestamp);
 
         // L2 HMAC: timestamp + method + path + exact body bytes.
-        uint8_t digest[32];
-        char message[1600 + 64];
-        size_t message_len = 0;
-        std::memcpy(message + message_len, timestamp, timestamp_len);
-        message_len += timestamp_len;
-        std::memcpy(message + message_len, "POST/order", 10);
-        message_len += 10;
-        std::memcpy(message + message_len, body.buf, body.len);
-        message_len += body.len;
-        hmac_.compute(reinterpret_cast<const uint8_t*>(message), message_len, digest);
-        secure_zero(message, message_len);
-
-        char signature_b64[48];
-        const size_t signature_len = base64url_encode(digest, 32, signature_b64);
-        signature_b64[signature_len] = '\0';
-        secure_zero(digest, sizeof(digest));
-
-        char address_header[80], signature_header[96], timestamp_header[48];
-        char api_key_header[96], passphrase_header[160];
-        std::snprintf(address_header, sizeof(address_header),
-                      "POLY_ADDRESS: %s", cfg_.api_address_hex);
-        std::snprintf(signature_header, sizeof(signature_header),
-                      "POLY_SIGNATURE: %s", signature_b64);
-        std::snprintf(timestamp_header, sizeof(timestamp_header),
-                      "POLY_TIMESTAMP: %.*s", static_cast<int>(timestamp_len), timestamp);
-        std::snprintf(api_key_header, sizeof(api_key_header),
-                      "POLY_API_KEY: %s", cfg_.owner_api_key);
-        std::snprintf(passphrase_header, sizeof(passphrase_header),
-                      "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
+        l2auth::Credentials credentials{cfg_.owner_api_key, cfg_.api_address_hex,
+                                        cfg_.api_secret_b64, cfg_.api_passphrase};
+        l2auth::Headers headers_text;
+        if (!l2auth::build_headers(credentials, secret_raw_, secret_len_, timestamp,
+                                   "POST", "/order", body.buf, body.len,
+                                   headers_text)) {
+            std::snprintf(result.error, sizeof(result.error),
+                          "L2 request signing failed");
+            return result;
+        }
 
         curl_slist* headers = nullptr;
-        bool headers_ok = append_header(headers, address_header);
-        headers_ok = append_header(headers, signature_header) && headers_ok;
-        headers_ok = append_header(headers, timestamp_header) && headers_ok;
-        headers_ok = append_header(headers, api_key_header) && headers_ok;
-        headers_ok = append_header(headers, passphrase_header) && headers_ok;
+        bool headers_ok = append_header(headers, headers_text.address);
+        headers_ok = append_header(headers, headers_text.signature) && headers_ok;
+        headers_ok = append_header(headers, headers_text.timestamp) && headers_ok;
+        headers_ok = append_header(headers, headers_text.api_key) && headers_ok;
+        headers_ok = append_header(headers, headers_text.passphrase) && headers_ok;
         headers_ok = append_header(headers, "Content-Type: application/json") &&
                      headers_ok;
         if (!headers_ok) {
             curl_slist_free_all(headers);
-            secure_zero(signature_b64, sizeof(signature_b64));
+            secure_zero(&headers_text, sizeof(headers_text));
             std::snprintf(result.error, sizeof(result.error), "header allocation failed");
             return result;
         }
@@ -150,7 +132,8 @@ public:
 
         curl_slist_free_all(headers);
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
-        secure_zero(signature_b64, sizeof(signature_b64));
+        // The signed header block holds the HMAC for this request only.
+        secure_zero(&headers_text, sizeof(headers_text));
         return result;
     }
 

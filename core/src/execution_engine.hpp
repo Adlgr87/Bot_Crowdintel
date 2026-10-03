@@ -16,6 +16,7 @@
 #include "alpha_receiver.hpp"
 #include "kelly_engine.hpp"
 #include "market_config.hpp"
+#include "order_ledger.hpp"
 #include "polymarket_order.hpp"
 #include "presigned_pool.hpp"
 
@@ -29,6 +30,7 @@ enum class TickResult : uint8_t {
     NO_EDGE,
     NO_INVENTORY,
     RISK_REJECTED,
+    RECONCILE_REQUIRED,
     TOO_SMALL,
     SIGN_FAILED,
     BODY_FAILED,
@@ -49,6 +51,7 @@ inline const char* tick_result_name(TickResult result) {
         case TickResult::NO_EDGE: return "no_edge";
         case TickResult::NO_INVENTORY: return "no_inventory";
         case TickResult::RISK_REJECTED: return "risk_rejected";
+        case TickResult::RECONCILE_REQUIRED: return "reconcile_required";
         case TickResult::TOO_SMALL: return "too_small";
         case TickResult::SIGN_FAILED: return "sign_failed";
         case TickResult::BODY_FAILED: return "body_failed";
@@ -73,6 +76,11 @@ public:
         : cfg_(cfg), book_(book), signals_(signals), signer_(signer),
           pool_(pool), client_(client), trading_enabled_(trading_enabled),
           confirmed_inventory_(cfg.initial_position_shares) {}
+
+    // Optional Phase-2 journal. When attached, every intent is durable before
+    // egress and any order that is not proven terminal blocks trading.
+    void attach_ledger(cledger::OrderLedger* ledger) noexcept { ledger_ = ledger; }
+    cledger::OrderLedger* ledger() const noexcept { return ledger_; }
 
     TickResult run_tick() {
         AlphaSignal signal{};
@@ -99,6 +107,15 @@ public:
             return TickResult::DUPLICATE_SIGNAL;
         if (trading_enabled_ && !trading_enabled_->load(std::memory_order_acquire))
             return TickResult::RISK_REJECTED;
+        // Live mode trades only with venue-resolved metadata (Fase 1): no
+        // hardcoded tick/min-size/fee may substitute a venue value.
+        if (!cfg_.trading_parameters_ready()) return TickResult::RISK_REJECTED;
+        // A journaled order without a proven venue outcome (UNKNOWN, sent but
+        // unconfirmed, partially filled) stops trading until reconciliation.
+        if (ledger_ && !ledger_->gate_open()) {
+            ++ledger_blocks_;
+            return TickResult::RECONCILE_REQUIRED;
+        }
 
         OrderBookL2::Top top{};
         bool have_book = false;
@@ -122,10 +139,19 @@ public:
             side = buy_edge >= sell_edge ? K_SIDE_BUY : K_SIDE_SELL;
         }
 
-        if (side == K_SIDE_SELL && confirmed_inventory_ < cfg_.min_size_shares)
+        if (side == K_SIDE_SELL && confirmed_inventory_ < cfg_.effective_min_size())
             return TickResult::NO_INVENTORY;
 
-        const uint64_t tick = book_.tick_size(cfg_.tick_size);
+        const uint64_t tick = book_.tick_size(cfg_.effective_tick());
+        if (tick == 0 || amount_quantum_for_tick(tick) == 0)
+            return TickResult::NO_BOOK;  // unknown venue grid -> fail closed
+        // The venue may publish a tick change for this market at any time.
+        // The resolved snapshot (tick, min size, fee curve) belongs to the grid
+        // it was resolved for, so a new grid stops trading until the metadata
+        // is resolved again (Fase 5 automates the re-resolution).
+        if (cfg_.live_transport() && cfg_.runtime.resolved &&
+            tick != cfg_.runtime.tick_size)
+            return TickResult::RISK_REJECTED;
         const uint64_t raw_book_price = side == K_SIDE_BUY
                                       ? top.ask.price : top.bid.price;
         const uint64_t price_raw = round_price_to_tick(raw_book_price, tick);
@@ -134,8 +160,9 @@ public:
         if (edge < cfg_.min_edge) return TickResult::NO_EDGE;
 
         // Size against the fee-adjusted execution price.  This is conservative:
-        // fees reduce both the gate and the Kelly fraction.
-        const double fee_per_share = cfg_.taker_fee_rate * price * (1.0 - price);
+        // fees reduce both the gate and the Kelly fraction. The coefficient and
+        // exponent come from the resolved venue fee curve (p*(1-p))^e.
+        const double fee_per_share = cfg_.fee_per_share(price);
         const double sizing_price = side == K_SIDE_BUY
             ? std::min(0.999999, price + fee_per_share)
             : std::max(0.000001, price - fee_per_share);
@@ -160,7 +187,7 @@ public:
         requested_shares = std::min(requested_shares, visible);
         if (side == K_SIDE_SELL)
             requested_shares = std::min(requested_shares, confirmed_inventory_);
-        if (requested_shares < cfg_.min_size_shares)
+        if (requested_shares < cfg_.effective_min_size())
             return TickResult::TOO_SMALL;
 
         const bool market_order = std::strcmp(cfg_.order_type, "FAK") == 0 ||
@@ -169,7 +196,7 @@ public:
         if (!compute_order_amounts(side, price_raw, requested_shares, tick,
                                    market_order, maker_amount, taker_amount,
                                    effective_shares) ||
-            effective_shares < cfg_.min_size_shares)
+            effective_shares < cfg_.effective_min_size())
             return TickResult::TOO_SMALL;
 
         // Local circuit breaker is conservative until user-channel fill
@@ -199,14 +226,50 @@ public:
             if (!signer_.sign_order(order, signature))
                 return TickResult::SIGN_FAILED;
             const uint64_t expiration = cfg_.wire_expiration(order.timestamp_ms / 1000ULL);
-            if (!build_wire_body(order, signature, cfg_.token_id_dec,
+            if (!build_wire_body(order, signature, cfg_.effective_token_id_dec(),
                                  cfg_.maker_hex, cfg_.signer_hex,
                                  cfg_.owner_api_key, cfg_.order_type, body,
                                  expiration))
                 return TickResult::BODY_FAILED;
         }
 
+        char client_order_id[cledger::kClientOrderIdChars];
+        cledger::make_client_order_id(cfg_.market_hash, signal.signal_id,
+                                      client_order_id);
+        if (ledger_) {
+            cledger::IntentRecord intent{};
+            std::snprintf(intent.client_order_id, sizeof(intent.client_order_id),
+                          "%s", client_order_id);
+            intent.signal_id = signal.signal_id;
+            intent.market_hash = cfg_.market_hash;
+            intent.price_fixed6 = price_raw;
+            intent.shares_fixed6 = effective_shares;
+            intent.notional_fixed6 = static_cast<uint64_t>(
+                accepted_notional_usd(side, maker_amount, taker_amount) * 1e6);
+            intent.side = side;
+            intent.order_type = static_cast<uint8_t>(
+                std::strcmp(cfg_.order_type, "FOK") == 0 ? 2 : 1);
+            char ledger_error[96];
+            if (!ledger_->record_intent(intent, ledger_error,
+                                        sizeof(ledger_error))) {
+                std::snprintf(ledger_error_, sizeof(ledger_error_), "%s",
+                              ledger_error);
+                return TickResult::RECONCILE_REQUIRED;
+            }
+        }
+
         const SubmitResult response = client_.submit(body);
+        if (ledger_) {
+            char ledger_error[96];
+            const bool ambiguous = !response.ok && response.http_code == 0;
+            const bool recorded = apply_ledger_response(
+                client_order_id, response, ambiguous, ledger_error,
+                sizeof(ledger_error));
+            if (!recorded) {
+                std::snprintf(ledger_error_, sizeof(ledger_error_), "%s",
+                              ledger_error);
+            }
+        }
         if (!response.ok) {
             ++submit_failed_;
             return TickResult::SUBMIT_FAILED;
@@ -231,6 +294,8 @@ public:
         return TickResult::SUBMITTED;
     }
 
+    uint64_t ledger_blocks() const noexcept { return ledger_blocks_; }
+    const char* ledger_error() const noexcept { return ledger_error_; }
     uint64_t submitted() const noexcept { return submitted_; }
     uint64_t queued() const noexcept { return queued_; }
     uint64_t submit_failed() const noexcept { return submit_failed_; }
@@ -245,8 +310,37 @@ private:
                static_cast<uint64_t>(ts.tv_nsec);
     }
 
+    static double accepted_notional_usd(uint8_t side, uint64_t maker_amount,
+                                        uint64_t taker_amount) noexcept {
+        return static_cast<double>(side == K_SIDE_BUY ? maker_amount
+                                                      : taker_amount) * 1e-6;
+    }
+
+    // Journals the venue response. A transport failure/timeout has no venue
+    // evidence (http_code == 0) and therefore leaves the order UNKNOWN; a
+    // definitive HTTP error is a venue rejection.
+    bool apply_ledger_response(const char* client_order_id,
+                               const SubmitResult& response, bool ambiguous,
+                               char* error, size_t error_cap) noexcept {
+        cledger::LedgerEvent event = cledger::LedgerEvent::kSubmitAck;
+        cledger::Evidence evidence = cledger::Evidence::kVenueAck;
+        if (ambiguous) {
+            event = cledger::LedgerEvent::kSubmitAmbiguous;
+            evidence = cledger::Evidence::kNone;
+        } else if (!response.ok) {
+            event = cledger::LedgerEvent::kSubmitRejected;
+        }
+        const cledger::Transition step = ledger_->record_transition(
+            client_order_id, event, evidence, response.order_id,
+            /*filled_fixed6=*/0, error, error_cap);
+        if (step.result == cledger::TransitionResult::kIllegal ||
+            step.result == cledger::TransitionResult::kNeedsReconcile)
+            return false;
+        return true;
+    }
+
     double net_edge(uint8_t side, double p_win, double price) const noexcept {
-        const double fee = cfg_.taker_fee_rate * price * (1.0 - price);
+        const double fee = cfg_.fee_per_share(price);
         return side == K_SIDE_BUY ? p_win - price - fee
                                   : price - p_win - fee;
     }
@@ -302,7 +396,7 @@ private:
         order.timestamp_ms = PresignedOrderPool::now_ms();
         std::memcpy(order.maker, cfg_.maker, 20);
         std::memcpy(order.signer, cfg_.signer, 20);
-        std::memcpy(order.token_id, cfg_.token_id_be, 32);
+        std::memcpy(order.token_id, cfg_.effective_token_id_be(), 32);
         order.maker_amount = maker_amount;
         order.taker_amount = taker_amount;
         order.side = side;
@@ -323,6 +417,9 @@ private:
     std::array<uint64_t, 65536> dedupe_previous_{};
     uint64_t dedupe_epoch_ = 0;
     uint64_t confirmed_inventory_ = 0;
+    cledger::OrderLedger* ledger_ = nullptr;
+    uint64_t ledger_blocks_ = 0;
+    char ledger_error_[96]{};
     double committed_exposure_usd_ = 0.0;
     double worst_case_loss_usd_ = 0.0;
     uint64_t submitted_ = 0;

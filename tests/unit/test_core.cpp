@@ -554,6 +554,10 @@ static void init_pool_fixture(MarketConfig& cfg, EIP712Signer& signer) {
     secure_zero(key, sizeof(key));
     const char* token =
         "71321045679252212594626395510336467040167069592778062791519851593659551227755";
+    // Paper/mock fixture: venue metadata comes from the (mock) config, exactly
+    // as it does in paper builds; live resolution is covered by the metadata
+    // suite.
+    cfg.mode = MarketConfig::Mode::kReplay;
     std::snprintf(cfg.token_id_dec, sizeof(cfg.token_id_dec), "%s", token);
     CHECK(parse_uint256_dec(token, std::strlen(token), cfg.token_id_be),
           "pool fixture token parsed");
@@ -678,6 +682,66 @@ static void test_signal_deduplication() {
           engine.run_tick() == TickResult::DUPLICATE_SIGNAL &&
           client.submissions() == 1,
           "same signal identity cannot submit twice inside TTL");
+}
+
+static void test_metadata_tick_change() {
+    std::printf("metadata_tick_change\n");
+    MarketConfig cfg;
+    EIP712Signer signer;
+    init_pool_fixture(cfg, signer);
+    // Simulate a resolved live snapshot on the same grid as the fixture.
+    cfg.mode = MarketConfig::Mode::kLive;
+    cfg.runtime.resolved = true;
+    cfg.runtime.tick_size = 10000;
+    cfg.runtime.min_order_size = 5000000;
+    cfg.runtime.fee_rate = 0.04;
+    cfg.runtime.fee_exponent = 1.0;
+    cfg.runtime.neg_risk = false;
+    cfg.runtime.clock_offset_ms = 0;
+    std::snprintf(cfg.runtime.fee_source, sizeof(cfg.runtime.fee_source), "fd");
+    std::snprintf(cfg.runtime.condition_id, sizeof(cfg.runtime.condition_id),
+                  "%s",
+                  "0x747dc809fb79e1b05be09c42d6179459a58de2ef3e40f02484a4e1260f741f75");
+    // Copy through an explicit literal: the runtime buffer is sized for a
+    // decimal uint256, and a literal keeps the copy provably in bounds.
+    constexpr char kTokenIdText[] =
+        "15871154585880608648532107628464183779895785213830018178010423617714102767076";
+    static_assert(sizeof(kTokenIdText) <= sizeof(cfg.runtime.token_id_dec));
+    std::memcpy(cfg.runtime.token_id_dec, kTokenIdText, sizeof(kTokenIdText));
+    std::memcpy(cfg.runtime.token_id_be, cfg.token_id_be, 32);
+    std::memcpy(cfg.runtime.exchange,
+                crowdintel::K_STANDARD_EXCHANGE_ADDRESS, 20);
+    CHECK(cfg.trading_parameters_ready(), "resolved snapshot is ready");
+
+    OrderBookL2 book;
+    book.set_tick_size(10000);
+    const Level2Entry bids[] = {{470000, 50000000}};
+    const Level2Entry asks[] = {{530000, 50000000}};
+    book.set_book(bids, 1, asks, 1);
+    SPSC_RingBuffer<AlphaSignal> signals;
+    PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+    MockCLOBClient client(cfg);
+    ExecutionEngine<MockCLOBClient> engine(
+        cfg, book, signals, signer, pool, client);
+
+    AlphaSignal signal{};
+    signal.direction_hint = K_SIDE_BUY;
+    signal.p_win = 0.75;
+    signal.confidence = 0.95;
+    signal.q_value = 0.01;
+    signal.timestamp_ns = AlphaParser::realtime_ns();
+    signal.market_hash = cfg.market_hash;
+    signal.signal_id = 77;
+
+    // A venue tick change invalidates the resolved snapshot: no order may be
+    // signed against a grid whose min size and fee were not resolved.
+    book.set_tick_size(1000);
+    CHECK(signals.try_push(signal) &&
+              engine.run_tick() == TickResult::RISK_REJECTED &&
+              client.submissions() == 0,
+          "venue tick change stops trading until re-resolution");
+    CHECK(pool.rebuild(470000, 530000, 20000000, 1000),
+          "pool rebuilds for the new grid once the caller re-resolves");
 }
 
 struct ScriptedGatewayClient {
@@ -858,6 +922,14 @@ static void test_alpha_http_receiver() {
     receiver.stop();
 }
 
+// Phase 7: replay is the only mode that may configure venue fixtures from the
+// environment, and it is the mode an offline build forces.
+static const char* load_replay(MarketConfig& cfg) {
+    MarketConfig::LoadOptions options;
+    options.force_replay = true;
+    return cfg.load(options);
+}
+
 static void test_config_fail_closed() {
     std::printf("config_fail_closed\n");
     static constexpr char KEY[] =
@@ -868,7 +940,7 @@ static void test_config_fail_closed() {
     setenv("BOT_MAX_ORDER_USD", "not-a-number", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "invalid numeric text never falls back to a trading default");
     }
     unsetenv("BOT_MAX_ORDER_USD");
@@ -877,7 +949,7 @@ static void test_config_fail_closed() {
     setenv("BOT_NEG_RISK", "2", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "boolean-like identity values require exactly 0 or 1");
     }
     unsetenv("BOT_NEG_RISK");
@@ -886,7 +958,7 @@ static void test_config_fail_closed() {
     setenv("BOT_INITIAL_POSITION_SHARES", "-1", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "negative inventory cannot wrap into an unsigned balance");
     }
     unsetenv("BOT_INITIAL_POSITION_SHARES");
@@ -895,7 +967,7 @@ static void test_config_fail_closed() {
     setenv("BOT_MIN_SIZE_SHARES", "5.005", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "share configuration must align to venue precision");
     }
     unsetenv("BOT_MIN_SIZE_SHARES");
@@ -904,7 +976,7 @@ static void test_config_fail_closed() {
     setenv("BOT_TICK_SIZE", "0.003", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "unknown V2 tick fails at startup");
     }
     unsetenv("BOT_TICK_SIZE");
@@ -914,7 +986,7 @@ static void test_config_fail_closed() {
     setenv("BOT_MARKET_SLUG", oversized_market.c_str(), 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "oversized configuration is rejected rather than truncated");
     }
     unsetenv("BOT_MARKET_SLUG");
@@ -925,7 +997,7 @@ static void test_config_fail_closed() {
     setenv("CLOB_HOST", "http://clob.invalid", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, false) != nullptr,
+        CHECK(cfg.load() != nullptr,
               "live CLOB transport cannot downgrade from TLS");
     }
     unsetenv("BOT_MODE");
@@ -938,7 +1010,7 @@ static void test_config_fail_closed() {
     setenv("CLOB_HOST", "https://clob.invalid/unexpected-base", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, false) != nullptr,
+        CHECK(cfg.load() != nullptr,
               "CLOB origin rejects an ambiguous base path");
     }
     unsetenv("BOT_MODE");
@@ -946,6 +1018,9 @@ static void test_config_fail_closed() {
     unsetenv("CLOB_HOST");
 
     arm_test_key();
+    setenv("BOT_MODE", "live", 1);
+    setenv("BOT_MARKET_SLUG", "target-market", 1);
+    setenv("BOT_LEDGER_PATH", "/tmp/crowdintel-config-test.journal", 1);
     setenv("BOT_ENABLE_LIVE_TRADING", "1", 1);
     setenv("CLOB_API_KEY", "key\r\nInjected: yes", 1);
     setenv("CLOB_SECRET", "c2VjcmV0", 1);
@@ -953,9 +1028,12 @@ static void test_config_fail_closed() {
     setenv("BOT_ALPHA_BEARER_TOKEN", "alpha-token-123456", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(true, true) != nullptr,
+        CHECK(cfg.load() != nullptr,
               "credential control characters cannot inject headers");
     }
+    unsetenv("BOT_MODE");
+    unsetenv("BOT_MARKET_SLUG");
+    unsetenv("BOT_LEDGER_PATH");
     unsetenv("BOT_ENABLE_LIVE_TRADING");
     unsetenv("CLOB_API_KEY");
     unsetenv("CLOB_SECRET");
@@ -966,7 +1044,7 @@ static void test_config_fail_closed() {
     setenv("BOT_TLS_PIN", "sha256//not-a-real-pin", 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "malformed TLS pin fails startup");
     }
     unsetenv("BOT_TLS_PIN");
@@ -977,7 +1055,7 @@ static void test_config_fail_closed() {
     setenv("BOT_TLS_PIN", dual_pin.c_str(), 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) == nullptr,
+        CHECK(load_replay(cfg) == nullptr,
               "overlapping TLS pins support safe rotation");
     }
     unsetenv("BOT_TLS_PIN");
@@ -1003,7 +1081,7 @@ static void test_secret_file_loading() {
         rewrite(value);
         setenv("BOT_PRIVATE_KEY_HEX_FILE", path, 1);
         MarketConfig cfg;
-        const bool ok = cfg.load(false, true) == nullptr;
+        const bool ok = load_replay(cfg) == nullptr;
         if (!ok) unsetenv("BOT_PRIVATE_KEY_HEX_FILE");
         return ok;
     };
@@ -1020,7 +1098,7 @@ static void test_secret_file_loading() {
     setenv("BOT_PRIVATE_KEY_HEX_FILE", path, 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "ambiguous direct and file secret sources fail closed");
     }
     unsetenv("BOT_PRIVATE_KEY_HEX");
@@ -1034,7 +1112,7 @@ static void test_secret_file_loading() {
     setenv("BOT_PRIVATE_KEY_HEX_FILE", path, 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "unreadable credential file fails closed");
     }
     unsetenv("BOT_PRIVATE_KEY_HEX_FILE");
@@ -1043,7 +1121,7 @@ static void test_secret_file_loading() {
     setenv("BOT_PRIVATE_KEY_HEX_FILE", path, 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "group/other credential permissions fail closed");
     }
     unsetenv("BOT_PRIVATE_KEY_HEX_FILE");
@@ -1056,7 +1134,7 @@ static void test_secret_file_loading() {
     setenv("BOT_PRIVATE_KEY_HEX_FILE", link_path.c_str(), 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "credential symlink fails closed");
     }
     unsetenv("BOT_PRIVATE_KEY_HEX_FILE");
@@ -1066,7 +1144,7 @@ static void test_secret_file_loading() {
     setenv("BOT_PRIVATE_KEY_HEX_FILE", missing.c_str(), 1);
     {
         MarketConfig cfg;
-        CHECK(cfg.load(false, true) != nullptr,
+        CHECK(load_replay(cfg) != nullptr,
               "absent credential file fails closed");
     }
     unsetenv("BOT_PRIVATE_KEY_HEX_FILE");
@@ -1082,6 +1160,7 @@ int main() {
     test_order_gateway();
     test_presigned_pool_concurrency();
     test_signal_deduplication();
+    test_metadata_tick_change();
 #ifdef CROWDINTEL_HAVE_NETWORK
     test_clob_responses();
     test_ws_parsing();

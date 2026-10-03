@@ -43,11 +43,13 @@ int main() {
     std::printf("CrowdIntel CPU-path latency benchmark (network excluded)\n");
     setenv("BOT_PRIVATE_KEY_HEX",
         "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b", 1);
-    setenv("BOT_MODE", "mock", 1);
+    setenv("BOT_MODE", "replay", 1);
     setenv("BOT_MARKET_SLUG", "bench", 1);
 
     MarketConfig cfg;
-    if (const char* error = cfg.load(false, true)) {
+    MarketConfig::LoadOptions options;
+    options.force_replay = true;  // the benchmark measures the offline CPU path
+    if (const char* error = cfg.load(options)) {
         std::printf("FATAL: %s\n", error); return 1;
     }
     cfg.bankroll_usd = 10000.0;

@@ -67,10 +67,12 @@ public:
                     static_cast<crowd_uint128_t>(target_shares) * bucket /
                     SIZE_BUCKETS);
                 uint64_t maker = 0, taker = 0, effective = 0;
+                const uint64_t min_size = cfg_.effective_min_size();
                 if (!compute_order_amounts(side, price, requested, tick_size,
                                            market_order, maker, taker, effective) ||
-                    effective < cfg_.min_size_shares || effective == previous_size)
+                    effective == previous_size)
                     continue;
+                if (min_size == 0 || effective < min_size) continue;
                 previous_size = effective;
 
                 OrderV2 order{};
@@ -78,7 +80,7 @@ public:
                 order.timestamp_ms = now;
                 std::memcpy(order.maker, cfg_.maker, 20);
                 std::memcpy(order.signer, cfg_.signer, 20);
-                std::memcpy(order.token_id, cfg_.token_id_be, 32);
+                std::memcpy(order.token_id, cfg_.effective_token_id_be(), 32);
                 order.maker_amount = maker;
                 order.taker_amount = taker;
                 order.side = side;
@@ -89,7 +91,7 @@ public:
 
                 const size_t n = dst.count;
                 if (n >= SLOT_COUNT) break;
-                if (!build_wire_body(order, signature, cfg_.token_id_dec,
+                if (!build_wire_body(order, signature, cfg_.effective_token_id_dec(),
                                      cfg_.maker_hex, cfg_.signer_hex,
                                      cfg_.owner_api_key, cfg_.order_type,
                                      dst.bodies[n], expiration))
