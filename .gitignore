@@ -37,3 +37,6 @@ Thumbs.db
 # Logs
 *.log
 massif.out*
+
+# Diarios de ordenes locales (Fase 2)
+*.journal
