@@ -10,7 +10,16 @@ The benchmark uses production `ExecutionEngine`, `PresignedPool`, `EIP712Signer`
 - isolated EIP-712 signature;
 - warm-up and measured production/rejection counts.
 
-It consumes slots exactly once and replenishes between batches. This avoids the old error of repeatedly timing an unrealistically reusable signature.
+It consumes slots exactly once and replenishes between batches. This avoids the old
+error of repeatedly timing an unrealistically reusable signature.
+
+The benchmark pins its own identity (`BOT_MODE=paper` plus an explicit
+`BOT_TOKEN_ID`) because it measures the CPU path only and never contacts a venue;
+since paper no longer inherits the replay test token id, an unpinned identity makes
+every wire body fail. It counts rejections per `TickResult` and, if a loop produces no
+sample at all, prints the reasons and exits 1 — a `p50` over an empty set used to be
+reported as `0 ns`, which `check_latency.py` accepted as a pass. That script now also
+rejects `p50=0` and any `no samples` line.
 
 ## What it does not measure
 
@@ -47,16 +56,26 @@ The CI checker uses deliberately loose p50 budgets to detect gross algorithmic r
 
 ## Representative validated result
 
-One portable Release+LTO, CPU-only run in the development sandbox on 2026-09-30 produced:
+Portable Release+LTO, CPU-only run in the development sandbox (2 vCPU, GCC 12.2) on
+2026-10-03, both loops 10000/10000 productive:
 
-| Metric | p50 |
-|---|---:|
-| pool lookup/copy | 122 ns |
-| decision + pool + mock-submit | 431 ns |
-| inline decision + sign + mock-submit | 30.869 µs |
-| isolated EIP-712 signature | 28.894 µs |
+| Metric | min | p50 | p90 | p99 |
+|---|---:|---:|---:|---:|
+| consumable pool lookup/copy | 86 ns | 123 ns | 237 ns | 537 ns |
+| decision + pool + mock-submit | 320 ns | 436 ns | 671 ns | 930 ns |
+| decision + inline sign + mock-submit | 37224 ns | 37581 ns | 40512 ns | 60811 ns |
+| isolated EIP-712 signature | 35984 ns | 36323 ns | 45695 ns | 63128 ns |
 
-Those values characterize that build/environment only. They are not target-host or network measurements.
+Reading: the inline path is ~86× the pooled path, and ~33 µs of its ~37 µs is
+Keccak+ECDSA. The bottleneck is the signature, not the decision or the body copy, so
+the pre-signed consumable ladder is what buys the fast path — and no part of the
+decision path needs optimising on these numbers.
+
+An equivalent run on 2026-09-30 (same build class, different sandbox) gave 122 ns /
+431 ns / 30.869 µs / 28.894 µs; run-to-run differences of this size between machines
+are expected. These values characterize that build and environment only. They are not
+target-host or network measurements, and no figure here is an end-to-end order latency
+or an SLO.
 
 ## Production measurement
 
