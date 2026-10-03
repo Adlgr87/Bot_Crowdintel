@@ -13,6 +13,7 @@
 #include "../crypto/secure_zero.hpp"
 #include "../crypto/sha256_engine.hpp"
 #include "../include/bounded_json.hpp"
+#include "curl_transport.hpp"
 #include "market_config.hpp"
 #include "polymarket_order.hpp"
 
@@ -146,6 +147,10 @@ public:
             // Do not blindly retry ambiguous writes (timeout/recv failure).
             result.retryable = code == CURLE_COULDNT_CONNECT ||
                                code == CURLE_COULDNT_RESOLVE_HOST;
+            // Single source of truth for what counts as "the venue may already
+            // have seen this" (see clob::CurlTransport::is_ambiguous).
+            result.ambiguous = clob::CurlTransport::is_ambiguous(code);
+            if (result.ambiguous) result.retryable = false;
         }
 
         curl_slist_free_all(headers);
@@ -153,6 +158,13 @@ public:
         secure_zero(signature_b64, sizeof(signature_b64));
         return result;
     }
+
+    // Raw body of the most recent submission, for the recorder to read the
+    // amounts and trade ids the semantic classifier does not surface.  Valid
+    // only until the next submit() on this client (the gateway thread owns it).
+    const char* last_response_body() const noexcept { return resp_; }
+    size_t last_response_len() const noexcept { return resp_len_; }
+    bool last_response_truncated() const noexcept { return resp_overflow_; }
 
     // Pure semantic classifier used by submit() and response fixtures. HTTP
     // success alone is never order acceptance.

@@ -23,6 +23,7 @@
 #include <strings.h>
 
 #include "../crypto/fast_random.hpp"
+#include "../crypto/sha1.hpp"
 #include "../crypto/sha256_engine.hpp"
 #include "../include/bounded_json.hpp"
 #include "../include/order_book.hpp"
@@ -855,52 +856,10 @@ private:
         if (fd >= 0) ::close(fd);
     }
 
-    // SHA-1 is used only for RFC 6455 handshake validation.
-    static void sha1(const uint8_t* data, size_t len, uint8_t out[20]) {
-        uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
-        uint64_t bits = len * 8;
-        size_t offset = 0;
-        while (offset + 64 <= len) { sha1_block(h, data + offset); offset += 64; }
-        uint8_t tail[128]{};
-        const size_t remaining = len - offset;
-        std::memcpy(tail, data + offset, remaining);
-        tail[remaining] = 0x80;
-        const size_t final_offset = remaining >= 56 ? 120 : 56;
-        for (int i = 0; i < 8; ++i)
-            tail[final_offset + i] = static_cast<uint8_t>(bits >> (56 - i * 8));
-        sha1_block(h, tail);
-        if (remaining >= 56) sha1_block(h, tail + 64);
-        for (int i = 0; i < 5; ++i) {
-            out[i * 4] = static_cast<uint8_t>(h[i] >> 24);
-            out[i * 4 + 1] = static_cast<uint8_t>(h[i] >> 16);
-            out[i * 4 + 2] = static_cast<uint8_t>(h[i] >> 8);
-            out[i * 4 + 3] = static_cast<uint8_t>(h[i]);
-        }
-    }
-
-    static void sha1_block(uint32_t h[5], const uint8_t* p) {
-        uint32_t w[80];
-        for (int i = 0; i < 16; ++i)
-            w[i] = static_cast<uint32_t>(p[i*4]) << 24 |
-                   static_cast<uint32_t>(p[i*4+1]) << 16 |
-                   static_cast<uint32_t>(p[i*4+2]) << 8 |
-                   static_cast<uint32_t>(p[i*4+3]);
-        for (int i = 16; i < 80; ++i) {
-            const uint32_t v = w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16];
-            w[i] = (v << 1) | (v >> 31);
-        }
-        uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4];
-        for (int i = 0; i < 80; ++i) {
-            uint32_t f, k;
-            if (i < 20) { f=(b&c)|(~b&d); k=0x5A827999; }
-            else if (i < 40) { f=b^c^d; k=0x6ED9EBA1; }
-            else if (i < 60) { f=(b&c)|(b&d)|(c&d); k=0x8F1BBCDC; }
-            else { f=b^c^d; k=0xCA62C1D6; }
-            const uint32_t t=((a<<5)|(a>>27))+f+e+k+w[i];
-            e=d; d=c; c=(b<<30)|(b>>2); b=a; a=t;
-        }
-        h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e;
-    }
+    // SHA-1 (RFC 6455 handshake validation only) now lives in
+    // core/crypto/sha1.hpp so the market and user channels share one
+    // implementation; it is pinned by a known-answer test in
+    // tests/unit/test_live_safety.cpp.
 
     const MarketConfig& cfg_;
     OrderBookL2& book_;

@@ -63,16 +63,32 @@ inline const char* tick_result_name(TickResult result) {
 template <typename Client>
 class ExecutionEngine {
 public:
+    // `reconciled_inventory` is published by the supervisor thread from the
+    // persistent ledger after reconciliation and after every confirmed fill.
+    // When present it is the authoritative sellable inventory; the engine still
+    // debits its own counter for in-flight sells, and the effective limit is the
+    // minimum of the two, so a stale publication can never authorise a sale the
+    // ledger does not support.  Reading an atomic keeps the hot path lock-free:
+    // the ledger itself is mutex-protected and must not be touched here.
     ExecutionEngine(const MarketConfig& cfg,
                     OrderBookL2& book,
                     SPSC_RingBuffer<AlphaSignal>& signals,
                     const EIP712Signer& signer,
                     PresignedOrderPool& pool,
                     Client& client,
-                    const std::atomic<bool>* trading_enabled = nullptr)
+                    const std::atomic<bool>* trading_enabled = nullptr,
+                    const std::atomic<uint64_t>* reconciled_inventory = nullptr)
         : cfg_(cfg), book_(book), signals_(signals), signer_(signer),
           pool_(pool), client_(client), trading_enabled_(trading_enabled),
+          reconciled_inventory_(reconciled_inventory),
           confirmed_inventory_(cfg.initial_position_shares) {}
+
+    uint64_t sellable_inventory() const noexcept {
+        if (!reconciled_inventory_) return confirmed_inventory_;
+        const uint64_t published =
+            reconciled_inventory_->load(std::memory_order_acquire);
+        return published < confirmed_inventory_ ? published : confirmed_inventory_;
+    }
 
     TickResult run_tick() {
         AlphaSignal signal{};
@@ -109,10 +125,8 @@ public:
             top.bid.price >= top.ask.price)
             return TickResult::NO_BOOK;
 
-        uint8_t side = K_SIDE_BUY;
-        if (signal.direction_hint == 0) {
-            side = K_SIDE_BUY;
-        } else if (signal.direction_hint == 1) {
+        uint8_t side = K_SIDE_BUY;   // hint 0 (and the default) means buy
+        if (signal.direction_hint == 1) {
             side = K_SIDE_SELL;
         } else {
             const double buy_edge = net_edge(K_SIDE_BUY, signal.p_win,
@@ -122,7 +136,7 @@ public:
             side = buy_edge >= sell_edge ? K_SIDE_BUY : K_SIDE_SELL;
         }
 
-        if (side == K_SIDE_SELL && confirmed_inventory_ < cfg_.min_size_shares)
+        if (side == K_SIDE_SELL && sellable_inventory() < cfg_.min_size_shares)
             return TickResult::NO_INVENTORY;
 
         const uint64_t tick = book_.tick_size(cfg_.tick_size);
@@ -159,7 +173,7 @@ public:
         const uint64_t visible = side == K_SIDE_BUY ? top.ask.size : top.bid.size;
         requested_shares = std::min(requested_shares, visible);
         if (side == K_SIDE_SELL)
-            requested_shares = std::min(requested_shares, confirmed_inventory_);
+            requested_shares = std::min(requested_shares, sellable_inventory());
         if (requested_shares < cfg_.min_size_shares)
             return TickResult::TOO_SMALL;
 
@@ -235,6 +249,10 @@ public:
     uint64_t queued() const noexcept { return queued_; }
     uint64_t submit_failed() const noexcept { return submit_failed_; }
     uint64_t confirmed_inventory() const noexcept { return confirmed_inventory_; }
+    uint64_t reconciled_inventory() const noexcept {
+        return reconciled_inventory_
+                   ? reconciled_inventory_->load(std::memory_order_acquire) : 0;
+    }
     double committed_exposure_usd() const noexcept { return committed_exposure_usd_; }
 
 private:
@@ -322,6 +340,7 @@ private:
     std::array<uint64_t, 65536> dedupe_current_{};
     std::array<uint64_t, 65536> dedupe_previous_{};
     uint64_t dedupe_epoch_ = 0;
+    const std::atomic<uint64_t>* reconciled_inventory_ = nullptr;
     uint64_t confirmed_inventory_ = 0;
     double committed_exposure_usd_ = 0.0;
     double worst_case_loss_usd_ = 0.0;

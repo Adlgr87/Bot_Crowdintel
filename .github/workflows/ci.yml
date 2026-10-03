@@ -72,6 +72,24 @@ jobs:
           python3 tests/crypto/cross_check_v2.py /tmp/signer.json
           build/bin/test_signer --json-neg-risk > /tmp/signer-neg-risk.json
           python3 tests/crypto/cross_check_v2.py /tmp/signer-neg-risk.json
+      - name: Configuration tool and preflight gate smoke tests
+        run: |
+          # The recognised key list is the allowlist strict mode enforces.
+          build/bin/crowdintel-config keys | grep -qx BOT_MODE
+          build/bin/crowdintel-config keys | grep -qx POLYGON_RPC_URL
+          # A file with an unknown key or a secret must be rejected.
+          printf 'BOT_MODE=paper\nBOT_NOPE=1\n' > /tmp/bad.env
+          if build/bin/crowdintel-config validate /tmp/bad.env; then exit 1; fi
+          printf 'BOT_MODE=paper\nCLOB_SECRET=x\n' > /tmp/secret.env
+          if build/bin/crowdintel-config validate /tmp/secret.env; then exit 1; fi
+          printf 'BOT_MODE=paper\nBOT_MARKET_SLUG=example\nBOT_LEDGER_DIR=/var/lib/crowdintel\n' > /tmp/ok.env
+          build/bin/crowdintel-config validate /tmp/ok.env
+          # The shipped template must itself be a valid, secret-free config.
+          build/bin/crowdintel-config validate infra/config/production.env.example
+          # Preflight must refuse to declare readiness without configuration.
+          if env BOT_MODE=live \
+              BOT_PRIVATE_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000001 \
+              build/bin/crowdintel-preflight --json; then exit 1; fi
       - name: CPU latency gross-regression smoke test
         if: matrix.compiler == 'gcc'
         run: |
@@ -114,9 +132,16 @@ jobs:
         run: |
           test "$(docker image inspect crowdintel:ci --format '{{.Config.User}}')" = "10001:10001"
           docker run --rm \
-            -e BOT_MODE=mock -e BOT_TICKS=1 \
+            -e BOT_MODE=paper -e BOT_SESSION_TIMEOUT_MS=15000 \
+            -e BOT_LEDGER_DIR=/var/lib/crowdintel \
             -e BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b \
             crowdintel:ci
+          # The preflight binary must ship in the runtime image and refuse to
+          # pass without a real configuration.
+          docker run --rm --entrypoint /app/crowdintel-preflight \
+            -e BOT_MODE=paper -e BOT_LEDGER_DIR=/var/lib/crowdintel \
+            -e BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b \
+            crowdintel:ci --no-token || true
 
   sanitizers:
     name: ${{ matrix.name }}

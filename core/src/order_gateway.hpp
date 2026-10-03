@@ -15,12 +15,18 @@
 #include "../include/spsc_ring_buffer.hpp"
 #include "polymarket_order.hpp"
 
+// SubmitObserver is declared in polymarket_order.hpp so that recorders can be
+// built and unit-tested in builds without the network gateway.
+
 template <typename Client, size_t Capacity = 128>
 class OrderGateway {
 public:
     explicit OrderGateway(Client& client,
-                          const std::atomic<bool>* trading_enabled = nullptr)
-        : client_(client), trading_enabled_(trading_enabled) {}
+                          const std::atomic<bool>* trading_enabled = nullptr,
+                          SubmitObserver* observer = nullptr)
+        : client_(client), trading_enabled_(trading_enabled), observer_(observer) {}
+
+    void set_observer(SubmitObserver* observer) noexcept { observer_ = observer; }
     ~OrderGateway() { stop(false); }
 
     OrderGateway(const OrderGateway&) = delete;
@@ -82,6 +88,8 @@ public:
     uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
     uint64_t retried() const { return retried_.load(std::memory_order_relaxed); }
     uint64_t cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
+    uint64_t ambiguous() const { return ambiguous_.load(std::memory_order_relaxed); }
+    uint64_t unrecorded() const { return unrecorded_.load(std::memory_order_relaxed); }
 
 private:
     struct QueuedBody {
@@ -111,6 +119,12 @@ private:
 
             SubmitResult result{};
             bool was_cancelled = false;
+            if (observer_ && !observer_->on_before_egress(body)) {
+                // The order was not durably recorded: it must not be sent.
+                cancelled_.fetch_add(1, std::memory_order_relaxed);
+                unrecorded_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
             for (int attempt = 0; attempt < 3; ++attempt) {
                 if (trading_enabled_ &&
                     !trading_enabled_->load(std::memory_order_acquire)) {
@@ -129,11 +143,14 @@ private:
             if (was_cancelled) continue;
             if (result.ok) accepted_.fetch_add(1, std::memory_order_relaxed);
             else rejected_.fetch_add(1, std::memory_order_relaxed);
+            if (result.ambiguous) ambiguous_.fetch_add(1, std::memory_order_relaxed);
+            if (observer_) observer_->on_after_egress(body, result);
         }
     }
 
     Client& client_;
     const std::atomic<bool>* trading_enabled_;
+    SubmitObserver* observer_;
     SPSC_RingBuffer<QueuedBody, Capacity> queue_;
     std::atomic<bool> running_{false};
     std::atomic<bool> drain_{false};
@@ -144,6 +161,8 @@ private:
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> retried_{0};
     std::atomic<uint64_t> cancelled_{0};
+    std::atomic<uint64_t> ambiguous_{0};
+    std::atomic<uint64_t> unrecorded_{0};
 };
 
 #endif  // ORDER_GATEWAY_HPP

@@ -34,6 +34,21 @@ El hot path no realiza DNS, TLS, JSON ni sockets. Esa separación reduce jitter 
 
 Los secretos pueden entrar por archivos `_FILE` regulares, no-symlink y con permisos privados; entradas vacías, truncadas, ilegibles o con caracteres de control se rechazan. El despliegue usa `LoadCredential=` de systemd, memoria bloqueada, usuario sin login, capacidades vacías y core dumps deshabilitados. El proceso conserva necesariamente la clave del signer en RAM; un host privilegiado comprometido sigue fuera del modelo de protección.
 
-## Bloqueo para producción autónoma
+## Etapa y bloqueo para producción autónoma
 
-Falta el canal privado autenticado y la reconciliación continua de órdenes, fills, balances, allowances e inventario. Por eso el servicio no se reinicia automáticamente y el proyecto no se presenta como apto para trading real desatendido. Cualquier canary debe ser mínimo, supervisado, FAK, reconciliado externamente tras cada orden y comparado antes con el SDK oficial actual.
+El canal privado autenticado y la reconciliación de órdenes, fills, balances,
+allowances e inventario **ya están implementados** (Fases 1-8, con pruebas sobre un
+venue loopback) y la auditoría de 2026-10-03 corrigió 27 defectos, uno de ellos
+bloqueante: `crowdintel-preflight` no ligaba la wallet, así que su puerta no podía
+aprobarse nunca. El estado detallado está en [STATUS.md](STATUS.md) y en
+[../README.md](../README.md).
+
+Lo que sigue bloqueando el trading real desatendido no es código, es verificación:
+ninguna orden, fill, heartbeat ni reconciliación se ha observado contra el venue real,
+y siguen `[NO VERIFICADO]` el path y el body exactos del heartbeat, la cadencia real
+de cancelación y si el `orderID` del venue coincide con el digesto EIP-712 local. Por
+eso el servicio no se reinicia automáticamente y la salida a real pasa por ejecutar
+**H1–H15** de [CANARY_CHECKLIST.md](CANARY_CHECKLIST.md).
+
+Cualquier canary debe ser mínimo, supervisado, FAK, reconciliado externamente tras
+cada orden y comparado antes con el SDK oficial actual.

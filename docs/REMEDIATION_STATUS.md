@@ -1,4 +1,12 @@
-# Remediation ledger
+# Remediation ledger (historical — 2026-09-22 pass)
+
+This is the observation-by-observation record of the remediation pass of
+2026-09-22. It is kept as history: the **current** status is
+[STATUS.md](STATUS.md), the cited evidence for the live-safety work is
+[LIVE_SAFETY_2026-10-03.md](LIVE_SAFETY_2026-10-03.md), and the 2026-10-03
+pre-canary audit (F-01..F-27) is recorded in [../CHANGELOG.md](../CHANGELOG.md).
+Where an observation was resolved after this ledger was written, its status cell says
+so explicitly instead of being left stale.
 
 Status vocabulary:
 
@@ -22,7 +30,7 @@ Status vocabulary:
 | 11 | Presigned orders were detached from actual side/price/size | Added bid/ask ladders, eight risk buckets per side, explicit tick-generation/market/price/TTL matching, largest safe bucket selection, and one-time CAS consumption. Unknown tick changes invalidate the book, and a pool miss falls back rather than crossing generations. | Implemented/tested offline. |
 | 12 | Benchmark omitted HMAC/network while headline implied full submit | Renamed/documented CPU measurements and separated mock enqueue from semantic venue acceptance. | Corrected; target-host e2e instrumentation still required. |
 | 13 | Pool/benchmark signature counts were inconsistent | Benchmark now reports measured production/rejections, consumes actual slots, and replenishes by batch. | Implemented/tested offline. |
-| 14 | No open-order/fill/inventory reconciliation | Engine no longer credits reservations as fills and SELL requires confirmed inventory. Service does not auto-restart after ambiguity. | **Unresolved production blocker.** Add authenticated private channel plus REST startup/periodic reconciliation. |
+| 14 | No open-order/fill/inventory reconciliation | Engine no longer credits reservations as fills and SELL requires confirmed inventory. Service does not auto-restart after ambiguity. | **Resolved 2026-10-03 (Phases 1-8), no longer a code blocker.** Authenticated private channel (`core/src/user_ws_client.hpp`, `user_ws_protocol.hpp`, `user_event.hpp`) and startup/post-disconnect reconciliation of open orders, fills, balances, allowances, reservations and inventory over a persistent write-ahead ledger (`core/src/reconciliation.hpp`, `core/include/event_ledger.hpp`), gated by `crowdintel-preflight` and the supervisor's `READY`/`BLOCKED`. Exercised against an in-process loopback venue (`tests/integration/test_local_venue.cpp`). What remains is observation against the real venue: checklist items H1-H15. |
 | 15 | Health check/unit could report healthy while unusable | Docker health is explicitly liveness-only; readiness must use metrics. systemd is fail-closed and no-auto-restart. Deployment checklist verifies feed/account separately. | Partial: native machine-readable readiness endpoint is still desirable. |
 | 16 | Configuration and README disagreed with code | Added one environment reference, non-secret production template, architecture, security, deployment, benchmark, and status documents. | Implemented; keep docs in CI/review scope. |
 | 17 | Backtester booked artificial same-tick spread PnL | Changed to next-tick marking, V2 fees, and exclusion of an unmarkable final trade. | Implemented/tested smoke. Still not a fill/impact simulator. |
