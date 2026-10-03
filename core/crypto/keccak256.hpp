@@ -83,20 +83,37 @@ inline void keccak256_absorb_block(uint64_t A[25], const uint8_t* block) {
     keccak_f1600(A);
 }
 
+// Keccak-256 (the pre-FIPS padding used by Ethereum), one shot.
+//
+// Precondition: `data` points to `len` readable bytes, or is null with len == 0
+// (the empty input, which is hashed normally).  A null buffer with a non-zero
+// length is a caller bug: hashing it would read through a null pointer, and
+// quietly hashing the empty input instead would produce a digest that looks
+// valid while committing to nothing - in an EIP-712 signer that is a signature
+// over the wrong message.  The fail-closed answer is an all-zero digest, which
+// matches no real input and fails every comparison downstream.
 inline void keccak256_hash(const uint8_t* data, size_t len, uint8_t out[32]) {
     constexpr size_t RATE = 136;  // 1088-bit rate
+    if (data == nullptr && len != 0) {
+        std::memset(out, 0, 32);
+        return;
+    }
+    // nullptr + 0 is undefined behaviour by the standard even when nothing is
+    // read, so the empty input is hashed through a valid one-byte object.
+    static constexpr uint8_t K_EMPTY_INPUT = 0;
+    const uint8_t* source = (data != nullptr) ? data : &K_EMPTY_INPUT;
     uint64_t A[25] = {0};
 
     size_t offset = 0;
     while (offset + RATE <= len) {
-        keccak256_absorb_block(A, data + offset);
+        keccak256_absorb_block(A, source + offset);
         offset += RATE;
     }
 
     // Final block + pad10*1 (suffix 0x01, 0x80 terminator)
     uint8_t block[RATE] = {0};
     const size_t remaining = len - offset;
-    if (remaining) std::memcpy(block, data + offset, remaining);
+    if (remaining) std::memcpy(block, source + offset, remaining);
     block[remaining] ^= 0x01;
     block[RATE - 1] ^= 0x80;
     keccak256_absorb_block(A, block);

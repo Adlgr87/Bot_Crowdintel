@@ -42,6 +42,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder --chown=crowdintel:crowdintel \
      /tmp/build/bin/crowdintel_bot /app/crowdintel_bot
+COPY --from=builder --chown=crowdintel:crowdintel \
+     /tmp/build/bin/crowdintel-preflight /app/crowdintel-preflight
+COPY --from=builder --chown=crowdintel:crowdintel \
+     /tmp/build/bin/crowdintel-config /app/crowdintel-config
+
+# Persistent ledger and preflight/kill-switch runtime state.  The ledger is the
+# process's memory across restarts: mount a volume here in production, and never
+# share it between two instances (a shared journal means two writers and an
+# unusable recovery).
+RUN install -d -o crowdintel -g crowdintel -m 0700 /var/lib/crowdintel \
+    && install -d -o crowdintel -g crowdintel -m 0700 /run/crowdintel
 USER 10001:10001
 
 # Liveness only; venue/feed readiness is emitted in process metrics/logs and

@@ -10,11 +10,15 @@
 //    (tests/crypto/cross_check_v2.py — pycryptodome Keccak + coincurve RFC
 //    6979 ECDSA; libsecp256k1 uses the same deterministic nonce derivation,
 //    so signatures must be identical).
+// 4b. CLOB **L1** (ClobAuth) golden vector, taken from the official SDK's own
+//     test suite: Polymarket/py-clob-client tests/signing/test_eip712.py:8-24
+//     (publicly known key, chainId AMOY, timestamp 10000000, nonce 23).
 // 5. Signature recovery: 20 random orders must recover to the signer address.
 // 6. `--json` / `--json-neg-risk`: emit standard and negative-risk vectors
 //    for the independent Python cross-check.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include "clob_auth.hpp"
 #include "eip712_signer.hpp"
 #include "sha256_engine.hpp"
 
@@ -49,6 +53,19 @@ static void test_keccak() {
         const char* want = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
         uint8_t w[32]; hex2bin(want, w, 32);
         CHECK(std::memcmp(out, w, 32) == 0, "keccak256(\"\")");
+    }
+    {
+        // A null buffer with a non-zero length is a caller bug: it must not read
+        // through the null pointer and must not silently hash the empty input.
+        uint8_t zero[32]{};
+        std::memset(out, 0xAA, sizeof(out));
+        EIP712Signer::hash_keccak256(nullptr, 5, out);
+        CHECK(std::memcmp(out, zero, 32) == 0,
+              "null buffer with a length fails closed to an all-zero digest");
+        uint8_t empty[32]{};
+        EIP712Signer::hash_keccak256(nullptr, 0, empty);
+        CHECK(std::memcmp(out, empty, 32) != 0,
+              "the fail-closed digest is not the empty-input digest");
     }
     {
         const uint8_t abc[] = {0x61, 0x62, 0x63};
@@ -281,6 +298,68 @@ static void emit_json(bool neg_risk = false) {
     std::printf("\"\n  }\n}\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 4b. CLOB L1 authentication golden vector (official SDK test suite)
+//
+// Polymarket/py-clob-client tests/signing/test_eip712.py signs the ClobAuth
+// message with the publicly known Hardhat/Anvil account 0 key on AMOY
+// (chain id 80002, py_clob_client/constants.py:23) and asserts an exact
+// signature.  eth_account derives RFC 6979 nonces and enforces low-S, and so does
+// libsecp256k1 here, so our signature must be byte-identical: this pins the L1
+// domain ("ClobAuthDomain", version "1", chainId, no verifyingContract), the
+// primary type, the message text, the address derivation and the digest encoding
+// in one comparison.  L1 is what BOT_PREFLIGHT_CHECK_L1=1 uses to prove the
+// private key owns the API credentials, so a silent difference here would show up
+// as an unexplained preflight failure on the production host.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_clob_auth_l1_kat() {
+    EIP712Signer signer;
+    uint8_t key[32];
+    CHECK(hex2bin("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+                  key, sizeof(key)),
+          "L1 KAT: the SDK's public test key parses");
+    CHECK(signer.init(key, false), "L1 KAT: signer initialises");
+    secure_zero(key, sizeof(key));
+
+    // Format the address our own derivation produced - the vector is only a valid
+    // cross-check if the address fed into the digest comes from the key, not from
+    // an assumption about which address that key has.
+    char address_hex[43]{};
+    {
+        static const char* digits = "0123456789abcdef";
+        const uint8_t* address = signer.signer_address();
+        address_hex[0] = '0';
+        address_hex[1] = 'x';
+        for (int i = 0; i < 20; ++i) {
+            address_hex[2 + i * 2] = digits[address[i] >> 4];
+            address_hex[3 + i * 2] = digits[address[i] & 0x0FU];
+        }
+        address_hex[42] = '\0';
+    }
+    std::printf("  INFO L1 KAT derived address %s\n", address_hex);
+
+    char signature[133]{};
+    CHECK(clob_auth::sign(signer, address_hex, 10000000, 23, 80002, signature),
+          "L1 KAT: ClobAuth signature produced");
+    static constexpr char K_SDK_SIGNATURE[] =
+        "0xf62319a987514da40e57e2f4d7529f7bac38f0355bd88bb5adbb3768d80de6c1"
+        "682518e0af677d5260366425f4361e7b70c25ae232aff0ab2331e2b164a1aedc1b";
+    CHECK(std::strcmp(signature, K_SDK_SIGNATURE) == 0,
+          "L1 KAT: identical to the official py-clob-client vector");
+    if (std::strcmp(signature, K_SDK_SIGNATURE) != 0)
+        std::printf("  INFO got %s\n", signature);
+
+    // The chain id is part of the domain, so a different network must produce a
+    // different signature: this is why main refuses to run when POLYGON_RPC_URL
+    // reports a chain id other than 137 (or Amoy for testnet rehearsals).
+    char polygon_signature[133]{};
+    CHECK(clob_auth::sign(signer, address_hex, 10000000, 23, 137, polygon_signature),
+          "L1 KAT: signature on chain id 137 produced");
+    CHECK(std::strcmp(polygon_signature, K_SDK_SIGNATURE) != 0,
+          "L1 KAT: a different chain id yields a different signature");
+    CHECK(std::strlen(polygon_signature) == 132, "L1 KAT: 0x + 130 hex characters");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && (std::strcmp(argv[1], "--json") == 0 ||
                      std::strcmp(argv[1], "--json-neg-risk") == 0)) {
@@ -292,6 +371,7 @@ int main(int argc, char** argv) {
     test_sha256();
     test_hmac();
     test_golden_vector();
+    test_clob_auth_l1_kat();
     test_recovery();
     std::printf("== %s (%d failures) ==\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;

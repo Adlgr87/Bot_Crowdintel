@@ -147,8 +147,12 @@ public:
     }
 
 private:
-    Sha256Ctx inner_base_;
-    Sha256Ctx outer_base_;
+    // Value-initialised: compute() before set_key() is a caller bug, and reading
+    // an indeterminate midstate would be undefined behaviour.  Zeroed midstates
+    // give a deterministic digest that matches no keyed HMAC, so the mistake
+    // fails authentication instead of producing a random-looking signature.
+    Sha256Ctx inner_base_{};
+    Sha256Ctx outer_base_{};
 };
 
 // ── base64url (RFC 4648 §5, WITH padding — as the CLOB requires) ─────────────

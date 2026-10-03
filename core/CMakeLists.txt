@@ -155,6 +155,51 @@ if(HAVE_NETWORK)
 endif()
 set_target_properties(test_core PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ── Live-safety components (Phases 1-6) ──────────────────────────────────────
+# test_live_safety exercises the ledger, state machine, metadata pipeline, REST
+# client, user-channel protocol, heartbeat and reconciliation entirely offline
+# through fixture transports, so it builds and runs in both network variants.
+add_executable(test_live_safety ../tests/unit/test_live_safety.cpp)
+crowdintel_target(test_live_safety)
+target_include_directories(test_live_safety PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tests/support)
+set_target_properties(test_live_safety PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# crowdintel-preflight: the live gate.  Without a network transport every
+# network-dependent check fails closed in live mode and skips otherwise.
+add_executable(crowdintel-preflight src/preflight_main.cpp)
+crowdintel_target(crowdintel-preflight)
+if(HAVE_NETWORK)
+    target_compile_definitions(crowdintel-preflight PRIVATE CROWDINTEL_HAVE_NETWORK=1)
+    target_link_libraries(crowdintel-preflight PRIVATE
+        CURL::libcurl OpenSSL::SSL OpenSSL::Crypto)
+endif()
+set_target_properties(crowdintel-preflight PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# crowdintel-config: KEY=VALUE configuration validator/renderer.  No network,
+# no crypto, no secrets.
+add_executable(crowdintel-config src/config_tool_main.cpp)
+crowdintel_target(crowdintel-config)
+set_target_properties(crowdintel-config PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Integration against the in-process loopback venue: real sockets and real
+# threads for the whole live topology, so TSan sees the production races.
+# Requires the network stack; skipped entirely in offline builds.
+if(HAVE_NETWORK)
+    add_executable(test_local_venue ../tests/integration/test_local_venue.cpp)
+    crowdintel_target(test_local_venue)
+    target_include_directories(test_local_venue PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/support)
+    target_compile_definitions(test_local_venue PRIVATE CROWDINTEL_HAVE_NETWORK=1)
+    target_link_libraries(test_local_venue PRIVATE
+        CURL::libcurl OpenSSL::SSL OpenSSL::Crypto)
+    set_target_properties(test_local_venue PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_executable(latency_bench ../tests/benchmarks/latency_bench.cpp)
 crowdintel_target(latency_bench)
 set_target_properties(latency_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -168,4 +213,25 @@ add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
 add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
+add_test(NAME live_safety_units COMMAND $<TARGET_FILE:test_live_safety>)
+if(HAVE_NETWORK)
+    add_test(NAME local_venue_integration COMMAND $<TARGET_FILE:test_local_venue>)
+    set_tests_properties(local_venue_integration PROPERTIES TIMEOUT 300)
+endif()
+# The preflight binary must refuse to declare readiness without configuration.
+add_test(NAME preflight_rejects_empty_config COMMAND $<TARGET_FILE:crowdintel-preflight>)
+set_tests_properties(preflight_rejects_empty_config PROPERTIES
+    WILL_FAIL TRUE
+    ENVIRONMENT "BOT_MODE=live;BOT_PRIVATE_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000001")
+# The preflight binary must bind the wallet it validates.  Without the
+# MarketConfig::finalize_identity call, `signer_identity` compares the derived EOA
+# against a zeroed cfg.signer and can never pass (so no token is ever written and
+# live trading can never be authorised), while maker_funder/api_owner pass
+# vacuously on zeros and the balance/allowance checks query the zero address.
+# Paper mode keeps this network-independent: venue checks report SKIP outside live.
+add_test(NAME preflight_binds_wallet_identity COMMAND $<TARGET_FILE:crowdintel-preflight>)
+set_tests_properties(preflight_binds_wallet_identity PROPERTIES
+    TIMEOUT 60
+    ENVIRONMENT "BOT_MODE=paper;BOT_LEDGER_DIR=${CMAKE_CURRENT_BINARY_DIR}/preflight-identity;BOT_PRIVATE_KEY_HEX=23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b"
+    PASS_REGULAR_EXPRESSION "\\[PASS\\] signer_identity +EIP-712 signer 0x26972a79b73e93a0374afabd80302d19638051c9 matches configured signer")
 # latency_bench is a benchmark, not a correctness test; CI invokes it explicitly.

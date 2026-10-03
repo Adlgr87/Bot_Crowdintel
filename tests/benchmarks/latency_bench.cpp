@@ -39,12 +39,38 @@ static AlphaSignal make_signal(const MarketConfig& cfg, double p_win,
     return signal;
 }
 
+// Prints why a loop rejected signals.  Returns false when the loop produced no
+// sample at all, which the caller must treat as a benchmark failure: a p50 of an
+// empty set is not a fast p50, it is no measurement.
+bool report_rejections(const char* loop_name, size_t successful, size_t samples,
+                       const size_t* rejected) {
+    if (successful == samples) return true;
+    for (size_t i = 0; i < static_cast<size_t>(TickResult::COUNT); ++i) {
+        if (!rejected[i]) continue;
+        std::printf("  %s rejected %zu x %s\n", loop_name, rejected[i],
+                    tick_result_name(static_cast<TickResult>(i)));
+    }
+    if (successful == 0) {
+        std::printf("FATAL: %s produced no samples; the latency figures below "
+                    "would be meaningless\n", loop_name);
+        return false;
+    }
+    return true;
+}
+
 int main() {
     std::printf("CrowdIntel CPU-path latency benchmark (network excluded)\n");
     setenv("BOT_PRIVATE_KEY_HEX",
         "23dd72ba9070d7903cf60cad22700819abb7ae93c5788e15f038a0ece0a6697b", 1);
-    setenv("BOT_MODE", "mock", 1);
+    setenv("BOT_MODE", "paper", 1);
     setenv("BOT_MARKET_SLUG", "bench", 1);
+    // This instrument measures the CPU path only: it never contacts a venue, so it
+    // pins the outcome identity explicitly instead of relying on a mode default.
+    // (Paper no longer inherits the replay test vector: a networked paper run must
+    // resolve the token from venue metadata, exactly like live.)
+    setenv("BOT_TOKEN_ID",
+           "71321045679252212594626395510336467040167069592778062791519851593659551227755",
+           1);
 
     MarketConfig cfg;
     if (const char* error = cfg.load(false, true)) {
@@ -100,7 +126,12 @@ int main() {
     pool_hit.reserve(SAMPLES); inline_sign.reserve(SAMPLES);
     sign_only.reserve(SAMPLES); pool_lookup.reserve(SAMPLES);
 
+    // A benchmark that measures nothing must not look like a benchmark that
+    // measured something: CI compares p50 against a budget, and an empty sample
+    // set used to report p50=0 and pass.  Rejections are counted per reason and a
+    // wholly unproductive loop is a hard error.
     size_t successful = 0;
+    size_t rejected[static_cast<size_t>(TickResult::COUNT)]{};
     for (size_t i = 0; i < SAMPLES; ++i) {
         if (i % PresignedOrderPool::SIZE_BUCKETS == 0)
             pool.rebuild(470000, 530000, target_shares, cfg.tick_size);
@@ -109,8 +140,14 @@ int main() {
         const int result = engine.run_tick();
         const uint64_t end = clock_ns();
         if (result == 1) { pool_hit.push_back(end - begin); ++successful; }
+        else {
+            const TickResult reason = static_cast<TickResult>(-result);
+            const size_t index = static_cast<size_t>(reason);
+            if (index < static_cast<size_t>(TickResult::COUNT)) ++rejected[index];
+        }
     }
     std::printf("consumable-pool batches: %zu/%zu productive\n", successful, SAMPLES);
+    if (!report_rejections("consumable-pool", successful, SAMPLES, rejected)) return 1;
 
     // Move top-of-book to a price absent from the active ladder, forcing the
     // exact production fallback path (amount build + Keccak + ECDSA + JSON).
@@ -118,14 +155,21 @@ int main() {
     asks[0] = {550000, 2000000000};
     book.set_book(bids, 2, asks, 2);
     successful = 0;
+    for (size_t& count : rejected) count = 0;
     for (size_t i = 0; i < SAMPLES; ++i) {
         signals->try_push(make_signal(cfg, 0.75, signal_id++));
         const uint64_t begin = clock_ns();
         const int result = engine.run_tick();
         const uint64_t end = clock_ns();
         if (result == 1) { inline_sign.push_back(end - begin); ++successful; }
+        else {
+            const TickResult reason = static_cast<TickResult>(-result);
+            const size_t index = static_cast<size_t>(reason);
+            if (index < static_cast<size_t>(TickResult::COUNT)) ++rejected[index];
+        }
     }
     std::printf("inline fallback: %zu/%zu productive\n", successful, SAMPLES);
+    if (!report_rejections("inline-fallback", successful, SAMPLES, rejected)) return 1;
 
     uint8_t signature[65];
     for (size_t i = 0; i < SAMPLES; ++i) {
@@ -147,6 +191,12 @@ int main() {
     }
 
     auto report = [](const char* name, std::vector<uint64_t>& samples) {
+        if (samples.empty()) {
+            // front()/percentile() on an empty vector is undefined behaviour, and
+            // "mean=nan" is not a result anyone should have to interpret.
+            std::printf("%-33s no samples\n", name);
+            return;
+        }
         std::sort(samples.begin(), samples.end());
         auto percentile = [&](double p) {
             return samples[std::min(samples.size() - 1,

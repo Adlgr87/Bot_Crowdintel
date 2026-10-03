@@ -67,7 +67,7 @@ Record the evidence and reviewer for every row. Any unknown value is a NO-GO.
 | Risk caps | max order/exposure/daily loss fit disposable canary capital. |
 | Credentials | API owner, signer and maker relations verified with an authenticated read. |
 | Clock | host offset is within operational bound; alerting active. |
-| Kill switch | creating `/run/crowdintel/kill` disables live enqueue/egress, triggers process shutdown, and discards unsent work. |
+| Kill switch | creating `/run/crowdintel/kill` disables enqueue/egress, triggers process shutdown and discards unsent work. It is polled in every mode, not only in live, and a path that cannot be checked is treated as engaged. |
 | Alpha ingress | bound to loopback/trusted path; bearer rejection and body cap tested. |
 | TLS | CA validation works; if pinning is enabled, primary and rotation/backup pin plan tested. |
 
@@ -142,3 +142,70 @@ sudo infra/scripts/kernel_tuning.sh --hot-core=2 --nic=eth0 --apply-boot
 ```
 
 Compare p99.9 and power/thermal behavior before and after. Revert settings that do not improve the real end-to-end distribution.
+
+
+## 9. Live-safety operations (Phases 1-7)
+
+### 9.1 Configuration
+
+`/etc/crowdintel/config` is a `KEY=VALUE` file consumed through systemd
+`EnvironmentFile=`. Validate it before deploying and never put secrets in it:
+
+```bash
+crowdintel-config validate /etc/crowdintel/config     # structure, allowlist, ranges
+crowdintel-config render-env /etc/crowdintel/config   # what systemd will export
+crowdintel-config keys                                # the recognised key list
+crowdintel-config fingerprint                         # fingerprint of the *effective* config
+```
+
+Secrets stay in `/etc/crowdintel/credentials/*` (mode `0400`, root-owned) and are
+read through the `*_FILE` indirection with `LoadCredential=`.
+
+### 9.2 State directories
+
+| Path | Purpose |
+|---|---|
+| `/var/lib/crowdintel/state.journal` | append-only event log (orders, fills, balances, heartbeats, reconciliation runs, state events) |
+| `/var/lib/crowdintel/state.checkpoint` | atomic snapshot of derived state + idempotency keys |
+| `/run/crowdintel/preflight.pass` | preflight pass token (fingerprint + timestamp) |
+| `/run/crowdintel/kill` | kill switch; its presence stops egress and the process |
+
+One ledger directory per instance, on durable local storage. Two processes
+sharing a journal is unrecoverable by design. A corrupt ledger refuses to open
+and the bot refuses to trade; a torn trailing record (crash during append) is
+discarded and reported.
+
+### 9.3 Startup sequence
+
+```bash
+crowdintel-config validate /etc/crowdintel/config
+crowdintel-preflight --json | tee /var/log/crowdintel/preflight.json   # exit 1 blocks
+systemctl start crowdintel     # BOT_ENABLE_LIVE_TRADING=1 only after preflight passed
+```
+
+The bot then repeats the gating itself: ledger → metadata → chain id → signer →
+preflight token freshness/fingerprint → heartbeat contract → user channel
+subscription → startup reconciliation. Trading is enabled only after every gate
+passes, and the supervisor disables it again on the first breach.
+
+### 9.4 Allowances
+
+`crowdintel-preflight` never approves anything. It reports the required target
+(`BOT_TARGET_ALLOWANCE`, or `BOT_MAX_EXPOSURE_USD` + 10 % margin) and fails until
+an operator sets exactly that amount for the correct spender:
+
+* pUSD (`0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB`) → the exchange that matches
+  the market (`0xE111180000d2663C0091e4f400237545B87B996B`, or
+  `0xe2222d279d744050d28e00520010520000310F59` for negative-risk markets);
+* CTF outcome tokens (`0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`) →
+  `setApprovalForAll` for the same exchange, required only to sell.
+
+`approve(max_uint256)` is never used: an unlimited approval converts any
+exchange-contract bug into a total loss of the wallet balance.
+
+### 9.5 Heartbeat ownership
+
+`BOT_HEARTBEAT_ENABLED=1` starts the venue's cancel-on-disconnect contract for
+**all** orders owned by those CLOB credentials. Use dedicated credentials for the
+process that owns the heartbeat, and prefer an explicit `DELETE /cancel-all` at
+shutdown (the binary does this) over relying on the ~10-15 s lapse.

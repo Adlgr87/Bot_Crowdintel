@@ -188,6 +188,42 @@ public:
         return true;
     }
 
+    // Signs an arbitrary digest.  Used for order submission and for the CLOB L1
+    // credential message (ClobAuth), which shares the key but not the domain.
+    bool sign_digest(const uint8_t digest[32], uint8_t out_sig65[65]) const noexcept {
+        if (!secp_ctx_ || !digest || !out_sig65) return false;
+        secp256k1_ecdsa_recoverable_signature sig;
+        if (secp256k1_ecdsa_sign_recoverable(secp_ctx_, &sig, digest, privkey_,
+                                             nullptr, nullptr) != 1)
+            return false;
+        int recid = 0;
+        uint8_t compact[64];
+        if (secp256k1_ecdsa_recoverable_signature_serialize_compact(
+                secp_ctx_, compact, &recid, &sig) != 1)
+            return false;
+        std::memcpy(out_sig65, compact, 64);
+        out_sig65[64] = static_cast<uint8_t>(27 + recid);
+        return true;
+    }
+
+    // Signs digest = keccak256(0x1901 ‖ domainSeparator ‖ structHash) for a
+    // caller-supplied domain (EIP-712).
+    bool sign_typed_data(const uint8_t domain_separator_value[32],
+                         const uint8_t struct_hash[32],
+                         uint8_t out_sig65[65]) const noexcept {
+        if (!domain_separator_value || !struct_hash) return false;
+        uint8_t final_buf[2 + 32 + 32];
+        final_buf[0] = 0x19;
+        final_buf[1] = 0x01;
+        std::memcpy(final_buf + 2, domain_separator_value, 32);
+        std::memcpy(final_buf + 34, struct_hash, 32);
+        uint8_t digest[32];
+        keccak256_hash(final_buf, sizeof(final_buf), digest);
+        const bool ok = sign_digest(digest, out_sig65);
+        secure_zero(digest, sizeof(digest));
+        return ok;
+    }
+
     const uint8_t* domain_separator() const { return domain_sep_; }
     const uint8_t* order_typehash() const { return order_typehash_; }
 

@@ -52,6 +52,12 @@ struct SubmitResult {
     bool ok = false;          // accepted by gateway or venue
     bool final = true;        // false when only queued for asynchronous egress
     bool retryable = false;   // only explicit 429 or unequivocal pre-send failure
+    // True when the venue may already have acted on this order (timeout after
+    // the request left, reset while reading the response, partial body, ...).
+    // An ambiguous result must NEVER be retried: the order goes to UNKNOWN and
+    // is resolved by an authoritative read.  Retrying it is how duplicate
+    // exposure happens.
+    bool ambiguous = false;
     long http_code = 0;
     char order_id[80]{};
     char status[24]{};
@@ -279,6 +285,19 @@ inline size_t u64_to_dec(uint64_t v, char* out) {
 struct WireBody {
     char   buf[1536];
     size_t len;
+};
+
+// Egress observer: the ledger hook that makes "no durable record, no send" and
+// "ambiguous outcome, no retry" structural rather than conventional.
+//   on_before_egress – called on the gateway thread immediately before the first
+//                      transport attempt; returning false aborts the send (used
+//                      when the durable submission ticket could not be written).
+//   on_after_egress  – called once per order with the final result, including
+//                      whether the outcome is ambiguous.
+struct SubmitObserver {
+    virtual ~SubmitObserver() = default;
+    virtual bool on_before_egress(const WireBody& body) = 0;
+    virtual void on_after_egress(const WireBody& body, const SubmitResult& result) = 0;
 };
 
 inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],

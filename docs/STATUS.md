@@ -1,6 +1,6 @@
 # Project status
 
-_Last updated: 2026-09-30. The authoritative observation-by-observation ledger is [REMEDIATION_STATUS.md](REMEDIATION_STATUS.md)._
+_Last updated: 2026-10-03. The authoritative observation-by-observation ledger is [REMEDIATION_STATUS.md](REMEDIATION_STATUS.md)._
 
 ## Verified in this repository
 
@@ -28,9 +28,32 @@ _Last updated: 2026-09-30. The authoritative observation-by-observation ledger i
 
 ## Production blockers
 
-1. Authenticated private user/order/fill channel.
-2. Startup and continuous reconciliation of open orders, fills, balances, allowances, reservations, PnL, and inventory.
-3. Automated readiness that includes public feed and private account-state health.
-4. Controlled canary evidence against the current official SDK and exact account/market.
+Implemented in code and covered by offline tests as of 2026-10-03 (see
+[LIVE_SAFETY_2026-10-03.md](LIVE_SAFETY_2026-10-03.md) and
+[CANARY_CHECKLIST.md](CANARY_CHECKLIST.md)):
 
-Until those are resolved, the project is suitable for offline research, mock/shadow validation, and tightly supervised disposable canaries only—not unattended real-money deployment. Follow [DEPLOYMENT.md](DEPLOYMENT.md).
+1. Authenticated private user/order/fill channel — `core/src/user_ws_client.hpp`.
+2. Startup and post-disconnect reconciliation of open orders, fills, balances,
+   allowances, reservations and inventory — `core/src/reconciliation.hpp` over a
+   persistent write-ahead ledger (`core/include/event_ledger.hpp`).
+3. Automated readiness — `crowdintel-preflight` plus the supervisor thread's
+   `READY|BLOCKED` gate; live egress additionally requires a fresh preflight
+   pass token matching the effective configuration fingerprint.
+4. Dynamic venue metadata — tick size, minimum order size, negative-risk flag,
+   fee schedule, market status and token identity are fetched and cross-checked
+   before trading is enabled.
+
+Still open, and the reason this project is **not** approved for unattended
+real-money deployment:
+
+- No live order, fill, heartbeat or reconciliation has been observed from a real
+  account: every network path is verified against fixtures derived from the
+  official SDKs, not against the venue. Canary items H1–H15 in
+  [CANARY_CHECKLIST.md](CANARY_CHECKLIST.md) must be executed by an operator.
+- Signature type 3 (POLY_1271 / ERC-7739) still fails closed.
+- Items marked `[NO VERIFICADO]` in
+  [LIVE_SAFETY_2026-10-03.md](LIVE_SAFETY_2026-10-03.md) §4 — notably whether the
+  venue `orderID` equals the local EIP-712 digest, and the exact fee-exponent
+  semantics.
+- The market listener still carries its own WebSocket/TLS plumbing (tracked
+  duplication with a written migration path).

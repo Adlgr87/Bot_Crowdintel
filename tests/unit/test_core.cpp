@@ -97,8 +97,8 @@ static void test_spsc_multithread() {
 static void test_order_book() {
     std::printf("order_book\n");
     OrderBookL2 book;
-    Level2Entry bids[3] = {{470000, 1000000}, {460000, 2000000}, {450000, 3000000}};
-    Level2Entry asks[3] = {{530000, 1000000}, {540000, 2000000}};
+    const Level2Entry bids[3] = {{470000, 1000000}, {460000, 2000000}, {450000, 3000000}};
+    const Level2Entry asks[3] = {{530000, 1000000}, {540000, 2000000}};
     book.set_book(bids, 3, asks, 2);
 
     OrderBookL2::Top top{};
@@ -116,8 +116,8 @@ static void test_order_book() {
     std::thread writer([&] {
         uint64_t i = 0;
         while (!stop.load()) {
-            Level2Entry b[1] = {{470000 + (i % 10), 1000000}};
-            Level2Entry a[1] = {{530000 + (i % 10), 1000000}};
+            const Level2Entry b[1] = {{470000 + (i % 10), 1000000}};
+            const Level2Entry a[1] = {{530000 + (i % 10), 1000000}};
             book.set_bids(b, 1);
             book.set_asks(a, 1);
             ++i;
@@ -267,6 +267,19 @@ static void test_base64_hmac() {
     sha256_init(c); sha256_update(c, opad, 64);
     sha256_update(c, inner, 32); sha256_final(c, want);
     CHECK(std::memcmp(got, want, 32) == 0, "hmac midstate == textbook hmac");
+
+    // An unkeyed HMAC must be deterministic (no indeterminate midstate, which
+    // would be undefined behaviour) and must never equal the keyed one.
+    HmacSha256 unkeyed_a;
+    HmacSha256 unkeyed_b;
+    uint8_t a[32], b[32];
+    unkeyed_a.compute((const uint8_t*)msg, std::strlen(msg), a);
+    unkeyed_b.compute((const uint8_t*)msg, std::strlen(msg), b);
+    CHECK(std::memcmp(a, b, 32) == 0, "unkeyed HMAC is deterministic");
+    CHECK(std::memcmp(a, got, 32) != 0, "unkeyed HMAC never equals the keyed one");
+    unkeyed_a.set_key(key, 32);
+    unkeyed_a.compute((const uint8_t*)msg, std::strlen(msg), a);
+    CHECK(std::memcmp(a, want, 32) == 0, "set_key after a default construction works");
 }
 
 // ── Salt uniqueness ──────────────────────────────────────────────────────────
@@ -302,26 +315,39 @@ static void test_signer_key_validation() {
 static void test_wire_body() {
     std::printf("wire_body\n");
     // Reproduce the Python golden vector exactly (fixed salt/timestamp/sizes).
-    uint8_t maker[20];
-    parse_hex_bytes("26972a79b73e93a0374afabd80302d19638051c9", 42, maker, 20);
+    // Zero-initialised and with the parse result checked: an unchecked
+    // parse_hex_bytes() left `maker` indeterminate, which -Wuninitialized
+    // reported and MSan/valgrind would flag as use of uninitialized memory.
+    // The address is 20 bytes, so the hex length argument is 40 (it was 42,
+    // which made parse_hex_bytes() fail its `len == out_len * 2` precondition and
+    // return without writing; the previous code ignored that return value and
+    // then memcpy'd an indeterminate buffer into OrderV2::maker — undefined
+    // behaviour that the golden comparison could not see because build_wire_body
+    // takes the maker/signer hex strings separately).
+    uint8_t maker[20]{};
+    CHECK(parse_hex_bytes("26972a79b73e93a0374afabd80302d19638051c9", 40, maker, 20),
+          "golden maker address parses");
     OrderV2 o{};
     o.salt = 123456789012345678ULL;
     std::memcpy(o.maker, maker, 20);
     std::memcpy(o.signer, maker, 20);
     const char* tok = "71321045679252212594626395510336467040167069592778062791519851593659551227755";
-    parse_uint256_dec(tok, std::strlen(tok), o.token_id);
+    CHECK(parse_uint256_dec(tok, std::strlen(tok), o.token_id),
+          "golden token id parses");
     o.maker_amount = 5500000;
     o.taker_amount = 10000000;
     o.side = K_SIDE_BUY;
     o.signature_type = 0;
     o.timestamp_ms = 1758528000000ULL;
 
-    uint8_t sig[65];
-    parse_hex_bytes("2d1a7edd096f2073b55765c38cf5f575273f8163a3e16eb2099524c03a6261df"
-                    "4ddc6f54a6e8e39df1c6bdd311bf916a7c20b3afdc7c8dbd01a40a836baded821c",
-                    130, sig, 65);
+    uint8_t sig[65]{};
+    CHECK(parse_hex_bytes(
+              "2d1a7edd096f2073b55765c38cf5f575273f8163a3e16eb2099524c03a6261df"
+              "4ddc6f54a6e8e39df1c6bdd311bf916a7c20b3afdc7c8dbd01a40a836baded821c",
+              130, sig, 65),
+          "golden signature parses");
 
-    WireBody body;
+    WireBody body{};
     const char* maker_hex_full = "0x26972a79b73e93a0374afabd80302d19638051c9";
     const bool ok = build_wire_body(o, sig, tok, maker_hex_full, maker_hex_full,
                                     "11111111-2222-3333-4444-555555555555", "GTC", body);
@@ -981,6 +1007,89 @@ static void test_config_fail_closed() {
               "overlapping TLS pins support safe rotation");
     }
     unsetenv("BOT_TLS_PIN");
+
+    // BOT_METADATA_MAX_AGE_MS is enforced by the supervisor, so the refresh
+    // period must leave margin: a refresh slower than half the age budget would
+    // block trading between two scheduled refreshes by construction.
+    arm_test_key();
+    {
+        MarketConfig cfg;
+        CHECK(cfg.load(false, true) == nullptr, "metadata defaults are coherent");
+        CHECK(cfg.metadata_max_age_ms >= cfg.metadata_refresh_ms * 2,
+              "the default age budget covers two refresh periods");
+    }
+    arm_test_key();
+    setenv("BOT_METADATA_MAX_AGE_MS", "60000", 1);
+    setenv("BOT_METADATA_REFRESH_MS", "300000", 1);
+    {
+        MarketConfig cfg;
+        const char* error = cfg.load(false, true);
+        CHECK(error != nullptr &&
+                  std::strstr(error, "BOT_METADATA_MAX_AGE_MS") != nullptr,
+              "a refresh period longer than half the age budget is rejected");
+    }
+    unsetenv("BOT_METADATA_MAX_AGE_MS");
+    unsetenv("BOT_METADATA_REFRESH_MS");
+
+    // Where the outcome token id comes from must be observable: it decides
+    // whether the venue resolves the identity for us or the operator pinned it.
+    arm_test_key();
+    {
+        MarketConfig cfg;
+        CHECK(cfg.load(false, true) == nullptr, "configuration without a token id");
+        CHECK(cfg.token_id_from_metadata && cfg.token_id_dec[0] == '\0',
+              "no BOT_TOKEN_ID means the id will be resolved from venue metadata");
+        CHECK(std::strcmp(cfg.token_id_source(), "venue-metadata") == 0,
+              cfg.token_id_source());
+    }
+    arm_test_key();
+    setenv("BOT_MODE", "replay", 1);
+    {
+        MarketConfig cfg;
+        // force_mock (the second argument) rewrites the mode to paper, so this
+        // case loads without it to keep BOT_MODE=replay.
+        CHECK(cfg.load(false, false) == nullptr, "replay configuration loads");
+        CHECK(!cfg.token_id_from_metadata && cfg.token_id_dec[0] != '\0',
+              "only replay keeps the documented test vector, it has no venue to ask");
+        CHECK(std::strcmp(cfg.token_id_source(), "replay-test-vector") == 0,
+              "the built-in vector is reported as such, not as operator-provided");
+    }
+    unsetenv("BOT_MODE");
+    arm_test_key();
+    setenv("BOT_TOKEN_ID",
+           "65818650605255155769223052139070506823072525854034053159594882546554163"
+           "536512",
+           1);
+    {
+        MarketConfig cfg;
+        CHECK(cfg.load(false, true) == nullptr, "configuration with a token id");
+        CHECK(!cfg.token_id_from_metadata && cfg.token_id_dec[0] != '\0',
+              "an explicit BOT_TOKEN_ID is recorded as operator-provided");
+        CHECK(std::strcmp(cfg.token_id_source(), "BOT_TOKEN_ID") == 0,
+              cfg.token_id_source());
+    }
+    unsetenv("BOT_TOKEN_ID");
+    arm_test_key();
+    setenv("BOT_TOKEN_ID", "12x34", 1);
+    {
+        MarketConfig cfg;
+        CHECK(cfg.load(false, true) != nullptr,
+              "a non-canonical token id is rejected instead of resolved later");
+    }
+    unsetenv("BOT_TOKEN_ID");
+
+    arm_test_key();
+    setenv("BOT_METADATA_MAX_AGE_MS", "60000", 1);
+    setenv("BOT_METADATA_REFRESH_MS", "30000", 1);
+    {
+        MarketConfig cfg;
+        CHECK(cfg.load(false, true) == nullptr,
+              "an age budget of two refresh periods is accepted");
+        CHECK(cfg.metadata_max_age_ms == 60000 && cfg.metadata_refresh_ms == 30000,
+              "both values reach the configuration");
+    }
+    unsetenv("BOT_METADATA_MAX_AGE_MS");
+    unsetenv("BOT_METADATA_REFRESH_MS");
 }
 
 static void test_secret_file_loading() {
@@ -1074,6 +1183,218 @@ static void test_secret_file_loading() {
     unlink(path);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Environment plumbing: every non-secret knob must reach the field it names
+// ═══════════════════════════════════════════════════════════════════════════
+// Range validation is covered per struct elsewhere; what was not covered is the
+// env -> field assignment itself.  A swapped or dropped assignment changes
+// behaviour without tripping any range check (the same family as the dead fee
+// assignment found in main_hot_path.cpp), so every knob is set to a distinct,
+// valid, non-default value and read back.  Runs last: it sets a lot of
+// environment.
+void test_config_env_plumbing() {
+    static constexpr char KEY[] =
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    static constexpr char TOKEN[] =
+        "71321045679252212594626395510336467040167069592778062791519851593659551227755";
+    static constexpr char CONDITION[] =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const std::string pin = "sha256//" + std::string(43, 'A') + "=";
+    const char* text[][2] = {
+        {"BOT_MODE", "paper"},
+        {"BOT_MARKET_SLUG", "plumbing-market"},
+        {"BOT_CONDITION_ID", CONDITION},
+        {"BOT_TOKEN_ID", TOKEN},
+        {"BOT_ORDER_TYPE", "GTD"},
+        {"BOT_ALPHA_BIND", "127.0.0.1"},
+        {"BOT_KILL_SWITCH_FILE", "/tmp/crowdintel-plumbing.kill"},
+        {"BOT_TLS_PIN", pin.c_str()},
+        {"CLOB_HOST", "https://clob.plumbing.test"},
+        {"WS_HOST", "wss://ws.plumbing.test/ws/market"},
+        {"GAMMA_HOST", "https://gamma.plumbing.test"},
+        {"BOT_USER_WS_HOST", "wss://ws.plumbing.test/ws/user"},
+        {"POLYGON_RPC_URL", "https://rpc.plumbing.test"},
+        {"POLYGON_RPC_BACKUP_URL", "https://rpc2.plumbing.test"},
+        {"BOT_LEDGER_DIR", "/tmp/crowdintel-plumbing-ledger"},
+        {"BOT_PREFLIGHT_TOKEN_FILE", "/tmp/crowdintel-plumbing.pass"},
+        {"BOT_MAKER_ADDRESS", "2222222222222222222222222222222222222222"},
+        {"BOT_API_ADDRESS", "3333333333333333333333333333333333333333"},
+    };
+    const char* numbers[][2] = {
+        {"BOT_NEG_RISK", "1"},
+        {"BOT_SIGNATURE_TYPE", "1"},
+        {"BOT_GTD_TTL_SECONDS", "600"},
+        {"BOT_TICK_SIZE", "0.005"},
+        {"BOT_TICKS", "2500"},
+        {"BOT_BANKROLL_USD", "2500"},
+        {"BOT_KELLY_FRACTION", "0.05"},
+        {"BOT_MIN_EDGE", "0.03"},
+        {"BOT_MIN_CONFIDENCE", "0.9"},
+        {"BOT_MAX_Q_VALUE", "0.04"},
+        {"BOT_TAKER_FEE_RATE", "0.04"},
+        {"BOT_MAX_TAKER_FEE_RATE", "0.05"},
+        {"BOT_MAX_ORDER_USD", "42.5"},
+        {"BOT_MAX_EXPOSURE_USD", "321"},
+        {"BOT_MAX_DAILY_LOSS_USD", "77"},
+        {"BOT_MIN_SIZE_SHARES", "7.5"},
+        {"BOT_INITIAL_POSITION_SHARES", "15"},
+        {"BOT_PRESIGN_TTL_MS", "2500"},
+        {"BOT_SIGNAL_TTL_MS", "1200"},
+        {"BOT_MAX_BOOK_AGE_MS", "1500"},
+        {"BOT_ALPHA_PORT", "9911"},
+        {"BOT_PIN_CPU", "1"},
+        {"BOT_COLD_CPU", "2"},
+        {"BOT_LEDGER_FSYNC", "0"},
+        {"BOT_LEDGER_CHECKPOINT_EVERY", "256"},
+        {"BOT_RECON_MAX_PAGES", "3"},
+        {"BOT_PREFLIGHT_MAX_AGE_S", "600"},
+        {"BOT_MAX_CLOCK_SKEW_S", "5"},
+        {"BOT_MIN_COLLATERAL", "2.5"},
+        {"BOT_TARGET_ALLOWANCE", "12.25"},
+        {"BOT_USER_WS_ENABLED", "1"},
+        {"BOT_USER_WS_KEEPALIVE_MS", "7000"},
+        {"BOT_USER_WS_IDLE_MS", "25000"},
+        {"BOT_USER_WS_PONG_MS", "60000"},
+        {"BOT_USER_WS_RECONNECT_MIN_MS", "400"},
+        {"BOT_USER_WS_RECONNECT_MAX_MS", "8000"},
+        {"BOT_HEARTBEAT_ENABLED", "1"},
+        {"BOT_HEARTBEAT_INTERVAL_MS", "4000"},
+        {"BOT_HEARTBEAT_WARN_MS", "6000"},
+        {"BOT_HEARTBEAT_BLOCK_MS", "8000"},
+        {"BOT_HEARTBEAT_ASSUME_CANCELLED_MS", "9000"},
+        {"BOT_HEARTBEAT_MAX_FAILURES", "3"},
+        {"BOT_METADATA_MAX_AGE_MS", "60000"},
+        {"BOT_METADATA_REFRESH_MS", "20000"},
+        {"BOT_STRICT_ENV", "1"},
+        {"BOT_ALLOW_PROTOCOL_V2", "0"},
+        {"BOT_PREFLIGHT_CHECK_L1", "1"},
+        {"BOT_PREFLIGHT_CHECK_USER_WS", "1"},
+        {"BOT_PREFLIGHT_CHECK_HEARTBEAT", "1"},
+        {"BOT_ENABLE_LIVE_TRADING", "0"},
+        {"BOT_SESSION_TIMEOUT_MS", "600000"},
+    };
+    for (const auto& entry : text) setenv(entry[0], entry[1], 1);
+    for (const auto& entry : numbers) setenv(entry[0], entry[1], 1);
+    setenv("BOT_PRIVATE_KEY_HEX", KEY, 1);
+
+    MarketConfig cfg;
+    const char* error = cfg.load(false, false);
+    CHECK(error == nullptr, error ? error : "every knob at a valid non-default value loads");
+    if (error != nullptr) {
+        for (const auto& entry : text) unsetenv(entry[0]);
+        for (const auto& entry : numbers) unsetenv(entry[0]);
+        unsetenv("BOT_PRIVATE_KEY_HEX");
+        return;
+    }
+
+    // Identity and market
+    CHECK(cfg.bot_mode == BotMode::PAPER, "BOT_MODE");
+    CHECK(std::strcmp(cfg.market_slug, "plumbing-market") == 0, "BOT_MARKET_SLUG");
+    CHECK(std::strcmp(cfg.condition_id, CONDITION) == 0, "BOT_CONDITION_ID");
+    CHECK(std::strcmp(cfg.token_id_dec, TOKEN) == 0, "BOT_TOKEN_ID");
+    CHECK(!cfg.token_id_from_metadata, "BOT_TOKEN_ID provenance");
+    CHECK(cfg.neg_risk, "BOT_NEG_RISK");
+    CHECK(cfg.signature_type == 1, "BOT_SIGNATURE_TYPE");
+    CHECK(std::strcmp(cfg.order_type, "GTD") == 0, "BOT_ORDER_TYPE");
+    CHECK(cfg.gtd_ttl_seconds == 600, "BOT_GTD_TTL_SECONDS");
+    CHECK(cfg.wire_expiration(1000000) == 1000000 + 60 + 600,
+          "BOT_GTD_TTL_SECONDS reaches the wire expiration");
+    CHECK(cfg.tick_size == 5000, "BOT_TICK_SIZE");
+    CHECK(cfg.max_ticks == 2500, "BOT_TICKS");
+
+    // Risk and sizing
+    CHECK(cfg.bankroll_usd == 2500.0, "BOT_BANKROLL_USD");
+    CHECK(cfg.kelly_fraction == 0.05, "BOT_KELLY_FRACTION");
+    CHECK(cfg.min_edge == 0.03, "BOT_MIN_EDGE");
+    CHECK(cfg.min_confidence == 0.9, "BOT_MIN_CONFIDENCE");
+    CHECK(cfg.max_q_value == 0.04, "BOT_MAX_Q_VALUE");
+    CHECK(cfg.taker_fee_rate == 0.04, "BOT_TAKER_FEE_RATE");
+    CHECK(cfg.max_taker_fee_rate == 0.05, "BOT_MAX_TAKER_FEE_RATE");
+    CHECK(cfg.max_order_usd == 42.5, "BOT_MAX_ORDER_USD");
+    CHECK(cfg.max_exposure_usd == 321.0, "BOT_MAX_EXPOSURE_USD");
+    CHECK(cfg.max_daily_loss_usd == 77.0, "BOT_MAX_DAILY_LOSS_USD");
+    CHECK(cfg.min_size_shares == 7500000, "BOT_MIN_SIZE_SHARES");
+    CHECK(cfg.initial_position_shares == 15000000, "BOT_INITIAL_POSITION_SHARES");
+    CHECK(cfg.presign_ttl_ms == 2500, "BOT_PRESIGN_TTL_MS");
+    CHECK(cfg.signal_ttl_ms == 1200, "BOT_SIGNAL_TTL_MS");
+    CHECK(cfg.max_book_age_ms == 1500, "BOT_MAX_BOOK_AGE_MS");
+
+    // Transport and runtime
+    CHECK(std::strcmp(cfg.alpha_bind, "127.0.0.1") == 0, "BOT_ALPHA_BIND");
+    CHECK(cfg.alpha_port == 9911, "BOT_ALPHA_PORT");
+    CHECK(cfg.pin_cpu == 1, "BOT_PIN_CPU");
+    CHECK(cfg.cold_cpu == 2, "BOT_COLD_CPU");
+    CHECK(std::strcmp(cfg.kill_switch_file, "/tmp/crowdintel-plumbing.kill") == 0,
+          "BOT_KILL_SWITCH_FILE");
+    CHECK(std::strcmp(cfg.tls_pin, pin.c_str()) == 0, "BOT_TLS_PIN");
+    CHECK(std::strcmp(cfg.clob_host, "https://clob.plumbing.test") == 0, "CLOB_HOST");
+    CHECK(std::strcmp(cfg.ws_host, "wss://ws.plumbing.test/ws/market") == 0, "WS_HOST");
+    CHECK(std::strcmp(cfg.gamma_host, "https://gamma.plumbing.test") == 0, "GAMMA_HOST");
+    CHECK(std::strcmp(cfg.user_ws_host, "wss://ws.plumbing.test/ws/user") == 0,
+          "BOT_USER_WS_HOST");
+    CHECK(std::strcmp(cfg.polygon_rpc_url, "https://rpc.plumbing.test") == 0,
+          "POLYGON_RPC_URL");
+    CHECK(std::strcmp(cfg.polygon_rpc_backup_url, "https://rpc2.plumbing.test") == 0,
+          "POLYGON_RPC_BACKUP_URL");
+    CHECK(cfg.session_timeout_ms == 600000, "BOT_SESSION_TIMEOUT_MS");
+
+    // Ledger, reconciliation, preflight
+    CHECK(std::strcmp(cfg.ledger_dir, "/tmp/crowdintel-plumbing-ledger") == 0,
+          "BOT_LEDGER_DIR");
+    CHECK(!cfg.ledger_fsync, "BOT_LEDGER_FSYNC");
+    CHECK(cfg.ledger_checkpoint_every == 256, "BOT_LEDGER_CHECKPOINT_EVERY");
+    CHECK(cfg.recon_max_pages == 3, "BOT_RECON_MAX_PAGES");
+    CHECK(std::strcmp(cfg.preflight_token_file, "/tmp/crowdintel-plumbing.pass") == 0,
+          "BOT_PREFLIGHT_TOKEN_FILE");
+    CHECK(cfg.preflight_max_age_s == 600, "BOT_PREFLIGHT_MAX_AGE_S");
+    CHECK(cfg.max_clock_skew_s == 5, "BOT_MAX_CLOCK_SKEW_S");
+    CHECK(cfg.min_collateral_base == 2500000, "BOT_MIN_COLLATERAL");
+    CHECK(cfg.target_allowance_base == 12250000, "BOT_TARGET_ALLOWANCE");
+    CHECK(cfg.preflight_check_l1 && cfg.preflight_check_user_ws &&
+              cfg.preflight_check_heartbeat,
+          "BOT_PREFLIGHT_CHECK_*");
+
+    // User channel and heartbeat: the thresholds that decide how fast a lost
+    // venue connection blocks trading.
+    CHECK(cfg.user_ws_enabled, "BOT_USER_WS_ENABLED");
+    CHECK(cfg.user_ws_keepalive_ms == 7000, "BOT_USER_WS_KEEPALIVE_MS");
+    CHECK(cfg.user_ws_idle_ms == 25000, "BOT_USER_WS_IDLE_MS");
+    CHECK(cfg.user_ws_pong_ms == 60000, "BOT_USER_WS_PONG_MS");
+    CHECK(cfg.user_ws_reconnect_min_ms == 400, "BOT_USER_WS_RECONNECT_MIN_MS");
+    CHECK(cfg.user_ws_reconnect_max_ms == 8000, "BOT_USER_WS_RECONNECT_MAX_MS");
+    CHECK(cfg.heartbeat_enabled, "BOT_HEARTBEAT_ENABLED");
+    CHECK(cfg.heartbeat_interval_ms == 4000, "BOT_HEARTBEAT_INTERVAL_MS");
+    CHECK(cfg.heartbeat_warn_ms == 6000, "BOT_HEARTBEAT_WARN_MS");
+    CHECK(cfg.heartbeat_block_ms == 8000, "BOT_HEARTBEAT_BLOCK_MS");
+    CHECK(cfg.heartbeat_assume_cancelled_ms == 9000,
+          "BOT_HEARTBEAT_ASSUME_CANCELLED_MS");
+    CHECK(cfg.heartbeat_max_failures == 3, "BOT_HEARTBEAT_MAX_FAILURES");
+    CHECK(cfg.metadata_max_age_ms == 60000, "BOT_METADATA_MAX_AGE_MS");
+    CHECK(cfg.metadata_refresh_ms == 20000, "BOT_METADATA_REFRESH_MS");
+    CHECK(cfg.strict_env, "BOT_STRICT_ENV");
+    CHECK(!cfg.allow_protocol_v2_positions, "BOT_ALLOW_PROTOCOL_V2");
+    CHECK(!cfg.live_armed, "BOT_ENABLE_LIVE_TRADING");
+
+    // BOT_MAKER_ADDRESS and BOT_API_ADDRESS are read by finalize_identity, not by
+    // load: they must reach the fields the signer and the L2 headers use.
+    uint8_t signer_address[20];
+    for (uint8_t& byte : signer_address) byte = 0x44;
+    CHECK(cfg.finalize_identity(signer_address) == nullptr, "identity binds");
+    CHECK(std::strcmp(cfg.maker_hex,
+                      "0x2222222222222222222222222222222222222222") == 0,
+          "BOT_MAKER_ADDRESS");
+    CHECK(std::strcmp(cfg.api_address_hex,
+                      "0x3333333333333333333333333333333333333333") == 0,
+          "BOT_API_ADDRESS");
+    CHECK(std::strcmp(cfg.signer_hex,
+                      "0x4444444444444444444444444444444444444444") == 0,
+          "the derived signer address is formatted");
+
+    for (const auto& entry : text) unsetenv(entry[0]);
+    for (const auto& entry : numbers) unsetenv(entry[0]);
+    unsetenv("BOT_PRIVATE_KEY_HEX");
+}
+
 int main() {
     std::printf("== CROWDINTEL core unit tests ==\n");
     test_config_fail_closed();
@@ -1098,6 +1419,7 @@ int main() {
     test_salt_uniqueness();
     test_signer_key_validation();
     test_wire_body();
+    test_config_env_plumbing();
     std::printf("== %s (%d failures) ==\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;
 }
