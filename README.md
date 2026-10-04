@@ -65,6 +65,7 @@ This is the public KAT key used only for local deterministic startup. Never reus
 
 ## Documentation
 
+- [Encaje con los programas de incentivos de Polymarket (ES)](docs/ANALISIS_ESTRATEGIAS.es.md)
 - [Architecture and concurrency invariants](docs/ARCHITECTURE.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Deployment and rollback runbook](docs/DEPLOYMENT.md)
