@@ -271,11 +271,16 @@ inline size_t u64_to_dec(uint64_t v, char* out) {
     return n;
 }
 
-// ── Wire body (exact field set/order of the official V2 "Place Orders" doc) ──
+// ── Wire body (V2 "Place Orders" — matches the Polymarket CLOB V2 POST /order
+//    schema field set; key order is canonical-sorted for deterministic output,
+//    which is functionally equivalent to the SDK's insertion order since the
+//    server parses JSON by field name, and the HMAC is computed over the same
+//    bytes the client sends).  postOnly is always emitted as false, matching
+//    the official Python SDK's default. ──
 // {"deferExec":false,"order":{"builder":...,"expiration":"0","maker":...,
 //  "makerAmount":...,"metadata":...,"salt":...,"side":"BUY","signature":...,
 //  "signatureType":N,"signer":...,"takerAmount":...,"timestamp":...,
-//  "tokenId":...},"orderType":"GTC","owner":"..."}
+//  "tokenId":...},"orderType":"GTC","owner":"...","postOnly":false}
 struct WireBody {
     char   buf[1536];
     size_t len;
@@ -383,7 +388,7 @@ inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],
     *p++ = '"';
     std::memcpy(p, ",\"owner\":\"", 10); p += 10;
     std::memcpy(p, owner_api_key, owner_len); p += owner_len;
-    std::memcpy(p, "\"}", 2); p += 2;
+    std::memcpy(p, "\",\"postOnly\":false", 18); p += 18;
 
     out.len = static_cast<size_t>(p - out.buf);
     if (out.len >= sizeof(out.buf)) return false;
