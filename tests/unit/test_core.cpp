@@ -745,6 +745,108 @@ static void test_signal_deduplication() {
           "same signal identity cannot submit twice inside TTL");
 }
 
+// Verifies the fee-in-cost-cap fix: the taker fee is now included in the
+// worst-case cap check (BUY: notional + fee, SELL: notional - fee) and the
+// pre-sizing budget is reduced by (1 + buy_fee_rate) so orders at the cap
+// boundary are not unnecessarily rejected.
+static void test_fee_in_cost_cap() {
+    std::printf("fee_in_cost_cap\n");
+
+    // --- BUY: high fee must not cause spurious rejection at the cap boundary ---
+    {
+        MarketConfig cfg;
+        EIP712Signer signer;
+        init_pool_fixture(cfg, signer);
+        std::snprintf(cfg.market_slug, sizeof(cfg.market_slug), "fee-cap-buy");
+        cfg.market_hash =
+            alpha_hash_bytes(cfg.market_slug, std::strlen(cfg.market_slug));
+        cfg.max_order_usd = 10.0;
+        cfg.max_exposure_usd = 1000.0;
+        cfg.max_daily_loss_usd = 1000.0;
+        cfg.taker_fee_rate = 0.50;  // 50 % — fee ≈ $1.90 on a $10 notional
+
+        OrderBookL2 book;
+        book.set_tick_size(10000);
+        const Level2Entry bids[] = {{470000, 50000000}};
+        const Level2Entry asks[] = {{530000, 50000000}};
+        book.set_book(bids, 1, asks, 1);
+        SPSC_RingBuffer<AlphaSignal> signals;
+        PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+        CHECK(pool.rebuild(470000, 530000, 20000000, 10000),
+              "fee-cap BUY fixture ladder built");
+        MockCLOBClient client(cfg);
+        ExecutionEngine<MockCLOBClient> engine(
+            cfg, book, signals, signer, pool, client);
+
+        AlphaSignal signal{};
+        signal.direction_hint = K_SIDE_BUY;
+        signal.p_win = 0.75;
+        signal.confidence = 0.95;
+        signal.q_value = 0.01;
+        signal.timestamp_ns = AlphaParser::realtime_ns();
+        signal.market_hash = cfg.market_hash;
+        signal.signal_id = 7;
+
+        // Without the pre-sizing fee reservation, notional ≈ $10 and
+        // notional + fee ≈ $11.90 > max_order_usd (10) → RISK_REJECTED.
+        // With the fix, the budget is capped to $10 / (1+fee_rate) ≈ $8.10
+        // so the worst-case cost stays at ≈ $10 → SUBMITTED.
+        CHECK(signals.try_push(signal) &&
+              engine.run_tick() == TickResult::SUBMITTED,
+              "BUY at cap boundary submits with 50 % fee");
+
+        // Committed exposure must be fee-inclusive: it should be close to
+        // max_order_usd (notional + fee ≈ $10), NOT noticeably below it.
+        // Without the fee fix, exposure would be ≈ notional only (≈ $8.10).
+        const double exposure = engine.committed_exposure_usd();
+        CHECK(exposure > 9.5, "committed exposure includes taker fee");
+    }
+
+    // --- SELL: fee is subtracted from the worst-case net-value notional ---
+    {
+        MarketConfig cfg;
+        EIP712Signer signer;
+        init_pool_fixture(cfg, signer);
+        std::snprintf(cfg.market_slug, sizeof(cfg.market_slug), "fee-cap-sell");
+        cfg.market_hash =
+            alpha_hash_bytes(cfg.market_slug, std::strlen(cfg.market_slug));
+        cfg.max_order_usd = 10.0;
+        cfg.max_exposure_usd = 1000.0;
+        cfg.max_daily_loss_usd = 1000.0;
+        cfg.taker_fee_rate = 0.07;
+        cfg.initial_position_shares = 100 * 1000000ULL;  // 100 human shares
+
+        OrderBookL2 book;
+        book.set_tick_size(10000);
+        const Level2Entry bids[] = {{470000, 50000000}};
+        const Level2Entry asks[] = {{530000, 50000000}};
+        book.set_book(bids, 1, asks, 1);
+        SPSC_RingBuffer<AlphaSignal> signals;
+        PresignedOrderPool pool(cfg, signer, cfg.presign_ttl_ms);
+        CHECK(pool.rebuild(470000, 530000, 20000000, 10000),
+              "fee-cap SELL fixture ladder built");
+        MockCLOBClient client(cfg);
+        ExecutionEngine<MockCLOBClient> engine(
+            cfg, book, signals, signer, pool, client);
+
+        AlphaSignal signal{};
+        signal.direction_hint = K_SIDE_SELL;
+        signal.p_win = 0.25;  // SELL edge: price(0.47) - p_win(0.25) - fee > 0.02
+        signal.confidence = 0.95;
+        signal.q_value = 0.01;
+        signal.timestamp_ns = AlphaParser::realtime_ns();
+        signal.market_hash = cfg.market_hash;
+        signal.signal_id = 8;
+
+        // For SELL the check uses net_value = notional - fee.  The fee is
+        // subtracted (conservative worst-case), so the net value is smaller
+        // and well within the cap.
+        CHECK(signals.try_push(signal) &&
+              engine.run_tick() == TickResult::SUBMITTED,
+              "SELL with fee subtracted from notional submits");
+    }
+}
+
 struct ScriptedGatewayClient {
     std::atomic<int> calls{0};
     void warmup() { warmed.store(true, std::memory_order_release); }
@@ -1442,6 +1544,7 @@ int main() {
     test_order_gateway();
     test_presigned_pool_concurrency();
     test_signal_deduplication();
+    test_fee_in_cost_cap();
 #ifdef CROWDINTEL_HAVE_NETWORK
     test_clob_responses();
     test_ws_parsing();

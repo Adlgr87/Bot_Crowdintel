@@ -168,6 +168,16 @@ public:
             available_budget = std::min(
                 available_budget,
                 std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_));
+            // Reserve the taker fee so the worst-case cost (notional + fee)
+            // stays within each cap.  committed_exposure_usd_ and
+            // daily_buy_volume_ are already fee-inclusive (see the accumulation
+            // site), so the residual is a fee-inclusive budget.  For BUY the
+            // fee is fee_per_share × shares = (fee_per_share / price) × notional,
+            // i.e. fee = buy_fee_rate × notional.  Dividing the fee-inclusive
+            // budget by (1 + buy_fee_rate) yields the usable notional budget so
+            // that notional + fee ≤ cap.
+            const double buy_fee_rate = fee_per_share / price;
+            available_budget /= (1.0 + buy_fee_rate);
         }
         usd = std::min(usd, available_budget);
         uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, price);
@@ -244,17 +254,22 @@ public:
             return TickResult::SUBMIT_FAILED;
         }
 
-        // Fee-adjusted notional for exposure/loss reservation, consistent
-        // with the cap check above (max_order_usd is a "worst-cost cap").
+        // Fee-adjusted notional for exposure/loss reservation, consistent with
+        // the cap check above (max_order_usd is a "worst-cost cap").
+        // Recompute the fee with post-presign effective_shares so the
+        // reservation tracks the actual accepted trade, not the pre-pool size.
+        const double accepted_total_fee = fee_per_share *
+            static_cast<double>(effective_shares) * 1e-6;
         const double accepted_notional = side == K_SIDE_BUY
-            ? static_cast<double>(maker_amount) * 1e-6 + total_fee
-            : static_cast<double>(taker_amount) * 1e-6 - total_fee;
+            ? static_cast<double>(maker_amount) * 1e-6 + accepted_total_fee
+            : static_cast<double>(taker_amount) * 1e-6 - accepted_total_fee;
         if (side == K_SIDE_BUY) {
             committed_exposure_usd_ += accepted_notional;
-            // NOTE: `daily_buy_volume_` accumulates gross BUY notional and is a
-            // conservative daily BUY-volume cap (reset each UTC day).  It is NOT
-            // realized P&L: it never decrements on SELL, and the ExecutionEngine
-            // has no ledger connection to compute cross-session realized losses.
+            // NOTE: `daily_buy_volume_` accumulates fee-adjusted BUY notional
+            // (cost = notional + taker fee) and is a conservative daily BUY-volume
+            // cap (reset each UTC day).  It is NOT realized P&L: it never
+            // decrements on SELL, and the ExecutionEngine has no ledger
+            // connection to compute cross-session realized losses.
             // See docs/CONFIGURATION.md for the `BOT_MAX_DAILY_LOSS_USD` caveat.
             daily_buy_volume_ += accepted_notional;
         } else {
@@ -387,10 +402,11 @@ private:
     const std::atomic<uint64_t>* reconciled_inventory_ = nullptr;
     uint64_t confirmed_inventory_ = 0;
     double committed_exposure_usd_ = 0.0;
-    // Gross BUY notional accumulated since the last UTC day boundary.  Serves as
-    // a daily circuit-breaker via cfg_.max_daily_loss_usd.  This is a conservative
-    // BUY-volume cap, NOT realized P&L — it never decrements on a SELL and does
-    // not survive a restart (see check_daily_reset() and the accumulation comment).
+    // Fee-adjusted BUY notional (cost = notional + taker fee) accumulated
+    // since the last UTC day boundary.  Serves as a daily circuit-breaker via
+    // cfg_.max_daily_loss_usd.  This is a conservative BUY-volume cap, NOT
+    // realized P&L — it never decrements on a SELL and does not survive a
+    // restart (see check_daily_reset() and the accumulation comment).
     double daily_buy_volume_ = 0.0;
     uint64_t daily_buy_volume_day_ = 0;
     uint64_t submitted_ = 0;
