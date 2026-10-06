@@ -116,6 +116,8 @@ public:
         if (trading_enabled_ && !trading_enabled_->load(std::memory_order_acquire))
             return TickResult::RISK_REJECTED;
 
+        check_daily_reset();
+
         OrderBookL2::Top top{};
         bool have_book = false;
         const uint64_t max_age_ns = cfg_.max_book_age_ms * 1000000ULL;
@@ -165,7 +167,7 @@ public:
                 std::max(0.0, cfg_.max_exposure_usd - committed_exposure_usd_));
             available_budget = std::min(
                 available_budget,
-                std::max(0.0, cfg_.max_daily_loss_usd - worst_case_loss_usd_));
+                std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_));
         }
         usd = std::min(usd, available_budget);
         uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, price);
@@ -194,7 +196,7 @@ public:
         if (order_notional > cfg_.max_order_usd + 1e-9 ||
             (side == K_SIDE_BUY &&
              (committed_exposure_usd_ + order_notional > cfg_.max_exposure_usd ||
-              worst_case_loss_usd_ + order_notional > cfg_.max_daily_loss_usd)))
+              daily_buy_volume_ + order_notional > cfg_.max_daily_loss_usd)))
             return TickResult::RISK_REJECTED;
 
         WireBody body{};
@@ -230,7 +232,12 @@ public:
             side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
         if (side == K_SIDE_BUY) {
             committed_exposure_usd_ += accepted_notional;
-            worst_case_loss_usd_ += accepted_notional;
+            // NOTE: `daily_buy_volume_` accumulates gross BUY notional and is a
+            // conservative daily BUY-volume cap (reset each UTC day).  It is NOT
+            // realized P&L: it never decrements on SELL, and the ExecutionEngine
+            // has no ledger connection to compute cross-session realized losses.
+            // See docs/CONFIGURATION.md for the `BOT_MAX_DAILY_LOSS_USD` caveat.
+            daily_buy_volume_ += accepted_notional;
         } else {
             // Reserve as if fully filled; never permit two sells against the
             // same confirmed inventory while fills are not reconciled.
@@ -254,6 +261,7 @@ public:
                    ? reconciled_inventory_->load(std::memory_order_acquire) : 0;
     }
     double committed_exposure_usd() const noexcept { return committed_exposure_usd_; }
+    double daily_buy_volume() const noexcept { return daily_buy_volume_; }
 
 private:
     static uint64_t realtime_ns() noexcept {
@@ -261,6 +269,23 @@ private:
         clock_gettime(CLOCK_REALTIME, &ts);
         return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
                static_cast<uint64_t>(ts.tv_nsec);
+    }
+
+    // Resets `daily_buy_volume_` when the UTC calendar day rolls over.
+    // Uses CLOCK_REALTIME (the same wall clock the signal-staleness check
+    // already depends on) so a day boundary is consistent with the signals the
+    // engine processes.  Called from run_tick(); after a restart the counter
+    // starts at zero and accumulates only for the new day — it is NOT a
+    // persistent realized-P&L figure (see the comment at the accumulation site).
+    void check_daily_reset() noexcept {
+        const uint64_t now_seconds = realtime_ns() / 1000000000ULL;
+        const uint64_t day_number = now_seconds / 86400ULL;
+        if (daily_buy_volume_day_ == 0) {
+            daily_buy_volume_day_ = day_number;
+        } else if (day_number != daily_buy_volume_day_) {
+            daily_buy_volume_ = 0.0;
+            daily_buy_volume_day_ = day_number;
+        }
     }
 
     double net_edge(uint8_t side, double p_win, double price) const noexcept {
@@ -343,7 +368,12 @@ private:
     const std::atomic<uint64_t>* reconciled_inventory_ = nullptr;
     uint64_t confirmed_inventory_ = 0;
     double committed_exposure_usd_ = 0.0;
-    double worst_case_loss_usd_ = 0.0;
+    // Gross BUY notional accumulated since the last UTC day boundary.  Serves as
+    // a daily circuit-breaker via cfg_.max_daily_loss_usd.  This is a conservative
+    // BUY-volume cap, NOT realized P&L — it never decrements on a SELL and does
+    // not survive a restart (see check_daily_reset() and the accumulation comment).
+    double daily_buy_volume_ = 0.0;
+    uint64_t daily_buy_volume_day_ = 0;
     uint64_t submitted_ = 0;
     uint64_t queued_ = 0;
     uint64_t submit_failed_ = 0;

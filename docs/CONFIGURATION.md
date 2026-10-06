@@ -45,7 +45,7 @@ The deployment unit maps root-only files through systemd `LoadCredential=`. Do n
 | `BOT_TAKER_FEE_RATE` | `0.07` | Fee-rate coefficient. Fetch current market/category value before arming. |
 | `BOT_MAX_ORDER_USD` | `100` | Per-order worst-cost cap. |
 | `BOT_MAX_EXPOSURE_USD` | `250` | Aggregate reserved exposure cap. |
-| `BOT_MAX_DAILY_LOSS_USD` | `50` | Circuit-breaker threshold. |
+| `BOT_MAX_DAILY_LOSS_USD` | `50` | Daily gross BUY-volume cap. Resets at UTC midnight. This is a conservative circuit-breaker on BUY notional, NOT a realized-P&L loss limit — the engine does not decrement on SELL and the counter does not survive a restart. Proper daily realized-P&L tracking requires ledger plumbing that is not yet wired into the hot path. |
 | `BOT_MIN_SIZE_SHARES` | `5` | Venue minimum/order floor in human shares. |
 | `BOT_INITIAL_POSITION_SHARES` | `0` | Operator-reconciled starting inventory; human shares. Never infer this casually. |
 | `BOT_PRESIGN_TTL_MS` | `3000` | Maximum age of generated ladder entries; for GTD it must be shorter than the configured GTD lifetime. |
