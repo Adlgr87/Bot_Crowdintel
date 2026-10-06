@@ -13,6 +13,11 @@
 //   BUY : makerAmount = round(price × size)   [USDC], takerAmount = size [shares]
 //   SELL: makerAmount = size [shares],        takerAmount = round(price × size) [USDC]
 //   where price and size are raw (price_u×size_u/1e6, computed in __int128).
+//
+//   BUY market orders (FAK/FOK): takerAmount (shares) is derived from the floored
+//   USDC budget and CEILED to amount_quantum so makerAmount/takerAmount <= cap.
+//   Flooring the shares instead raises the implied price above the cap and the
+//   venue rejects the order. (See ceil_to_quantum + compute_order_amounts.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <array>
@@ -143,6 +148,17 @@ inline uint64_t floor_to_quantum(uint64_t value, uint64_t quantum) {
     return quantum ? value - value % quantum : value;
 }
 
+// Round quanta UP. Required for BUY market orders: Polymarket's documentation
+// specifies that takerAmount (shares received) must be ceiled so that the
+// effective price makerAmount/takerAmount does not EXCEED the max price.
+// Floor-ing the shares while holding makerAmount fixed produces an effective
+// price slightly ABOVE the cap, which the venue rejects.
+inline uint64_t ceil_to_quantum(uint64_t value, uint64_t quantum) {
+    if (quantum == 0) return value;
+    const uint64_t rem = value % quantum;
+    return rem ? value + (quantum - rem) : value;
+}
+
 // Official amount precision associated with each current tick.  The returned
 // value is a raw x1e6 quantum (for example, 100 means four decimals).
 inline uint64_t amount_quantum_for_tick(uint64_t tick) {
@@ -186,7 +202,11 @@ inline bool compute_order_amounts(uint8_t side, uint64_t price_u,
         if (maker_amount == 0) return false;
         const crowd_uint128_t numerator =
             static_cast<crowd_uint128_t>(maker_amount) * 1000000ULL;
-        taker_amount = floor_to_quantum(
+        // BUG FIX (M1): ceil the share count so effective price
+        // (maker_amount / taker_amount) does not exceed price_u.
+        // Floor-ing here left taker_amount below the true value, raising the
+        // realized price above the cap — the venue would reject the order.
+        taker_amount = ceil_to_quantum(
             static_cast<uint64_t>(numerator / price_u), amount_quantum);
         effective_size_u = taker_amount;
     } else {

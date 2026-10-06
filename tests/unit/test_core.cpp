@@ -197,6 +197,45 @@ static void test_amounts() {
           "unknown venue tick fails closed");
 }
 
+// ── ceil_to_quantum + BUY market-order rounding (M1) ───────────────────────────
+static void test_buy_market_rounding() {
+    std::printf("buy_market_rounding\n");
+    const uint64_t tick = 10000;  // 0.01
+
+    // ceil_to_quantum basic
+    CHECK(ceil_to_quantum(100, 10) == 100, "exact multiple: no round up");
+    CHECK(ceil_to_quantum(101, 10) == 110, "ceil up to next quantum");
+    CHECK(ceil_to_quantum(109, 10) == 110, "ceil up");
+    CHECK(ceil_to_quantum(0, 10) == 0, "zero value");
+    CHECK(ceil_to_quantum(1999, 1) == 1999, "quantum=1 is identity");
+    CHECK(ceil_to_quantum(1999, 0) == 1999, "quantum=0 is identity (fail closed)");
+
+    // BUG FIX (M1): BUY market order must ceil takerAmount so effective price
+    // does not exceed the cap.
+    // Scenario: price 0.52, budget $10 (10000000 raw).
+    // Exact shares = 10/0.52 = 19.230769 → floored to quantum 100 = 19.2115
+    // Floor gives effective price 10/19.2115 = 0.5206 > 0.52 → REJECTED by venue.
+    // Ceil gives 19.2308 → effective price 10/19.2308 = 0.5200 ≤ 0.52 → ACCEPTED.
+    uint64_t ma, ta, eff;
+    CHECK(compute_order_amounts(K_SIDE_BUY, 520000, 10000000, tick,
+                                true /*market*/, ma, ta, eff),
+          "BUY market amount computes");
+    // maker_amount is floored (conservative spend): floor(0.52 * shares) <= 2dp
+    CHECK(ma <= 10000000, "maker_amount never exceeds budget");
+    // taker_amount is ceiled: effective price = ma/ta must be <= price_u
+    const auto effective_price = static_cast<double>(ma) / static_cast<double>(ta);
+    const auto price = 0.52;
+    CHECK(effective_price <= price + 1e-9,
+          "M1: effective BUY price does not exceed cap");
+
+    // Edge case: small order where floor=ceil
+    CHECK(compute_order_amounts(K_SIDE_BUY, 500000, 10000000, tick,
+                                true, ma, ta, eff),
+          "BUY market at 0.50 computes");
+    CHECK(static_cast<double>(ma) / static_cast<double>(ta) <= 0.50 + 1e-9,
+          "M1: effective price respected at different price");
+}
+
 // ── Decimal parsing ──────────────────────────────────────────────────────────
 static void test_parsing() {
     std::printf("decimal_parsing\n");
@@ -1414,6 +1453,7 @@ int main() {
     test_order_book();
     test_kelly();
     test_amounts();
+    test_buy_market_rounding();  // M1: ceil_to_quantum for BUY market orders
     test_parsing();
     test_base64_hmac();
     test_salt_uniqueness();
