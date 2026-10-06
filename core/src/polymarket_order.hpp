@@ -13,6 +13,11 @@
 //   BUY : makerAmount = round(price × size)   [USDC], takerAmount = size [shares]
 //   SELL: makerAmount = size [shares],        takerAmount = round(price × size) [USDC]
 //   where price and size are raw (price_u×size_u/1e6, computed in __int128).
+//
+//   BUY market orders (FAK/FOK): takerAmount (shares) is derived from the floored
+//   USDC budget and CEILED to amount_quantum so makerAmount/takerAmount <= cap.
+//   Flooring the shares instead raises the implied price above the cap and the
+//   venue rejects the order. (See ceil_to_quantum + compute_order_amounts.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <array>
@@ -137,6 +142,17 @@ inline uint64_t floor_to_quantum(uint64_t value, uint64_t quantum) {
     return quantum ? value - value % quantum : value;
 }
 
+// Round quanta UP. Required for BUY market orders: Polymarket's documentation
+// specifies that takerAmount (shares received) must be ceiled so that the
+// effective price makerAmount/takerAmount does not EXCEED the max price.
+// Floor-ing the shares while holding makerAmount fixed produces an effective
+// price slightly ABOVE the cap, which the venue rejects.
+inline uint64_t ceil_to_quantum(uint64_t value, uint64_t quantum) {
+    if (quantum == 0) return value;
+    const uint64_t rem = value % quantum;
+    return rem ? value + (quantum - rem) : value;
+}
+
 // Official amount precision associated with each current tick.  The returned
 // value is a raw x1e6 quantum (for example, 100 means four decimals).
 inline uint64_t amount_quantum_for_tick(uint64_t tick) {
@@ -180,7 +196,17 @@ inline bool compute_order_amounts(uint8_t side, uint64_t price_u,
         if (maker_amount == 0) return false;
         const crowd_uint128_t numerator =
             static_cast<crowd_uint128_t>(maker_amount) * 1000000ULL;
-        taker_amount = floor_to_quantum(
+        // BUGFIX (rounding direction): use ceil_to_quantum here, NOT floor.
+        // The venue derives the implied price as makerAmount/takerAmount and
+        // rejects BUY orders whose price exceeds the cap. Ceiling the received
+        // shares keeps makerAmount/takerAmount <= cap; flooring shrinks the
+        // denominator and pushes the effective price ABOVE the cap.
+        //   e.g. $10 @ 0.52 (price_u=520000, maker=10000000, q=100):
+        //        exact shares = 19230769.23.. -> floor 19230700 (19.2307)
+        //        => eff 0.5200066 > 0.52  -> REJECT
+        //                       -> ceil  19230800 (19.2308)
+        //        => eff 0.51999..   <= 0.52 -> ACCEPT
+        taker_amount = ceil_to_quantum(
             static_cast<uint64_t>(numerator / price_u), amount_quantum);
         effective_size_u = taker_amount;
     } else {

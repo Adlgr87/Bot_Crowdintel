@@ -197,6 +197,52 @@ static void test_amounts() {
           "unknown venue tick fails closed");
 }
 
+// ── ceil_to_quantum + BUY market-order rounding ──────────────────────────────
+// Polymarket rejects BUY orders whose implied price (makerAmount/takerAmount)
+// exceeds the cap. takerAmount (shares) must therefore be CEILED, not floored.
+static void test_buy_market_rounding() {
+    std::printf("buy_market_rounding\n");
+    const uint64_t tick = 10000;  // 0.01
+
+    // ceil_to_quantum basic invariants
+    CHECK(ceil_to_quantum(100, 10) == 100, "exact multiple: no round up");
+    CHECK(ceil_to_quantum(101, 10) == 110, "ceil up to next quantum");
+    CHECK(ceil_to_quantum(109, 10) == 110, "ceil up");
+    CHECK(ceil_to_quantum(0, 10) == 0, "zero value");
+    CHECK(ceil_to_quantum(1999, 1) == 1999, "quantum=1 is identity");
+    CHECK(ceil_to_quantum(1999, 0) == 1999, "quantum=0 is identity (fail closed)");
+
+    // BUG FIX: BUY market takerAmount must ceil so the effective price does not
+    // exceed the cap. $10 @ 0.52 -> exact 19.230769.. shares; flooring gives
+    // 19.2307 (eff 0.5200066 > 0.52 -> REJECTED); ceiling gives 19.2308
+    // (eff 0.51999.. <= 0.52 -> ACCEPTED).
+    uint64_t ma, ta, eff;
+    CHECK(compute_order_amounts(K_SIDE_BUY, 520000, 10000000, tick,
+                                true /*market*/, ma, ta, eff),
+          "BUY market amount computes");
+    CHECK(ma <= 10000000, "maker_amount never exceeds budget");
+    const double effective_price = static_cast<double>(ma) /
+                                   static_cast<double>(ta);
+    CHECK(effective_price <= 0.52 + 1e-9,
+          "effective BUY price does not exceed cap");
+
+    // Size that forces a quantization split between floor/ceil so the guard is
+    // only satisfied by ceiling: 19.230769.. -> floor 19211500 (eff 0.52000104
+    // > cap -> REJECTED) vs ceil 19211600 (eff 0.51999.. <= cap -> ACCEPTED).
+    CHECK(compute_order_amounts(K_SIDE_BUY, 520000, 19230770, tick,
+                                true, ma, ta, eff),
+          "BUY market rounding exercised");
+    CHECK(static_cast<double>(ma) / static_cast<double>(ta) <= 0.52 + 1e-12,
+          "ceil keeps effective price <= cap (floor would violate)");
+
+    // Different price
+    CHECK(compute_order_amounts(K_SIDE_BUY, 500000, 10000000, tick,
+                                true, ma, ta, eff),
+          "BUY market at 0.50 computes");
+    CHECK(static_cast<double>(ma) / static_cast<double>(ta) <= 0.50 + 1e-9,
+          "effective price respected at different price");
+}
+
 // ── Decimal parsing ──────────────────────────────────────────────────────────
 static void test_parsing() {
     std::printf("decimal_parsing\n");
@@ -1093,6 +1139,7 @@ int main() {
     test_order_book();
     test_kelly();
     test_amounts();
+    test_buy_market_rounding();
     test_parsing();
     test_base64_hmac();
     test_salt_uniqueness();
