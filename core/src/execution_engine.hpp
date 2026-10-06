@@ -191,8 +191,24 @@ public:
         // Local circuit breaker is conservative until user-channel fill
         // reconciliation lands: accepted BUYs reserve their full worst-case
         // cost and are not credited as sellable inventory.
-        const double order_notional = static_cast<double>(
+
+        // Fee-in-cost-cap bug fix: previously order_notional excluded the
+        // taker fee, so BUY orders could exceed BOT_MAX_ORDER_USD by the fee
+        // amount and the exposure/daily-loss checks were fee-blind too.
+        // max_order_usd is a "per-order worst-cost cap" (docs/CONFIGURATION.md),
+        // so the fee must be included:
+        //   - BUY:  total_cost = notional + fee   (fee is an additional outflow)
+        //   - SELL: net_value = notional - fee    (conservative worst-case: fee
+        //            reduces realized proceeds, lowering economic exposure)
+        // effective_shares is in micro-shares (×1e6); fee_per_share is USD/share,
+        // so total_fee = fee_per_share * effective_shares * 1e-6  →  USD.
+        const double total_fee = fee_per_share *
+            static_cast<double>(effective_shares) * 1e-6;
+        const double base_notional = static_cast<double>(
             side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+        const double order_notional = side == K_SIDE_BUY
+            ? base_notional + total_fee
+            : base_notional - total_fee;
         if (order_notional > cfg_.max_order_usd + 1e-9 ||
             (side == K_SIDE_BUY &&
              (committed_exposure_usd_ + order_notional > cfg_.max_exposure_usd ||
@@ -228,8 +244,11 @@ public:
             return TickResult::SUBMIT_FAILED;
         }
 
-        const double accepted_notional = static_cast<double>(
-            side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+        // Fee-adjusted notional for exposure/loss reservation, consistent
+        // with the cap check above (max_order_usd is a "worst-cost cap").
+        const double accepted_notional = side == K_SIDE_BUY
+            ? static_cast<double>(maker_amount) * 1e-6 + total_fee
+            : static_cast<double>(taker_amount) * 1e-6 - total_fee;
         if (side == K_SIDE_BUY) {
             committed_exposure_usd_ += accepted_notional;
             // NOTE: `daily_buy_volume_` accumulates gross BUY notional and is a
