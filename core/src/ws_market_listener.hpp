@@ -909,8 +909,13 @@ private:
         h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e;
     }
 
+    const char* subscription_asset() const {
+        return subscribe_token_ && subscribe_token_[0] ? subscribe_token_ : cfg_.token_id_dec;
+    }
+
     const MarketConfig& cfg_;
     OrderBookL2& book_;
+    const char* subscribe_token_ = nullptr;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};

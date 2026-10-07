@@ -108,7 +108,6 @@ public:
 
         curl_slist_free_all(headers);
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
-        secure_zero(signature_b64, sizeof(signature_b64));
         return result;
     }
 
