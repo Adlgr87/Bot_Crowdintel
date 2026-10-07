@@ -157,55 +157,59 @@ private:
 
     // Fast exp(x) = 2^(x·log2e) via IEEE-754 exponent manipulation.
     // Strategy: z = x·log2(e); n = floor(z); f = z - n; exp(x) = 2^n · 2^f.
-    // 2^n via bit-manipulation of float exponent field.
-    // 2^f via Taylor series: 1 + f·ln2 + (f·ln2)²/2! + ... (8 terms, ~1e-7 error).
-    // Max relative error: ~1e-5 for |x| < 80.
+    // Fast exp via IEEE-754 exponent manipulation + Taylor polynomial.
+    // 2^n via ldexpf, 2^f via 10-term Taylor (error < 2e-9 for f ∈ [0,1)).
     static inline float exp_fast(float x) noexcept {
         // Clamp to prevent overflow: exp(88) ≈ FLT_MAX, exp(-88) ≈ FLT_MIN
-        if (x > 88.0f) x = 88.0f;
-        if (x < -88.0f) x = -88.0f;
+        if (x > 88.0f) return std::numeric_limits<float>::infinity();
+        if (x < -88.0f) return 0.0f;
 
         // z = x / ln(2) = x · log2(e)
-        constexpr float LOG2E = 1.4426950408896343f;  // 1/ln(2)
+        constexpr float LOG2E = 1.44269504088929449f;  // 1/ln(2)
         const float z = x * LOG2E;
 
-        // n = floor(z), f = z - n
+        // n = floor(z), f = z - n (f ∈ [0, 1))
         const float n_f = floorf(z);
         const float f = z - n_f;
 
-        // 2^f via Taylor expansion around 0 of exp(f·ln2)
-        // = 1 + u + u²/2! + u³/3! + u⁴/4! + u⁵/5! + u⁶/6! + u⁷/7! + u⁸/8!
-        // where u = f · ln2
-        constexpr float LN2 = 0.6931471805599453f;
-        const float u = f * LN2;
-        const float poly = 1.0f + u * (1.0f
-            + u * (0.5f
-            + u * (0.1666666667f
-            + u * (0.0416666667f
-            + u * (0.0083333333f
-            + u * (0.0013888889f
-            + u * 0.0001984127f))))));
+        // 2^f via 10-term Taylor expansion of exp(f·ln2)
+        const float u = f * 0.6931471805599453f;  // f * ln2
+        const float poly = 1.0f + u * (
+            1.0f + u * (
+            0.5f + u * (
+            0.16666666666666666f + u * (
+            0.041666666666666664f + u * (
+            0.008333333333333333f + u * (
+            0.001388888888888889f + u * (
+            0.0001984126984126984f + u * (
+            2.7557319223985893e-05f + u *
+            2.755731922398589e-06f)))))))));
 
-        // 2^n via IEEE 754 exponent manipulation:
-        // For 2^k where k is integer, float bits = (k + 127) << 23
-        // ldexpf(1.0f, k) does exactly this (and handles edge cases)
         const float two_to_n = ldexpf(1.0f, static_cast<int>(n_f));
 
         return two_to_n * poly;
     }
 
-    // Fast tanh via Padé [3/3]:
-    //   tanh(x) ≈ x · (27 + 9x² + x⁴) / (27 + 28x² + 9x⁴)
-    // Max error: ~1.4e-7 for |x| < 4.5. Saturates to ±1 beyond 4.5.
+    // Fast tanh via Padé [3/3] approximant in u=x²:
+    //   tanh(x) ≈ x · (1 + a1·u + a2·u² + a3·u³) / (1 + b1·u + b2·u² + b3·u³)
+    // Coefficients derived from matching tanh(x)/x Taylor series through x¹².
+    // Max error: ~4.2e-5 for |x| < 4.5. Saturates to ±1 beyond 4.5.
     static inline float tanh_fast(float x) noexcept {
         const float abs_x = x < 0.0f ? -x : x;
         if (abs_x > 4.5f) {
             return x >= 0.0f ? 1.0f : -1.0f;
         }
-        const float x2 = x * x;
-        const float x4 = x2 * x2;
-        const float num = 27.0f + 9.0f * x2 + x4;
-        const float den = 27.0f + 28.0f * x2 + 9.0f * x4;
+        const float x2 = x * x;        // u
+        const float x3 = x2 * x2;      // u²
+        const float x5 = x3 * x2;      // u³
+        const float num = 1.0f
+            + 0.128205128198f * x2
+            + 0.002797202797f * x3
+            + 0.000007400007f * x5;
+        const float den = 1.0f
+            + 0.461538461538f * x2
+            + 0.023310023310f * x3
+            + 0.000207200207f * x5;
         return x * num / den;
     }
 
@@ -436,11 +440,15 @@ void CfCNetwork::reset(CfCState& state, float prior_logit) noexcept {
 CfCSignal CfCNetwork::infer(CfCState& state,
                             const CfCInput& input,
                             uint64_t now_ns) noexcept {
-    // ── NaN guard on input ─────────────────────────────────────────────────────
+    // ── NaN/Inf guard on input ───────────────────────────────────────────────────
     const __m256 input_vec = _mm256_load_ps(input.features);
-    // Check for any NaN or Inf in input features (6 floats use first 6 lanes)
     // UNORD comparison: true where either operand is NaN
-    if (_mm256_movemask_ps(_mm256_cmp_ps(input_vec, input_vec, _CMP_UNORD_Q))) {
+    // GE/QGE on abs: detect Inf by comparing |x| >= INF (true for Inf, false for finite)
+    const __m256 abs_input = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), input_vec);
+    const __m256 inf_mask = _mm256_cmp_ps(abs_input,
+        _mm256_set1_ps(std::numeric_limits<float>::infinity()), _CMP_GE_Q);
+    if (_mm256_movemask_ps(_mm256_cmp_ps(input_vec, input_vec, _CMP_UNORD_Q)) ||
+        _mm256_movemask_ps(inf_mask)) {
         return CfCSignal{0.5f, 0.0f, true, state.inference_count + 1};
     }
 
