@@ -342,7 +342,8 @@ static void test_wire_body() {
         "\"takerAmount\":\"10000000\","
         "\"timestamp\":\"1758528000000\","
         "\"tokenId\":\"71321045679252212594626395510336467040167069592778062791519851593659551227755\"},"
-        "\"orderType\":\"GTC\",\"owner\":\"11111111-2222-3333-4444-555555555555\"}";
+        "\"orderType\":\"GTC\",\"owner\":\"11111111-2222-3333-4444-555555555555\","
+        "\"postOnly\":false}";
     CHECK(body.len == std::strlen(want), "body length matches golden");
     CHECK(std::memcmp(body.buf, want, body.len) == 0, "body matches Python golden byte-for-byte");
 }

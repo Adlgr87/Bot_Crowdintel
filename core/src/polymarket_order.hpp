@@ -383,7 +383,7 @@ inline bool build_wire_body(const OrderV2& o, const uint8_t sig65[65],
     *p++ = '"';
     std::memcpy(p, ",\"owner\":\"", 10); p += 10;
     std::memcpy(p, owner_api_key, owner_len); p += owner_len;
-    std::memcpy(p, "\"}", 2); p += 2;
+    std::memcpy(p, "\",\"postOnly\":false}", 19); p += 19;
 
     out.len = static_cast<size_t>(p - out.buf);
     if (out.len >= sizeof(out.buf)) return false;
