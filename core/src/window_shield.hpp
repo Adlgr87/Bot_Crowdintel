@@ -123,4 +123,115 @@ private:
 
     ShieldState compute_state(uint32_t elapsed_sec,
                               float cfc_confidence) const noexcept;
+
+    // Last time state changed (for cooldown logic and CfC reset)
+    uint64_t last_state_change_ns_ = 0;
+    ShieldState prev_state_ = ShieldState::MAKER_PASSIVE;
 };
+
+// ── Inline implementations (hot path, O(1)) ─────────────────────────────────
+
+inline const char* ShieldStateInfo::name() const noexcept {
+    switch (state) {
+        case ShieldState::MAKER_PASSIVE:  return "MAKER_PASSIVE";
+        case ShieldState::MAKER_SKEWED:   return "MAKER_SKEWED";
+        case ShieldState::DIRECTIONAL:    return "DIRECTIONAL";
+        case ShieldState::CLOSE_ONLY:     return "CLOSE_ONLY";
+        case ShieldState::HALTED:         return "HALTED";
+    }
+    return "UNKNOWN";
+}
+
+inline const char* WindowShield::state_name(ShieldState s) const noexcept {
+    switch (s) {
+        case ShieldState::MAKER_PASSIVE:  return "MAKER_PASSIVE";
+        case ShieldState::MAKER_SKEWED:   return "MAKER_SKEWED";
+        case ShieldState::DIRECTIONAL:    return "DIRECTIONAL";
+        case ShieldState::CLOSE_ONLY:     return "CLOSE_ONLY";
+        case ShieldState::HALTED:         return "HALTED";
+    }
+    return "UNKNOWN";
+}
+
+inline ShieldState WindowShield::compute_state(uint32_t elapsed_sec,
+                                               float cfc_confidence) const noexcept {
+    // FAIL-CLOSED: if elapsed exceeds window + halt, go HALTED
+    if (elapsed_sec >= cfg_.window_seconds + cfg_.halt_duration_sec) {
+        return ShieldState::HALTED;
+    }
+
+    // Post-settlement cooling period
+    if (elapsed_sec >= cfg_.window_seconds) {
+        return ShieldState::HALTED;
+    }
+
+    // Close-only window (last 10s of 300s window)
+    if (elapsed_sec >= cfg_.close_only_start_sec) {
+        return ShieldState::CLOSE_ONLY;
+    }
+
+    // Directional-only zone (if CfC confidence high enough)
+    if (elapsed_sec >= cfg_.directional_start_sec &&
+        cfc_confidence >= cfg_.directional_threshold) {
+        return ShieldState::DIRECTIONAL;
+    }
+
+    // Skewed quoting zone
+    if (elapsed_sec >= cfg_.skewed_start_sec &&
+        cfc_confidence >= cfg_.skewed_threshold) {
+        return ShieldState::MAKER_SKEWED;
+    }
+
+    // Default: passive maker
+    return ShieldState::MAKER_PASSIVE;
+}
+
+inline ShieldState WindowShield::update(uint64_t now_ns,
+                                        float cfc_confidence) noexcept {
+    // FAIL-CLOSED: stale timestamp → HALTED
+    if (window_start_ns_ == 0) {
+        return ShieldState::HALTED;
+    }
+
+    const uint64_t elapsed_ns = now_ns - window_start_ns_;
+    const uint32_t elapsed_sec = static_cast<uint32_t>(elapsed_ns / 1'000'000'000ULL);
+
+    const ShieldState new_state = compute_state(elapsed_sec, cfc_confidence);
+
+    ShieldState expected = current_state_.load(std::memory_order_acquire);
+    if (new_state != expected) {
+        current_state_.store(new_state, std::memory_order_release);
+        if (new_state != prev_state_) {
+            last_state_change_ns_ = now_ns;
+        }
+        prev_state_ = new_state;
+    }
+
+    return new_state;
+}
+
+inline ShieldStateInfo WindowShield::snapshot(uint64_t now_ns) const noexcept {
+    const uint64_t elapsed_ns = now_ns - window_start_ns_;
+    const uint32_t elapsed_sec = static_cast<uint32_t>(elapsed_ns / 1'000'000'000ULL);
+    const uint32_t remaining_sec =
+        (elapsed_sec < cfg_.window_seconds)
+            ? (cfg_.window_seconds - elapsed_sec)
+            : 0;
+
+    return ShieldStateInfo{
+        .state = current_state_.load(std::memory_order_acquire),
+        .remaining_sec = remaining_sec,
+        .elapsed_sec = elapsed_sec,
+        .is_settlement_time =
+            (elapsed_sec >= cfg_.window_seconds) &&
+            (elapsed_sec < cfg_.window_seconds + cfg_.halt_duration_sec),
+    };
+}
+
+inline bool WindowShield::should_reset_cfc(uint64_t now_ns) const noexcept {
+    // Signal CfC reset on window boundary
+    if (window_start_ns_ == 0) return false;
+    const uint64_t elapsed_ns = now_ns - window_start_ns_;
+    const uint32_t elapsed_sec = static_cast<uint32_t>(elapsed_ns / 1'000'000'000ULL);
+    return elapsed_sec >= cfg_.window_seconds;
+}

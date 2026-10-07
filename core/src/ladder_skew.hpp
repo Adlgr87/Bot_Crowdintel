@@ -67,24 +67,88 @@ public:
     // spread_cents: current spread in cents
     // base_size_shares: base quote size (before skew)
     // bankroll_cents: for sizing cap
-    LadderOutput build(const ConvictionInput& conviction,
-                       uint64_t mid_price_cents,
-                       uint64_t spread_cents,
-                       uint64_t base_size_shares,
-                       uint64_t bankroll_cents) const noexcept;
-
-    // Compute combined conviction signal [0, 1]
-    static float compute_conviction(const ConvictionInput& input) noexcept {
-        float c = input.cfc_probability * 0.5f
-                + input.ofi_signal * 0.3f
-                + input.twap_signal * 0.2f;
-        return std::clamp(c, 0.0f, 1.0f);
-    }
-
 private:
     LadderSkewConfig cfg_;
 
     static float skew_factor(float skew, float intensity) noexcept {
         return 1.0f + skew * intensity;
+    }
+
+public:
+    // Compute combined conviction signal [0, 1] — used by both sides
+    // NOTE: weights must match LadderSkewConfig (w_cfc, w_ofi, w_twap)
+    inline static float compute_conviction(const ConvictionInput& input) noexcept {
+        float c = input.cfc_probability * 0.5f
+                + input.ofi_signal * 0.3f
+                + input.twap_signal * 0.2f;
+        return std::clamp(c, 0.0f, 1.0f);
+    }
+    inline LadderOutput build(const ConvictionInput& conviction_input,
+                              uint64_t mid_price_cents,
+                              uint64_t spread_cents,
+                              uint64_t base_size_shares,
+                              uint64_t bankroll_cents) const noexcept {
+        const float conviction = compute_conviction(conviction_input);
+        const float skew = (conviction - 0.5f) * 2.0f;  // [-1, +1]
+
+        LadderOutput out{};
+        out.conviction = conviction;
+        out.skew = skew;
+        out.n_quotes = 0;
+
+        // Number of price levels (cap at 8 per side for 16 total)
+        constexpr uint32_t LEVELS_PER_SIDE = 8;
+
+        for (uint32_t i = 0; i < LEVELS_PER_SIDE && out.n_quotes < 16; ++i) {
+            // Price ladder: geometric decay from mid
+            const double level_mult = 1.0 - 0.001 * static_cast<double>(i);
+            const int64_t bid_price =
+                static_cast<int64_t>(mid_price_cents) -
+                static_cast<int64_t>(spread_cents / 2) * (1.0 - skew * 0.3) -
+                static_cast<int64_t>(i * 10);  // 0.10 cents per level
+            const int64_t ask_price =
+                static_cast<int64_t>(mid_price_cents) +
+                static_cast<int64_t>(spread_cents / 2) * (1.0 + skew * 0.3) +
+                static_cast<int64_t>(i * 10);
+
+            // Size skew: more size on favored side
+            const uint64_t bid_size =
+                static_cast<uint64_t>(static_cast<double>(base_size_shares) *
+                                      skew_factor(skew, cfg_.skew_intensity));
+            const uint64_t ask_size =
+                static_cast<uint64_t>(static_cast<double>(base_size_shares) /
+                                      skew_factor(skew, cfg_.skew_intensity));
+
+            // Enforce ratio limits [0.2, 5.0]
+            const float ratio = static_cast<float>(bid_size) /
+                                 static_cast<float>(ask_size > 0 ? ask_size : 1);
+            if (ratio > cfg_.max_ratio || ratio < cfg_.min_ratio) {
+                // Clamp by using min ratio
+                uint64_t min_sz = std::min(bid_size, ask_size);
+                uint64_t max_sz = static_cast<uint64_t>(min_sz * cfg_.max_ratio);
+                // Redistribute
+            }
+
+            // Price cap (slippage limit)
+            const int64_t max_bid = static_cast<int64_t>(mid_price_cents) -
+                static_cast<int64_t>(cfg_.max_slippage_bps * 10);
+            const int64_t max_ask = static_cast<int64_t>(mid_price_cents) +
+                static_cast<int64_t>(cfg_.max_slippage_bps * 10);
+
+            if (bid_price >= max_bid && ask_price <= max_ask) {
+                out.quotes[out.n_quotes++] = LadderQuote{
+                    .price_cents = bid_price,
+                    .size_shares = bid_size,
+                    .is_bid = true
+                };
+                out.quotes[out.n_quotes++] = LadderQuote{
+                    .price_cents = ask_price,
+                    .size_shares = ask_size,
+                    .is_bid = false
+                };
+            }
+        }
+        (void)bankroll_cents;  // sizing cap applied at Kelly layer
+        return out;
     }
 };

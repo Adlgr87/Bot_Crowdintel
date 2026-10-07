@@ -50,30 +50,82 @@ class KellySizer {
 public:
     explicit KellySizer(const KellyConfig& cfg) : cfg_(cfg) {}
 
-    // Compute order size. All inputs are scalars — no structs, no pointers.
-    // p: model probability of win [0, 1]
-    // price_cents: market price in cents (e.g., 2650000 for $265.00)
-    // bankroll_cents: total bankroll in cents
-    // inventory_shares: current position (positive = long)
-    // vol_zscore: realized volatility z-score vs recent baseline
-    // is_maker: true if expected to be maker (0% fee)
-    KellyOutput compute(float p,
-                        uint64_t price_cents,
-                        uint64_t bankroll_cents,
-                        float inventory_shares,
-                        float vol_zscore,
-                        bool is_maker) const noexcept;
-
-    // Convenience: quarter-Kelly fraction (for P4 weighting)
-    static float quarter_kelly_fraction(float p, float b) noexcept;
-
 private:
     KellyConfig cfg_;
 
-    // Fee-adjusted effective odds
-    float effective_b(float b, bool is_maker) const noexcept {
+    // Fee-adjusted effective odds (static: no instance state needed)
+    static float effective_b(float b, bool is_maker) noexcept {
         if (is_maker) return b;
         // Taker fee ~2% → effective b = b·(1-0.02)
         return b * 0.98f;
+    }
+
+public:
+    // ── Inline implementation (hot path, < 500ns) ───────────────────────────
+    inline KellyOutput compute(float p,
+                               uint64_t price_cents,
+                               uint64_t bankroll_cents,
+                               float inventory_shares,
+                               float vol_zscore,
+                               bool is_maker) const noexcept {
+        // Clamp probability
+        p = p < 0.5f ? 0.5f : (p > 1.0f ? 1.0f : p);
+        const float q = 1.0f - p;
+
+        // Odds: b = (1/price) - 1 in price-odds terms
+        // For Polymarket binary (price in [0,1] normalized):
+        // b = (1.0 - price) / price
+        const float price_norm =
+            static_cast<float>(price_cents) / 100'000'000.0f; // cents → 0-1
+        const float b = (1.0f - price_norm) / price_norm;
+
+        const float b_eff = effective_b(b, is_maker);
+
+        // Full Kelly
+        const float f_star = (p * b_eff - q) / b_eff;
+        const float min_edge =
+            is_maker ? cfg_.min_edge_maker : cfg_.min_edge_taker;
+
+        if (f_star < min_edge) {
+            return KellyOutput{
+                .order_shares = 0,
+                .order_usd_cents = 0,
+                .fraction_of_bankroll = 0.0f,
+                .should_trade = false,
+                .edge_bps = 0.0f,
+            };
+        }
+
+        // Quarter-Kelly
+        float f = f_star * cfg_.fraction;
+        f = f < cfg_.max_bankroll_pct ? f : cfg_.max_bankroll_pct;
+
+        // Inventory adjustment
+        const float inv_abs = inventory_shares < 0
+            ? -inventory_shares : inventory_shares;
+        const float inv_factor =
+            1.0f - (inv_abs / cfg_.max_inventory_shares);
+        f *= (inv_factor > 0.0f ? inv_factor : 0.0f);
+
+        // Volatility adjustment
+        float vol_factor =
+            1.0f / (1.0f + (vol_zscore > cfg_.max_vol_zscore
+                ? cfg_.max_vol_zscore : vol_zscore));
+        vol_factor = vol_zscore < 0.0f ? 1.0f : vol_factor;
+        f *= vol_factor;
+
+        // Convert to actual order size
+        const uint64_t max_order_cents = static_cast<uint64_t>(
+            static_cast<double>(bankroll_cents) * f);
+        const uint64_t order_shares = max_order_cents / price_cents * 100ULL;
+        const uint64_t order_usd_cents = order_shares * price_cents / 100ULL;
+
+        return KellyOutput{
+            .order_shares = order_shares,
+            .order_usd_cents = order_usd_cents,
+            .fraction_of_bankroll = f,
+            .should_trade = (order_shares >= 1 && order_usd_cents >= 100),
+            .edge_bps = f_star * 10000.0f,
+        };
     }
 };

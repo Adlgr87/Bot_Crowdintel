@@ -51,21 +51,69 @@ class TWAPTracker {
 public:
     TWAPTracker() = default;
 
-    // Feed new price tick (hot path)
-    void update(double price, uint64_t now_ns) noexcept;
+    // Feed new price tick (hot path, < 1μs p50)
+    void update(double price, uint64_t now_ns) noexcept {
+        if (!state_.initialized) {
+            reset(price, now_ns);
+            return;
+        }
+        const double dt = (now_ns - state_.last_update_ns) * 1e-9;
+        if (dt < 0.001) return;  // min 1ms between updates
+        state_.cumulative_price_time += price * dt;
+        state_.cumulative_time += dt;
+        state_.last_price = price;
+        state_.last_update_ns = now_ns;
+    }
 
     // Check for convergence trigger + manipulation alert
-    // Call during hot-path tick. window_duration_sec must match market (300 or 900).
-    TWAPSignal check(uint64_t now_ns, uint32_t window_duration_sec) const noexcept;
+    TWAPSignal check(uint64_t now_ns, uint32_t window_duration_sec) const noexcept {
+        const double elapsed = (now_ns - state_.window_start_ns) * 1e-9;
+        const double remaining = static_cast<double>(window_duration_sec) - elapsed;
+        const double remaining_frac =
+            remaining > 0.0 ? remaining / window_duration_sec : 0.0;
+        const double twap = current_twap();
+        const double dev = deviation();
+        return TWAPSignal{
+            .twap = twap,
+            .deviation = dev,
+            .convergence_trigger =
+                (remaining_frac < TWAPConfig::MAX_WINDOW_FRACTION &&
+                 (dev > TWAPConfig::CONVERGENCE_THRESHOLD ||
+                  dev < -TWAPConfig::CONVERGENCE_THRESHOLD)),
+            .manipulation_alert =
+                (dev > TWAPConfig::MANIPULATION_THRESHOLD ||
+                 dev < -TWAPConfig::MANIPULATION_THRESHOLD),
+            .time_remaining_frac = remaining_frac,
+        };
+    }
 
     // Reset at window start
-    void reset(double initial_price, uint64_t window_start_ns) noexcept;
+    void reset(double initial_price, uint64_t window_start_ns) noexcept {
+        state_.cumulative_price_time = 0.0;
+        state_.cumulative_time = 0.0;
+        state_.window_start_price = initial_price;
+        state_.last_price = initial_price;
+        state_.window_start_ns = window_start_ns;
+        state_.last_update_ns = window_start_ns;
+        state_.initialized = true;
+    }
 
-    // Current TWAP (0 if not initialized)
-    double current_twap() const noexcept;
+    // Current TWAP
+    double current_twap() const noexcept {
+        if (!state_.initialized || state_.cumulative_time < 0.001) {
+            return state_.window_start_price;
+        }
+        return state_.cumulative_price_time / state_.cumulative_time;
+    }
 
     // Current deviation from window-open price
-    double deviation() const noexcept;
+    double deviation() const noexcept {
+        if (!state_.initialized || state_.window_start_price == 0.0) {
+            return 0.0;
+        }
+        const double twap = current_twap();
+        return (twap - state_.window_start_price) / state_.window_start_price;
+    }
 
 private:
     TWAPState state_;
