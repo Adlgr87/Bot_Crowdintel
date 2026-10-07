@@ -1,5 +1,20 @@
-#ifndef WS_MARKET_LISTENER_HPP
-#define WS_MARKET_LISTENER_HPP
+#ifndef WS_USER_LISTENER_HPP
+#define WS_USER_LISTENER_HPP
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WsUserListener: Polymarket PRIVATE user channel (wss://…/ws/user).
+//
+// Receives order placements/cancellations and trade MATCHED/MINED/FAILED
+// events for the configured market with L2 API-key authentication, normalizes
+// them through UserEventParser, and pushes AccountEvents into the account SPSC
+// queue (sole producer: this thread; sole consumer: the hot loop).
+//
+// The transport reuses the same hand-rolled WSS pattern as WsMarketListener.
+// The duplication of the transport layer is deliberate and documented: the
+// market listener is already pen-tested, so converging both on a shared
+// refactor would add regression risk with no behavioral gain here.  Only the
+// parsers and helpers are shared (json_fields, bounded_json).
+// ─────────────────────────────────────────────────────────────────────────────
 
 #include <openssl/ssl.h>
 
@@ -25,20 +40,17 @@
 #include "../crypto/fast_random.hpp"
 #include "../crypto/sha256_engine.hpp"
 #include "../include/bounded_json.hpp"
-#include "../include/order_book.hpp"
+#include "../include/spsc_ring_buffer.hpp"
 #include "market_config.hpp"
-#include "polymarket_order.hpp"
+#include "user_event_parser.hpp"
 
-class WsMarketListener {
+class WsUserListener {
 public:
-    // `subscribe_token` overrides the subscribed asset id; when null the
-    // primary cfg token is used.  A second instance on the complement token
-    // feeds the hedge book (P2 brakes) through an isolated connection, so
-    // book ownership stays single-writer per book.
-    WsMarketListener(const MarketConfig& cfg, OrderBookL2& book,
-                     const char* subscribe_token = nullptr)
-        : cfg_(cfg), book_(book), subscribe_token_(subscribe_token) {}
-    ~WsMarketListener() { stop(); }
+    WsUserListener(const MarketConfig& cfg,
+                   SPSC_RingBuffer<AccountEvent>& account_queue)
+        : cfg_(cfg), queue_(account_queue),
+          parser_(cfg.token_id_dec, cfg.hedge_token_id_dec, cfg.market_hash) {}
+    ~WsUserListener() { stop(); }
 
     void start() {
         bool expected = false;
@@ -55,48 +67,34 @@ public:
 
     bool connected() const { return connected_.load(std::memory_order_acquire); }
     uint64_t events_seen() const { return events_.load(std::memory_order_relaxed); }
+    uint64_t pushed() const { return pushed_.load(std::memory_order_relaxed); }
+    uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
     uint64_t reconnects() const { return reconnects_.load(std::memory_order_relaxed); }
 
-    static bool msg_is_book(const char* json, size_t len) {
-        char event[32];
-        return bounded_json::valid_document(json, len) &&
-               event_type(json, len, event, sizeof(event)) &&
-               std::strcmp(event, "book") == 0;
-    }
-
-    static bool msg_is_price_change(const char* json, size_t len) {
-        char event[32];
-        return bounded_json::valid_document(json, len) &&
-               event_type(json, len, event, sizeof(event)) &&
-               std::strcmp(event, "price_change") == 0;
-    }
-
-    void handle_message(const char* json, size_t len) {
-        if (!json || len == 0 || !bounded_json::valid_document(json, len)) return;
+    // Test hook (offline): normalize one venue message into the queue.
+    bool handle_message(const char* json, size_t len) {
+        if (!json || len == 0 || !bounded_json::valid_document(json, len))
+            return false;
         events_.fetch_add(1, std::memory_order_relaxed);
-        char event[32];
-        if (!event_type(json, len, event, sizeof(event))) return;
-        if (std::strcmp(event, "book") == 0) {
-            parse_book_snapshot(json, len);
-        } else if (std::strcmp(event, "price_change") == 0) {
-            parse_price_change(json, len);
-        } else if (std::strcmp(event, "tick_size_change") == 0) {
-            parse_tick_size_change(json, len);
+        AccountEvent ev{};
+        if (!parser_.parse(json, len, ev)) return false;
+        if (!queue_.try_push(ev)) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return false;  // hot loop must drain faster than fills arrive
         }
+        pushed_.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 
 private:
     static constexpr size_t MAX_MESSAGE = 1U << 20;
-    static constexpr size_t MAX_LEVELS = OrderBookL2::MAX_LEVELS;
 
     void run_loop() {
         uint32_t backoff_ms = 250;
         while (running_.load(std::memory_order_acquire)) {
             rbuf_len_ = 0;
-            book_.invalidate();
             if (session()) backoff_ms = 250;
             connected_.store(false, std::memory_order_release);
-            book_.invalidate();
             if (!running_.load(std::memory_order_acquire)) break;
             reconnects_.fetch_add(1, std::memory_order_relaxed);
             const uint32_t slices = std::max(1U, backoff_ms / 10U);
@@ -107,11 +105,12 @@ private:
     }
 
     bool session() {
-        char host[160]{}, path[192] = "/ws/market";
+        char host[160]{}, path[192] = "/ws/user";
         int port = 443;
         bool tls = true;
-        if (!parse_url(cfg_.ws_host, host, sizeof(host), path, sizeof(path),
-                       port, tls)) return false;
+        if (!parse_url(cfg_.ws_user_host, host, sizeof(host), path,
+                       sizeof(path), port, tls))
+            return false;
 
         const int fd = tcp_connect(host, port, 3000);
         if (fd < 0) return false;
@@ -155,7 +154,8 @@ private:
             "Sec-WebSocket-Version: 13\r\n\r\n", path, authority, key_b64);
         if (authority_len <= 0 ||
             static_cast<size_t>(authority_len) >= sizeof(authority) ||
-            request_len <= 0 || static_cast<size_t>(request_len) >= sizeof(request) ||
+            request_len <= 0 ||
+            static_cast<size_t>(request_len) >= sizeof(request) ||
             !send_all(ssl, fd, request, static_cast<size_t>(request_len))) {
             cleanup(ssl, fd); return false;
         }
@@ -166,12 +166,27 @@ private:
             cleanup(ssl, fd); return false;
         }
 
-        const char* asset = subscribe_token_ && subscribe_token_[0]
-            ? subscribe_token_ : cfg_.token_id_dec;
-        char subscription[320];
-        const int subscription_len = std::snprintf(subscription, sizeof(subscription),
-            "{\"assets_ids\":[\"%s\"],\"type\":\"market\","
-            "\"custom_feature_enabled\":true}", asset);
+        char markets_fragment[96];
+        int markets_len = 0;
+        if (cfg_.market_condition_id[0]) {
+            markets_len = std::snprintf(markets_fragment,
+                sizeof(markets_fragment), "[\"%s\"]", cfg_.market_condition_id);
+        } else {
+            markets_len = std::snprintf(markets_fragment,
+                sizeof(markets_fragment), "[]");  // all user markets
+        }
+        char subscription[896];
+        const int subscription_len = std::snprintf(subscription,
+            sizeof(subscription),
+            "{\"type\":\"user\",\"markets\":%s,"
+            "\"auth\":{\"apiKey\":\"%s\",\"secret\":\"%s\","
+            "\"passphrase\":\"%s\"}}",
+            markets_fragment, cfg_.owner_api_key,
+            cfg_.api_secret_b64, cfg_.api_passphrase);
+        if (markets_len <= 0 ||
+            static_cast<size_t>(markets_len) >= sizeof(markets_fragment)) {
+            cleanup(ssl, fd); return false;
+        }
         if (subscription_len <= 0 ||
             static_cast<size_t>(subscription_len) >= sizeof(subscription) ||
             !send_frame(ssl, fd, 0x1, subscription,
@@ -199,7 +214,7 @@ private:
         const char* colon = nullptr;
         for (const char* p = cursor; p < authority_end; ++p) {
             const unsigned char c = static_cast<unsigned char>(*p);
-            if (*p == ':' && colon) return false;  // IPv6 literals unsupported
+            if (*p == ':' && colon) return false;
             if (*p == ':') colon = p;
             else if (*p == '@' || *p == '?' || *p == '#' ||
                      std::isspace(c)) return false;
@@ -439,8 +454,6 @@ private:
         while (running_.load(std::memory_order_acquire)) {
             const uint64_t now = now_mono_ms();
             if (now - last_ping >= 8000) {
-                // Polymarket heartbeat is an application text message, not an
-                // RFC 6455 control ping.
                 if (!send_frame(ssl, fd, 0x1, "PING", 4)) return false;
                 last_ping = now;
             }
@@ -473,7 +486,7 @@ private:
                     if (offset + 4 > rbuf_len_) break;
                     payload_len = static_cast<uint8_t>(rbuf_[offset + 2]) * 256ULL +
                                   static_cast<uint8_t>(rbuf_[offset + 3]);
-                    if (payload_len < 126) return false;  // non-canonical
+                    if (payload_len < 126) return false;
                     header_len = 4;
                 } else if (payload_len == 127) {
                     if (offset + 10 > rbuf_len_) break;
@@ -483,7 +496,7 @@ private:
                     for (int i = 0; i < 8; ++i)
                         payload_len = (payload_len << 8) |
                             static_cast<uint8_t>(rbuf_[offset + 2 + i]);
-                    if (payload_len <= 0xFFFFU) return false;  // non-canonical
+                    if (payload_len <= 0xFFFFU) return false;
                     header_len = 10;
                 }
                 const bool control = (opcode & 0x08U) != 0;
@@ -540,129 +553,6 @@ private:
         return true;
     }
 
-    void parse_book_snapshot(const char* json, size_t len) {
-        if (!message_matches_token(json, len)) return;
-        const char* ignored_begin = nullptr;
-        const char* ignored_end = nullptr;
-        if (!find_array(json, json + len, "bids", ignored_begin, ignored_end) ||
-            !find_array(json, json + len, "asks", ignored_begin, ignored_end)) {
-            book_.invalidate();
-            return;
-        }
-        Level2Entry bids[MAX_LEVELS], asks[MAX_LEVELS];
-        const size_t nb = parse_levels(json, len, "bids", bids, MAX_LEVELS, true);
-        const size_t na = parse_levels(json, len, "asks", asks, MAX_LEVELS, false);
-        // A valid empty snapshot is authoritative and must clear stale depth.
-        book_.set_book(bids, nb, asks, na);
-    }
-
-    void parse_price_change(const char* json, size_t len) {
-        Level2Entry bids[MAX_LEVELS], asks[MAX_LEVELS];
-        size_t nb = 0, na = 0;
-        book_.snapshot(bids, nb, asks, na);
-
-        const char* end = json + len;
-        const char* array_begin = nullptr;
-        const char* array_end = nullptr;
-        const size_t change_keys = key_occurrences(json, end, "price_changes") +
-                                   key_occurrences(json, end, "priceChanges") +
-                                   key_occurrences(json, end, "changes");
-        if (change_keys != 1 ||
-            (!find_array(json, end, "price_changes", array_begin, array_end) &&
-             !find_array(json, end, "priceChanges", array_begin, array_end) &&
-             !find_array(json, end, "changes", array_begin, array_end))) {
-            book_.invalidate();
-            return;
-        }
-
-        const char* cursor = array_begin + 1;
-        bool changed = false;
-        while (cursor < array_end) {
-            const char* object = find_char(cursor, array_end, '{');
-            if (!object) break;
-            const char* object_end = find_matching(object, array_end, '{', '}');
-            if (!object_end) break;
-            char asset[96]{};
-            const size_t asset_keys =
-                key_occurrences(object, object_end + 1, "asset_id") +
-                key_occurrences(object, object_end + 1, "tokenId");
-            const bool has_asset = asset_keys == 1 &&
-                (extract_string(object, object_end + 1,
-                    "asset_id", asset, sizeof(asset)) ||
-                 extract_string(object, object_end + 1,
-                    "tokenId", asset, sizeof(asset)));
-            if ((asset_keys == 0 || has_asset) &&
-                (!has_asset || std::strcmp(asset, subscription_asset()) == 0)) {
-                char price_text[24]{}, size_text[24]{}, side_text[8]{};
-                if (extract_string(object, object_end + 1, "price",
-                                   price_text, sizeof(price_text)) &&
-                    extract_string(object, object_end + 1, "size",
-                                   size_text, sizeof(size_text)) &&
-                    extract_string(object, object_end + 1, "side",
-                                   side_text, sizeof(side_text))) {
-                    uint64_t price = 0, size = 0;
-                    if (parse_fixed1e6(price_text, std::strlen(price_text), price) &&
-                        parse_fixed1e6(size_text, std::strlen(size_text), size)) {
-                        const bool bid = side_text[0] == 'B' || side_text[0] == 'b';
-                        upsert_level(bid ? bids : asks, bid ? nb : na,
-                                     price, size, bid);
-                        changed = true;
-                    }
-                }
-            }
-            cursor = object_end + 1;
-        }
-        if (changed) {
-            sort_levels(bids, nb, true);
-            sort_levels(asks, na, false);
-            book_.set_book(bids, nb, asks, na);
-        }
-    }
-
-    void parse_tick_size_change(const char* json, size_t len) {
-        if (!message_matches_token(json, len)) return;
-        char text[24];
-        const char* end = json + len;
-        const size_t tick_keys = key_occurrences(json, end, "new_tick_size") +
-                                 key_occurrences(json, end, "newTickSize");
-        if (tick_keys != 1 ||
-            !(extract_string(json, end, "new_tick_size", text, sizeof(text)) ||
-              extract_string(json, end, "newTickSize", text, sizeof(text)))) {
-            book_.invalidate();
-            return;
-        }
-        uint64_t tick = 0;
-        if (parse_fixed1e6(text, std::strlen(text), tick) &&
-            amount_quantum_for_tick(tick) != 0) {
-            book_.set_tick_size(tick);
-        } else {
-            // Continuing on an unknown venue grid could sign invalid or
-            // economically different amounts. Halt via book invalidation.
-            book_.invalidate();
-        }
-    }
-
-    bool message_matches_token(const char* json, size_t len) const {
-        char token[96];
-        const char* end = json + len;
-        const size_t asset_keys = key_occurrences(json, end, "asset_id");
-        const size_t token_keys = key_occurrences(json, end, "tokenId");
-        if (asset_keys + token_keys > 1) return false;
-        if (extract_string(json, end, "asset_id", token, sizeof(token)) ||
-            extract_string(json, end, "tokenId", token, sizeof(token)))
-            return std::strcmp(token, subscription_asset()) == 0;
-        return true;  // legacy fixtures omit it; subscription is token-scoped
-    }
-
-    static bool event_type(const char* json, size_t len, char* out, size_t cap) {
-        const char* end = json + len;
-        if (key_occurrences(json, end, "event_type") +
-            key_occurrences(json, end, "type") != 1)
-            return false;
-        return extract_string(json, end, "event_type", out, cap) ||
-               extract_string(json, end, "type", out, cap);
-    }
-
     static const char* find_bytes(const char* begin, const char* end,
                                   const char* needle, size_t needle_len) {
         if (needle_len == 0 || static_cast<size_t>(end - begin) < needle_len)
@@ -675,178 +565,6 @@ private:
     static const char* find_char(const char* begin, const char* end, char wanted) {
         return static_cast<const char*>(std::memchr(begin, wanted,
                                                    static_cast<size_t>(end - begin)));
-    }
-
-    static const char* find_matching(const char* open, const char* end,
-                                     char open_char, char close_char) {
-        int depth = 0;
-        bool in_string = false, escaped = false;
-        for (const char* p = open; p < end; ++p) {
-            if (in_string) {
-                if (escaped) escaped = false;
-                else if (*p == '\\') escaped = true;
-                else if (*p == '"') in_string = false;
-                continue;
-            }
-            if (*p == '"') in_string = true;
-            else if (*p == open_char) ++depth;
-            else if (*p == close_char && --depth == 0) return p;
-        }
-        return nullptr;
-    }
-
-    // Return actual keys at the current object's top level. Field-like text
-    // embedded in values and keys in nested objects are ignored.
-    static size_t key_occurrences(const char* begin, const char* end,
-                                  const char* key,
-                                  const char** first = nullptr) {
-        if (first) *first = nullptr;
-        const size_t key_len = std::strlen(key);
-        int depth = 0;
-        size_t count = 0;
-        for (const char* p = begin; p < end; ++p) {
-            if (*p == '{' || *p == '[') { ++depth; continue; }
-            if (*p == '}' || *p == ']') { --depth; continue; }
-            if (*p != '"') continue;
-            const char* start = p + 1;
-            const char* cursor = start;
-            bool escaped = false;
-            while (cursor < end) {
-                if (escaped) escaped = false;
-                else if (*cursor == '\\') escaped = true;
-                else if (*cursor == '"') break;
-                ++cursor;
-            }
-            if (cursor == end) return count;
-            const char* after = cursor + 1;
-            while (after < end && std::isspace(
-                       static_cast<unsigned char>(*after))) ++after;
-            if (depth == 1 &&
-                static_cast<size_t>(cursor - start) == key_len &&
-                std::memcmp(start, key, key_len) == 0 &&
-                after < end && *after == ':') {
-                if (count++ == 0 && first) *first = cursor + 1;
-            }
-            p = cursor;
-        }
-        return count;
-    }
-
-    static bool extract_string(const char* begin, const char* end, const char* key,
-                               char* out, size_t cap) {
-        const char* hit = nullptr;
-        if (key_occurrences(begin, end, key, &hit) != 1 || cap == 0)
-            return false;
-        while (hit < end && (*hit == ' ' || *hit == '\t' || *hit == '\r' || *hit == '\n')) ++hit;
-        if (hit == end || *hit++ != ':') return false;
-        while (hit < end && (*hit == ' ' || *hit == '\t' || *hit == '\r' || *hit == '\n')) ++hit;
-        if (hit == end || *hit++ != '"') return false;
-        size_t n = 0;
-        while (hit < end && *hit != '"') {
-            if (*hit == '\\' || n + 1 >= cap) return false;
-            out[n++] = *hit++;
-        }
-        if (hit == end) return false;
-        out[n] = '\0';
-        return true;
-    }
-
-    static bool find_array(const char* begin, const char* end, const char* key,
-                           const char*& array_begin, const char*& array_end) {
-        const char* hit = nullptr;
-        if (key_occurrences(begin, end, key, &hit) != 1) return false;
-        while (hit < end && std::isspace(static_cast<unsigned char>(*hit))) ++hit;
-        if (hit == end || *hit++ != ':') return false;
-        while (hit < end && std::isspace(static_cast<unsigned char>(*hit))) ++hit;
-        if (hit == end || *hit != '[') return false;
-        const char* close = find_matching(hit, end, '[', ']');
-        if (!close) return false;
-        array_begin = hit; array_end = close;
-        return true;
-    }
-
-    static size_t parse_levels(const char* json, size_t len, const char* key,
-                               Level2Entry* out, size_t cap, bool bids) {
-        const char* array = nullptr; const char* array_end = nullptr;
-        if (!find_array(json, json + len, key, array, array_end)) return 0;
-        size_t count = 0;
-        const char* cursor = array + 1;
-        while (cursor < array_end) {
-            while (cursor < array_end && (*cursor == ' ' || *cursor == '\t' ||
-                   *cursor == '\r' || *cursor == '\n' || *cursor == ',')) ++cursor;
-            if (cursor == array_end) break;
-            uint64_t price = 0, size = 0;
-            bool valid = false;
-            if (*cursor == '{') {
-                const char* close = find_matching(cursor, array_end, '{', '}');
-                if (!close) break;
-                char price_text[24]{}, size_text[24]{};
-                valid = extract_string(cursor, close + 1, "price", price_text,
-                                       sizeof(price_text)) &&
-                        extract_string(cursor, close + 1, "size", size_text,
-                                       sizeof(size_text)) &&
-                        parse_fixed1e6(price_text, std::strlen(price_text), price) &&
-                        parse_fixed1e6(size_text, std::strlen(size_text), size);
-                cursor = close + 1;
-            } else if (*cursor == '[') {
-                const char* close = find_matching(cursor, array_end, '[', ']');
-                if (!close) break;
-                char values[2][24]{};
-                const char* p = cursor + 1;
-                int index = 0;
-                while (p < close && index < 2) {
-                    p = find_char(p, close, '"');
-                    if (!p) break;
-                    const char* quote = find_char(p + 1, close, '"');
-                    if (!quote) break;
-                    const size_t n = static_cast<size_t>(quote - p - 1);
-                    if (n >= sizeof(values[0])) break;
-                    std::memcpy(values[index], p + 1, n);
-                    values[index][n] = '\0';
-                    ++index; p = quote + 1;
-                }
-                valid = index == 2 &&
-                        parse_fixed1e6(values[0], std::strlen(values[0]), price) &&
-                        parse_fixed1e6(values[1], std::strlen(values[1]), size);
-                cursor = close + 1;
-            } else {
-                ++cursor;
-            }
-            if (valid && size != 0) retain_best(out, count, cap, {price, size}, bids);
-        }
-        sort_levels(out, count, bids);
-        return count;
-    }
-
-    static void retain_best(Level2Entry* levels, size_t& count, size_t cap,
-                            Level2Entry value, bool bids) {
-        if (count < cap) { levels[count++] = value; return; }
-        size_t worst = 0;
-        for (size_t i = 1; i < count; ++i) {
-            if (bids ? levels[i].price < levels[worst].price
-                     : levels[i].price > levels[worst].price) worst = i;
-        }
-        if (bids ? value.price > levels[worst].price
-                 : value.price < levels[worst].price) levels[worst] = value;
-    }
-
-    static void upsert_level(Level2Entry* levels, size_t& count,
-                             uint64_t price, uint64_t size, bool bids) {
-        for (size_t i = 0; i < count; ++i) {
-            if (levels[i].price != price) continue;
-            if (size == 0) {
-                for (size_t j = i + 1; j < count; ++j) levels[j - 1] = levels[j];
-                --count;
-            } else levels[i].size = size;
-            return;
-        }
-        if (size != 0) retain_best(levels, count, MAX_LEVELS, {price, size}, bids);
-    }
-
-    static void sort_levels(Level2Entry* levels, size_t count, bool descending) {
-        std::sort(levels, levels + count, [descending](const auto& left, const auto& right) {
-            return descending ? left.price > right.price : left.price < right.price;
-        });
     }
 
     static uint64_t now_mono_ms() {
@@ -870,7 +588,7 @@ private:
         while (offset + 64 <= len) { sha1_block(h, data + offset); offset += 64; }
         uint8_t tail[128]{};
         const size_t remaining = len - offset;
-        std::memcpy(tail, data + offset, remaining);
+        std::memcpy(tail, data, remaining);
         tail[remaining] = 0x80;
         const size_t final_offset = remaining >= 56 ? 120 : 56;
         for (int i = 0; i < 8; ++i)
@@ -910,17 +628,20 @@ private:
     }
 
     const MarketConfig& cfg_;
-    OrderBookL2& book_;
+    SPSC_RingBuffer<AccountEvent>& queue_;
+    UserEventParser parser_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::atomic<int> active_fd_{-1};
     std::atomic<uint64_t> events_{0};
+    std::atomic<uint64_t> pushed_{0};
+    std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> reconnects_{0};
-    std::array<char, MAX_MESSAGE + 14> rbuf_{};
+    std::array<char, MAX_MESSAGE> rbuf_{};
     size_t rbuf_len_ = 0;
     std::array<char, MAX_MESSAGE> fragment_{};
     std::array<char, MAX_MESSAGE> send_buffer_{};
 };
 
-#endif  // WS_MARKET_LISTENER_HPP
+#endif  // WS_USER_LISTENER_HPP

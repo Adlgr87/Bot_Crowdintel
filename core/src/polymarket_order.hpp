@@ -23,6 +23,7 @@
 
 #if defined(__SIZEOF_INT128__)
 __extension__ typedef unsigned __int128 crowd_uint128_t;
+__extension__ typedef __int128 crowd_int128_t;
 #else
 #error "CrowdIntel exact amount arithmetic requires compiler uint128 support"
 #endif
