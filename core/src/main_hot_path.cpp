@@ -128,7 +128,7 @@ long run_engine(Engine& engine, const MarketConfig& cfg,
 // the local tracker, and enqueue a restatement (+kill latch on big drift).
 void reconcile_once_with(LightweightCLOBClient& client,
                          const MarketConfig& cfg, PositionTracker& tracker,
-                         SPSC_RingBuffer<TrackerRestate>& restate_q) {
+                         SPSC_RingBuffer<TrackerRestate, 16>& restate_q) {
     static constexpr char PATH[] = "/data/positions?limit=100";
     char body[8192];
     const size_t len = client.rest_get(PATH, body, sizeof(body) - 1);
