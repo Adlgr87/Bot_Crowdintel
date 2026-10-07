@@ -92,14 +92,22 @@ public:
 
         // --- OFI event delta (Cont et al. 2014) ---------------------------------
         // event_delta = Δbid_vol − Δask_vol
-        const double bid_delta = bid_vol - prev_bid_vol_;
-        const double ask_delta = ask_vol - prev_ask_vol_;
-        double event_delta = bid_delta - ask_delta;
-
-        // Track running depth for normalization and feature computation.
-        // We always keep the latest best-level volumes.
-        prev_bid_vol_ = bid_vol;
-        prev_ask_vol_ = ask_vol;
+        //
+        // The first event after construction or reset establishes the baseline
+        // (no prior depth to compare against), so its delta is zero.  This is the
+        // correct Cont et al. behaviour: OFI measures *changes* in flow.
+        double event_delta = 0.0;
+        if (!has_baseline_) {
+            has_baseline_ = true;
+            prev_bid_vol_ = bid_vol;
+            prev_ask_vol_ = ask_vol;
+        } else {
+            const double bid_delta = bid_vol - prev_bid_vol_;
+            const double ask_delta = ask_vol - prev_ask_vol_;
+            event_delta = bid_delta - ask_delta;
+            prev_bid_vol_ = bid_vol;
+            prev_ask_vol_ = ask_vol;
+        }
 
         // --- EWMA accumulation (leaky integrator, O(1)) ------------------------
         ofi_running_ = cfg_.DECAY_LAMBDA * ofi_running_ + event_delta;
@@ -197,6 +205,7 @@ public:
         last_event_ns_ = 0;
         event_count_ = 0;
         trade_event_count_ = 0;
+        has_baseline_ = false;
         price_head_ = 0;
         price_history_.fill(0.0);
     }
@@ -214,6 +223,7 @@ private:
     double trade_intensity_ewma_ = 0.0;  // trades/sec EWMA
 
     // Price/volume state
+    bool has_baseline_ = false;
     double prev_bid_px_ = 0.0;
     double prev_ask_px_ = 0.0;
     double prev_mid_ = 0.0;

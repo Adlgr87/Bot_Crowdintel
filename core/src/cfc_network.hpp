@@ -72,7 +72,7 @@ struct alignas(64) CfCConfig {
 //   b_tau  [1] = 1 float
 //   W_out  [N_HIDDEN] = 32 floats
 //   b_out  [1] = 1 float
-//   Total: 2506 floats = 10024 bytes
+//   Total: 2536 floats = 10144 bytes
 //
 // Internally weights are transposed to [D][H] layout for AVX2 contiguous loads.
 struct alignas(64) CfCWeights {
@@ -245,12 +245,14 @@ private:
     }
 
     // ── AVX2 Matmul kernels (8-lane FMA) ─────────────────────────────────────
+    // Transposed layout: W_T[d * N_HIDDEN + h] = W[h * D + d]
+    // W_T_base = W_T.data() + i  (for neuron group i..i+7)
+    // For input dim d: _mm256_load_ps(W_T + d*32) loads 8 contiguous
+    //   weights for neurons [i..i+7] at input dimension d.
 
-    // W_x · x: W_T is [D_INPUT][N_HIDDEN] transposed, loads 8 contiguous neurons
-    // Processes neurons [i .. i+7]. D = D_INPUT = 6.
+    // W_x · x: D = D_INPUT = 6 input dimensions
     static inline __m256 matmul_dx8(const float* W_T, const float* x) noexcept {
-        // D=6, so we loop 6 times, each: load 8 contiguous weights (one input dim),
-        // broadcast x[j], FMA
+        // 6 FMA operations: load 8 weights, broadcast x[d], accumulate
         __m256 acc = _mm256_setzero_ps();
         acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 0 * 32), _mm256_set1_ps(x[0]), acc);
         acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 1 * 32), _mm256_set1_ps(x[1]), acc);
@@ -261,35 +263,44 @@ private:
         return acc;
     }
 
-    // W_h · h: W_T is [N_HIDDEN][N_HIDDEN] transposed (32×32), loads 8 contiguous neurons
-    // Processes neurons [i .. i+7]. Uses all 32 hidden inputs in 4 chunks of 8.
+    // W_h · h: 32 input dimensions, each broadcasts one h[d]
     static inline __m256 matmul_hidden8(const float* W_T, const float* h) noexcept {
-        // Unroll: 4 iterations of 8-wide h loads
+        // Process 32 input dims, each with one load + one broadcast + one FMA
         __m256 acc = _mm256_setzero_ps();
-        // Chunk 0: h[0..7]
-        _mm_prefetch(reinterpret_cast<const char*>(W_T + 32 * 32), _MM_HINT_T0);
-        __m256 hv0 = _mm256_load_ps(h + 0);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 0 * 32), hv0, acc);
-        // Chunk 1: h[8..15]
-        __m256 hv1 = _mm256_load_ps(h + 8);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 8 * 32), hv1, acc);
-        // Chunk 2: h[16..23]
-        __m256 hv2 = _mm256_load_ps(h + 16);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 16 * 32), hv2, acc);
-        // Chunk 3: h[24..31]
-        __m256 hv3 = _mm256_load_ps(h + 24);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 24 * 32), hv3, acc);
+        // Unroll for maximum ILP and to eliminate loop overhead
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 0 * 32),  _mm256_set1_ps(h[0]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 1 * 32),  _mm256_set1_ps(h[1]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 2 * 32),  _mm256_set1_ps(h[2]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 3 * 32),  _mm256_set1_ps(h[3]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 4 * 32),  _mm256_set1_ps(h[4]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 5 * 32),  _mm256_set1_ps(h[5]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 6 * 32),  _mm256_set1_ps(h[6]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 7 * 32),  _mm256_set1_ps(h[7]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 8 * 32),  _mm256_set1_ps(h[8]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 9 * 32),  _mm256_set1_ps(h[9]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 10 * 32), _mm256_set1_ps(h[10]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 11 * 32), _mm256_set1_ps(h[11]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 12 * 32), _mm256_set1_ps(h[12]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 13 * 32), _mm256_set1_ps(h[13]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 14 * 32), _mm256_set1_ps(h[14]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 15 * 32), _mm256_set1_ps(h[15]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 16 * 32), _mm256_set1_ps(h[16]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 17 * 32), _mm256_set1_ps(h[17]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 18 * 32), _mm256_set1_ps(h[18]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 19 * 32), _mm256_set1_ps(h[19]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 20 * 32), _mm256_set1_ps(h[20]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 21 * 32), _mm256_set1_ps(h[21]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 22 * 32), _mm256_set1_ps(h[22]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 23 * 32), _mm256_set1_ps(h[23]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 24 * 32), _mm256_set1_ps(h[24]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 25 * 32), _mm256_set1_ps(h[25]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 26 * 32), _mm256_set1_ps(h[26]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 27 * 32), _mm256_set1_ps(h[27]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 28 * 32), _mm256_set1_ps(h[28]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 29 * 32), _mm256_set1_ps(h[29]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 30 * 32), _mm256_set1_ps(h[30]), acc);
+        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 31 * 32), _mm256_set1_ps(h[31]), acc);
         return acc;
-    }
-
-    // ── Transpose helper ──────────────────────────────────────────────────────
-    static void transpose_Hx_to_xH(const float* src, float* dst,
-                                   uint32_t H, uint32_t D) noexcept {
-        for (uint32_t d = 0; d < D; d++) {
-            for (uint32_t h = 0; h < H; h++) {
-                dst[d * H + h] = src[h * D + d];
-            }
-        }
     }
 
 public:
@@ -297,6 +308,17 @@ public:
     CfCWeights& weights_mut() noexcept { return weights_; }
     const CfCWeights& weights_ref() const noexcept { return weights_; }
 };
+
+// ── Transpose helper (for weight loading) ──────────────────────────────────────
+// Transposes row-major [H][D] to column-major [D][H] for AVX2 contiguous loads.
+static void transpose_Hx_to_xH(const float* src, float* dst,
+                               uint32_t H, uint32_t D) noexcept {
+    for (uint32_t d = 0; d < D; d++) {
+        for (uint32_t h = 0; h < H; h++) {
+            dst[d * H + h] = src[h * D + d];
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IMPLEMENTATIONS
@@ -315,7 +337,7 @@ bool CfCNetwork::load_weights(const char* path) noexcept {
     if (file_size < 0) { std::fclose(f); return false; }
     std::fseek(f, 0, SEEK_SET);
 
-    const size_t weight_bytes = sizeof(float) * 2506;
+    const size_t weight_bytes = sizeof(float) * 2536;
     const bool has_header = (static_cast<size_t>(file_size) >= 64 + weight_bytes);
 
     // Read SHA256 header if present (first 64 bytes, null-terminated hex string)
