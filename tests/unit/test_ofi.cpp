@@ -186,7 +186,7 @@ static void test_ofi_throughput() {
     const auto start = std::chrono::steady_clock::now();
     double sink = 0.0;
     for (uint64_t i = 0; i < N; ++i) {
-        calc.on_event(26500.0, 26510.0, 10.0 + (i & 7), 8.0, false,
+        calc.on_event(26500.0, 26510.0, 10.0 + static_cast<double>(i & 7), 8.0, false,
                       t0 + (i + 1) * 100'000ULL);
         // Accumulate to prevent dead-code elimination
         MarketState state{};

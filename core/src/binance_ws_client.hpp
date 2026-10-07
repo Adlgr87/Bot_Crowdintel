@@ -264,7 +264,7 @@ inline void BinanceWSClient::run_mock_loop() {
 
         // Every 3rd tick: simulate a trade
         if (tick % 3 == 0) {
-            const double trade_vol = 1.5 + (tick % 3) * 0.5;
+            const double trade_vol = 1.5 + static_cast<double>(tick % 3) * 0.5;
             // Buyer-initiated if tick is even, seller-initiated if odd
             const double signed_vol = ((tick / 3) % 2 == 0)
                 ? trade_vol : -trade_vol;
