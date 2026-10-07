@@ -138,6 +138,15 @@ inline uint64_t floor_to_quantum(uint64_t value, uint64_t quantum) {
     return quantum ? value - value % quantum : value;
 }
 
+// Ceiling division to the nearest quantum: rounds UP so that
+// ceil_to_quantum(value, quantum) >= value and the result is a
+// multiple of quantum.  Zero quantum is a no-op (returns value).
+inline uint64_t ceil_to_quantum(uint64_t value, uint64_t quantum) {
+    if (!quantum) return value;
+    uint64_t remainder = value % quantum;
+    return remainder ? value + (quantum - remainder) : value;
+}
+
 // Official amount precision associated with each current tick.  The returned
 // value is a raw x1e6 quantum (for example, 100 means four decimals).
 inline uint64_t amount_quantum_for_tick(uint64_t tick) {
@@ -181,7 +190,12 @@ inline bool compute_order_amounts(uint8_t side, uint64_t price_u,
         if (maker_amount == 0) return false;
         const crowd_uint128_t numerator =
             static_cast<crowd_uint128_t>(maker_amount) * 1000000ULL;
-        taker_amount = floor_to_quantum(
+        // BUG FIX (M1): BUY market orders must ceil to the amount quantum,
+        // not floor.  Flooring can produce a taker_amount strictly below the
+        // intended notional, which on CLOB V2 causes the maker to receive
+        // slightly less than expected and may fail the price-cap invariant.
+        // Ceiling guarantees the full (price × shares) cost is covered.
+        taker_amount = ceil_to_quantum(
             static_cast<uint64_t>(numerator / price_u), amount_quantum);
         effective_size_u = taker_amount;
     } else {
