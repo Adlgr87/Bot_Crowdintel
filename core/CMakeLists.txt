@@ -172,31 +172,65 @@ if(HAVE_NETWORK)
 endif()
 set_target_properties(test_layers PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ── AVX2 detection ─────────────────────────────────────────────────────────────
+# CI uses -DCROWDINTEL_CPU_TARGET=portable (no AVX2 by default). CfC network
+# uses AVX2+FMA intrinsics. Detect availability before building those targets.
+set(CMAKE_REQUIRED_FLAGS_SAVE "${CMAKE_REQUIRED_FLAGS}")
+set(CMAKE_REQUIRED_FLAGS "-mavx2 -mfma ${CMAKE_REQUIRED_FLAGS}")
+check_cxx_source_compiles("
+    #include <immintrin.h>
+    int main() {
+        __m256 a = _mm256_set1_ps(1.0f);
+        __m256 b = _mm256_fmadd_ps(a, a, a);
+        (void)b; return 0;
+    }
+" HAVE_AVX2_INTRINSICS)
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS_SAVE}")
+
 # ── Phase 1: OFI + Binance WS + Evidence Adapter tests ──────────────────────────
+# OFI uses only SSE4.2 (portable across all x86-64). No AVX2 required.
 add_executable(test_ofi ../tests/unit/test_ofi.cpp)
 crowdintel_target(test_ofi)
 set_target_properties(test_ofi PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# ── CfC Network tests (P2) ─────────────────────────────────────────────────────
-# KAT test: known-answer verification against Python reference
-add_executable(test_cfc_kat ../tests/unit/test_cfc_kat.cpp)
-crowdintel_target(test_cfc_kat)
-set_target_properties(test_cfc_kat PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# ── Phase 2: CfC Network tests ─────────────────────────────────────────────────
+# Only build when AVX2+FMA intrinsics are available.
+if(HAVE_AVX2_INTRINSICS)
+    # KAT test: known-answer verification against Python reference
+    add_executable(test_cfc_kat ../tests/unit/test_cfc_kat.cpp)
+    crowdintel_target(test_cfc_kat)
+    set_target_properties(test_cfc_kat PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Benchmark: latency < 3μs p50, < 5μs p99, IPC > 2.0
-add_executable(bench_cfc ../tests/benchmarks/bench_cfc.cpp)
-crowdintel_target(bench_cfc)
-set_target_properties(bench_cfc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-# bench_cfc must run from the repo root to find the model file
-set_target_properties(bench_cfc PROPERTIES
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+    # Benchmark: latency < 3μs p50, < 5μs p99
+    add_executable(bench_cfc ../tests/benchmarks/bench_cfc.cpp)
+    crowdintel_target(bench_cfc)
+    set_target_properties(bench_cfc PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    # bench_cfc must run from the repo root to find the model file
+    set_target_properties(bench_cfc PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+
+    # Integration test (also requires AVX2 for CfC)
+    add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
+    crowdintel_target(test_pipeline)
+    set_target_properties(test_pipeline PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    set_target_properties(test_pipeline PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+else()
+    message(STATUS "AVX2 not available — skipping CfC tests/benchmarks")
+endif()
 
 enable_testing()
 add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
 add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
 add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
 add_test(NAME ofi_units COMMAND $<TARGET_FILE:test_ofi>)
-add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>)
+if(HAVE_AVX2_INTRINSICS)
+    add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>)
+    add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>)
+endif()
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
 # bench_cfc and latency_bench are benchmarks, not correctness tests; CI invokes them explicitly.
