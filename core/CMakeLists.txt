@@ -172,10 +172,31 @@ if(HAVE_NETWORK)
 endif()
 set_target_properties(test_layers PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ── Phase 1: OFI + Binance WS + Evidence Adapter tests ──────────────────────────
+add_executable(test_ofi ../tests/unit/test_ofi.cpp)
+crowdintel_target(test_ofi)
+set_target_properties(test_ofi PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ── CfC Network tests (P2) ─────────────────────────────────────────────────────
+# KAT test: known-answer verification against Python reference
+add_executable(test_cfc_kat ../tests/unit/test_cfc_kat.cpp)
+crowdintel_target(test_cfc_kat)
+set_target_properties(test_cfc_kat PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Benchmark: latency < 3μs p50, < 5μs p99, IPC > 2.0
+add_executable(bench_cfc ../tests/benchmarks/bench_cfc.cpp)
+crowdintel_target(bench_cfc)
+set_target_properties(bench_cfc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# bench_cfc must run from the repo root to find the model file
+set_target_properties(bench_cfc PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+
 enable_testing()
 add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
 add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
 add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
+add_test(NAME ofi_units COMMAND $<TARGET_FILE:test_ofi>)
+add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>)
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
-# latency_bench is a benchmark, not a correctness test; CI invokes it explicitly.
+# bench_cfc and latency_bench are benchmarks, not correctness tests; CI invokes them explicitly.

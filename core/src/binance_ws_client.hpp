@@ -257,8 +257,8 @@ inline void BinanceWSClient::run_mock_loop() {
         const double spread = 10.0;
         const double bid_px = mid - spread * 0.5;
         const double ask_px = mid + spread * 0.5;
-        const double bid_vol = 10.0 + (tick % 7);
-        const double ask_vol = 8.0 + (tick % 5);
+        const double bid_vol = 10.0 + static_cast<double>(tick % 7);
+        const double ask_vol = 8.0 + static_cast<double>(tick % 5);
 
         process_event(bid_px, ask_px, bid_vol, ask_vol, false, now);
 
@@ -799,10 +799,17 @@ inline void BinanceWSClient::parse_depth_update(const char* json, size_t len) {
     const char* asks_begin = nullptr;
     const char* asks_end = nullptr;
 
+    // Support both Binance WebSocket spec ("b"/"a") and verbose ("bids"/"asks")
     if (!json_fields::find_array(json, json + len, "bids",
-                                 bids_begin, bids_end) ||
-        !json_fields::find_array(json, json + len, "asks",
-                                 asks_begin, asks_end)) return;
+                                 bids_begin, bids_end)) {
+        if (!json_fields::find_array(json, json + len, "b",
+                                     bids_begin, bids_end)) return;
+    }
+    if (!json_fields::find_array(json, json + len, "asks",
+                                 asks_begin, asks_end)) {
+        if (!json_fields::find_array(json, json + len, "a",
+                                     asks_begin, asks_end)) return;
+    }
 
     // Parse levels from bids array
     bid_count_ = 0;

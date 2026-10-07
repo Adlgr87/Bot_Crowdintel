@@ -1,0 +1,9 @@
+{
+  "description": "Source reliability weights for evidence sources. Hot-reloaded by EvidenceFileReplayer and BinanceOFIAdapter.",
+  "schema_version": 1,
+  "sources": {
+    "1": 0.90,
+    "2": 0.85,
+    "3": 0.50
+  }
+}
