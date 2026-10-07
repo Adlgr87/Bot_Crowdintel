@@ -173,17 +173,19 @@ private:
         const float f = z - n_f;
 
         // 2^f via 10-term Taylor expansion of exp(f·ln2)
+        // = sum_{k=0}^{9} u^k / k!  (error < u^10/10! < 2e-9 for u < 0.693)
         const float u = f * 0.6931471805599453f;  // f * ln2
-        const float poly = 1.0f + u * (
-            1.0f + u * (
-            0.5f + u * (
-            0.16666666666666666f + u * (
-            0.041666666666666664f + u * (
-            0.008333333333333333f + u * (
-            0.001388888888888889f + u * (
-            0.0001984126984126984f + u * (
-            2.7557319223985893e-05f + u *
-            2.755731922398589e-06f)))))))));
+        const float u2 = u * u;
+        const float poly = 1.0f
+            + u
+            + u2 * 0.5f
+            + u2 * u * 0.16666666666666666f
+            + u2 * u2 * 0.041666666666666664f
+            + u2 * u2 * u * 0.008333333333333333f
+            + u2 * u2 * u2 * 0.001388888888888889f
+            + u2 * u2 * u2 * u * 0.0001984126984126984f
+            + u2 * u2 * u2 * u2 * 2.7557319223985893e-05f
+            + u2 * u2 * u2 * u2 * u * 2.755731922398589e-06f;
 
         const float two_to_n = ldexpf(1.0f, static_cast<int>(n_f));
 
@@ -251,19 +253,19 @@ private:
     // ── AVX2 Matmul kernels (8-lane FMA) ─────────────────────────────────────
     // Transposed layout: W_T[d * N_HIDDEN + h] = W[h * D + d]
     // W_T_base = W_T.data() + i  (for neuron group i..i+7)
-    // For input dim d: _mm256_load_ps(W_T + d*32) loads 8 contiguous
+    // For input dim d: _mm256_loadu_ps(W_T + d*32) loads 8 contiguous
     //   weights for neurons [i..i+7] at input dimension d.
 
     // W_x · x: D = D_INPUT = 6 input dimensions
     static inline __m256 matmul_dx8(const float* W_T, const float* x) noexcept {
         // 6 FMA operations: load 8 weights, broadcast x[d], accumulate
         __m256 acc = _mm256_setzero_ps();
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 0 * 32), _mm256_set1_ps(x[0]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 1 * 32), _mm256_set1_ps(x[1]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 2 * 32), _mm256_set1_ps(x[2]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 3 * 32), _mm256_set1_ps(x[3]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 4 * 32), _mm256_set1_ps(x[4]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 5 * 32), _mm256_set1_ps(x[5]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 0 * 32), _mm256_set1_ps(x[0]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 1 * 32), _mm256_set1_ps(x[1]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 2 * 32), _mm256_set1_ps(x[2]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 3 * 32), _mm256_set1_ps(x[3]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 4 * 32), _mm256_set1_ps(x[4]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 5 * 32), _mm256_set1_ps(x[5]), acc);
         return acc;
     }
 
@@ -272,38 +274,38 @@ private:
         // Process 32 input dims, each with one load + one broadcast + one FMA
         __m256 acc = _mm256_setzero_ps();
         // Unroll for maximum ILP and to eliminate loop overhead
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 0 * 32),  _mm256_set1_ps(h[0]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 1 * 32),  _mm256_set1_ps(h[1]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 2 * 32),  _mm256_set1_ps(h[2]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 3 * 32),  _mm256_set1_ps(h[3]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 4 * 32),  _mm256_set1_ps(h[4]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 5 * 32),  _mm256_set1_ps(h[5]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 6 * 32),  _mm256_set1_ps(h[6]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 7 * 32),  _mm256_set1_ps(h[7]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 8 * 32),  _mm256_set1_ps(h[8]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 9 * 32),  _mm256_set1_ps(h[9]),  acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 10 * 32), _mm256_set1_ps(h[10]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 11 * 32), _mm256_set1_ps(h[11]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 12 * 32), _mm256_set1_ps(h[12]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 13 * 32), _mm256_set1_ps(h[13]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 14 * 32), _mm256_set1_ps(h[14]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 15 * 32), _mm256_set1_ps(h[15]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 16 * 32), _mm256_set1_ps(h[16]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 17 * 32), _mm256_set1_ps(h[17]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 18 * 32), _mm256_set1_ps(h[18]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 19 * 32), _mm256_set1_ps(h[19]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 20 * 32), _mm256_set1_ps(h[20]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 21 * 32), _mm256_set1_ps(h[21]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 22 * 32), _mm256_set1_ps(h[22]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 23 * 32), _mm256_set1_ps(h[23]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 24 * 32), _mm256_set1_ps(h[24]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 25 * 32), _mm256_set1_ps(h[25]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 26 * 32), _mm256_set1_ps(h[26]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 27 * 32), _mm256_set1_ps(h[27]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 28 * 32), _mm256_set1_ps(h[28]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 29 * 32), _mm256_set1_ps(h[29]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 30 * 32), _mm256_set1_ps(h[30]), acc);
-        acc = _mm256_fmadd_ps(_mm256_load_ps(W_T + 31 * 32), _mm256_set1_ps(h[31]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 0 * 32),  _mm256_set1_ps(h[0]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 1 * 32),  _mm256_set1_ps(h[1]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 2 * 32),  _mm256_set1_ps(h[2]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 3 * 32),  _mm256_set1_ps(h[3]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 4 * 32),  _mm256_set1_ps(h[4]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 5 * 32),  _mm256_set1_ps(h[5]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 6 * 32),  _mm256_set1_ps(h[6]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 7 * 32),  _mm256_set1_ps(h[7]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 8 * 32),  _mm256_set1_ps(h[8]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 9 * 32),  _mm256_set1_ps(h[9]),  acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 10 * 32), _mm256_set1_ps(h[10]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 11 * 32), _mm256_set1_ps(h[11]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 12 * 32), _mm256_set1_ps(h[12]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 13 * 32), _mm256_set1_ps(h[13]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 14 * 32), _mm256_set1_ps(h[14]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 15 * 32), _mm256_set1_ps(h[15]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 16 * 32), _mm256_set1_ps(h[16]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 17 * 32), _mm256_set1_ps(h[17]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 18 * 32), _mm256_set1_ps(h[18]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 19 * 32), _mm256_set1_ps(h[19]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 20 * 32), _mm256_set1_ps(h[20]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 21 * 32), _mm256_set1_ps(h[21]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 22 * 32), _mm256_set1_ps(h[22]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 23 * 32), _mm256_set1_ps(h[23]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 24 * 32), _mm256_set1_ps(h[24]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 25 * 32), _mm256_set1_ps(h[25]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 26 * 32), _mm256_set1_ps(h[26]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 27 * 32), _mm256_set1_ps(h[27]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 28 * 32), _mm256_set1_ps(h[28]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 29 * 32), _mm256_set1_ps(h[29]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 30 * 32), _mm256_set1_ps(h[30]), acc);
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(W_T + 31 * 32), _mm256_set1_ps(h[31]), acc);
         return acc;
     }
 
@@ -441,12 +443,12 @@ CfCSignal CfCNetwork::infer(CfCState& state,
                             const CfCInput& input,
                             uint64_t now_ns) noexcept {
     // ── NaN/Inf guard on input ───────────────────────────────────────────────────
-    const __m256 input_vec = _mm256_load_ps(input.features);
+    const __m256 input_vec = _mm256_loadu_ps(input.features);
     // UNORD comparison: true where either operand is NaN
     // GE/QGE on abs: detect Inf by comparing |x| >= INF (true for Inf, false for finite)
     const __m256 abs_input = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), input_vec);
     const __m256 inf_mask = _mm256_cmp_ps(abs_input,
-        _mm256_set1_ps(std::numeric_limits<float>::infinity()), _CMP_GE_Q);
+        _mm256_set1_ps(std::numeric_limits<float>::infinity()), _CMP_GE_OQ);
     if (_mm256_movemask_ps(_mm256_cmp_ps(input_vec, input_vec, _CMP_UNORD_Q)) ||
         _mm256_movemask_ps(inf_mask)) {
         return CfCSignal{0.5f, 0.0f, true, state.inference_count + 1};
@@ -490,7 +492,7 @@ CfCSignal CfCNetwork::infer(CfCState& state,
         // ── f = tanh(W_x·x + W_h·h + b) ───────────────────────────────────────
         __m256 a_f = matmul_dx8(weights_.W_x_T.data() + i, input.features);
         a_f = _mm256_add_ps(a_f, matmul_hidden8(weights_.W_h_T.data() + i, state.h.data()));
-        a_f = _mm256_add_ps(a_f, _mm256_load_ps(weights_.b.data() + i));
+        a_f = _mm256_add_ps(a_f, _mm256_loadu_ps(weights_.b.data() + i));
 
         // Apply tanh element-wise (store, compute scalar, reload)
         alignas(32) float a_f_arr[8];
@@ -505,7 +507,7 @@ CfCSignal CfCNetwork::infer(CfCState& state,
         // ── g = sigmoid(W_gx·x + W_gh·h + b_g) ─────────────────────────────────
         __m256 a_g = matmul_dx8(weights_.W_gx_T.data() + i, input.features);
         a_g = _mm256_add_ps(a_g, matmul_hidden8(weights_.W_gh_T.data() + i, state.h.data()));
-        a_g = _mm256_add_ps(a_g, _mm256_load_ps(weights_.b_g.data() + i));
+        a_g = _mm256_add_ps(a_g, _mm256_loadu_ps(weights_.b_g.data() + i));
 
         alignas(32) float a_g_arr[8];
         _mm256_store_ps(a_g_arr, a_g);
@@ -524,7 +526,7 @@ CfCSignal CfCNetwork::infer(CfCState& state,
     {
         __m256 h_nan_mask = _mm256_setzero_ps();
         for (uint32_t i = 0; i < NH; i += 8) {
-            __m256 h_vec = _mm256_load_ps(h_new + i);
+            __m256 h_vec = _mm256_loadu_ps(h_new + i);
             h_nan_mask = _mm256_or_ps(h_nan_mask,
                 _mm256_cmp_ps(h_vec, h_vec, _CMP_UNORD_Q));
         }
@@ -538,8 +540,8 @@ CfCSignal CfCNetwork::infer(CfCState& state,
     float y = weights_.b_out;
     // Unroll the dot product for W_out (32 floats)
     for (uint32_t i = 0; i < NH; i += 8) {
-        __m256 wv = _mm256_load_ps(weights_.W_out.data() + i);
-        __m256 hv = _mm256_load_ps(h_new + i);
+        __m256 wv = _mm256_loadu_ps(weights_.W_out.data() + i);
+        __m256 hv = _mm256_loadu_ps(h_new + i);
         __m256 prod = _mm256_mul_ps(wv, hv);
         // Horizontal sum of 8 floats: extract upper 128, add to lower 128
         __m128 lo = _mm256_castps256_ps128(prod);
