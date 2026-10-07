@@ -196,15 +196,19 @@ set_target_properties(test_ofi PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINAR
 # ── Phase 2: CfC Network tests ─────────────────────────────────────────────────
 # Only build when AVX2+FMA intrinsics are available.
 if(HAVE_AVX2_INTRINSICS)
-    # KAT test: known-answer verification against Python reference
+    # Enable AVX2+FMA for CfC test targets (intrinsics are used unconditionally
+    # in cfc_network.hpp). check_cxx_source_compiles only tests compile ability;
+    # we must also pass the flags to actual targets.
     add_executable(test_cfc_kat ../tests/unit/test_cfc_kat.cpp)
     crowdintel_target(test_cfc_kat)
+    target_compile_options(test_cfc_kat PRIVATE -mavx2 -mfma)
     set_target_properties(test_cfc_kat PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
     # Benchmark: latency < 3μs p50, < 5μs p99
     add_executable(bench_cfc ../tests/benchmarks/bench_cfc.cpp)
     crowdintel_target(bench_cfc)
+    target_compile_options(bench_cfc PRIVATE -mavx2 -mfma)
     set_target_properties(bench_cfc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     # bench_cfc must run from the repo root to find the model file
@@ -214,6 +218,7 @@ if(HAVE_AVX2_INTRINSICS)
     # Integration test (also requires AVX2 for CfC)
     add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
     crowdintel_target(test_pipeline)
+    target_compile_options(test_pipeline PRIVATE -mavx2 -mfma)
     set_target_properties(test_pipeline PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     set_target_properties(test_pipeline PROPERTIES
