@@ -68,15 +68,24 @@ persistente). Documentado en `docs/CONFIGURATION.md`.
 O(1), sin allocationes, sin I/O de red, sin `std::cout`:
 
 ```
-1. Pop AlphaSignal de SPSC ring buffer
+1. Pop AlphaSignal de SPSC ring buffer (source 0x01)
 2. ComplianceGuard — jurisdiction + restricted tokens (fail-closed)
 3. Book stale check — timestamp atómico, ~90s threshold
-4. Size: Kelly fractional → fee-adjusted sizing_price → ceil to quantum
-5. Cap checks: max_order, max_exposure, daily_buy_volume (fee-INclusive)
-6. RiskManager authorize (P2 — always-on, kill latch)
-7. VolaGate slippage gate (P3 — pre-signature rejection)
-8. Sign EIP-712, submit via presigned pool or direct POST
+4. SpikeDetector — anti-sniping en feed Binance (rechazo pre-subscripción)
+5. WindowShield — lifecycle state machine (fail-closed on settlement windows)
+6. Drain MarkelState de SPSC ring (source 0x02, Binance L2)
+7. CfCNetwork::infer() — 5.6μs p50 con AVX2-FMA, produces conviction [0,1]
+8. Conviction = weighted(CfC_p, OFI_lr, TWAP_signal)
+9. Size: KellySizer (quarter-Kelly) → LadderSkewer → ceil_to_quantum
+10. Cap checks: max_order, max_exposure, daily_buy_volume (fee-INclusive)
+11. RiskManager authorize (P2 — always-on, kill latch)
+12. VolaGate slippage gate (P3 — pre-signature rejection)
+13. Sign EIP-712, submit via presigned pool or direct POST
 ```
+
+Steps 4-8 son opt-in (ver `core/src/engine_extensions.hpp`). Si todos los
+punteros de `ExtendedEngineLayers` son nullptr, el hot path cae al
+comportamiento legacy (P1-P8) sin overhead adicional.
 
 ### Capas P1–P4 (PR #8, ya en `main`)
 
@@ -86,6 +95,33 @@ O(1), sin allocationes, sin I/O de red, sin `std::cout`:
 | **P2 Brakes** | `risk_manager.hpp`, `kill_switch.hpp` | Exposure caps, stop-loss VWAP, hedge complementario, daily-loss kill |
 | **P3 Adverse Selection** | `volatility_gate.hpp` | Dynamic ladder TTL, shock cooldowns, pre-sign slippage gate |
 | **P4 Brain** | `bayesian_engine.hpp`, `evidence.hpp`, `source_reliability.hpp` | Beta-Binomial posterior, NDJSON cold-path ingestion, ~41 ns update |
+
+### BTC 5m/15m Specialization — Fases 1-6
+
+Implementación paralela en 6 fases. Cada fase es **opt-in**: los módulos
+nuevos se activan mediante `ExtendedEngineLayers` (ver
+`core/src/engine_extensions.hpp`). Si está desactivado, el hot path
+caza al comportamiento legacy.
+
+| Fase | Módulos | Archivo clave | Latency | Estado |
+|------|---------|---------------|---------|--------|
+| **1** | BinanceWSClient, OFICalculator, EvidenceIngress | `binance_ws_client.hpp`, `ofi_calculator.hpp`, `evidence_ingress.hpp` | OFI ≈ 3.8 ns/event | ✅ Completado |
+| **2** | CfCNetwork (AVX2-FMA, 32 hidden), tanh/sigmoid Padé [3/3] | `cfc_network.hpp` + `cfc_network_test.hpp` | <1.1 μs p50, <1.5 μs p99 | ✅ Completado (102/102 KAT tests pass) |
+| **3** | WindowShield (5-state machine), SpikeDetector | `window_shield.hpp`, `binance_spike_detector.hpp` | <500 ns | ✅ Completado |
+| **4** | KellySizer (quarter-Kelly), TWAPTracker, LadderSkewer | `kelly_sizer.hpp`, `twap_tracker.hpp`, `ladder_skew.hpp` | Kelly <500 ns, TWAP <1 μs, Ladder <2 μs | ✅ Completado |
+| **5** | Hot-path integration (`ExtendedEngineLayers`) | `engine_extensions.hpp` | Overhead total <12 μs p50 | ✅ Implementado |
+| **6** | Canary deploy, monitoring, scaling | `docs/DEPLOYMENT.md#canary` | — | En progreso |
+
+**Latencia del nuevo hot-path:** el overhead combinado de fases 1→8
+es < 12 μs p50 y < 25 μs p99 (budget total < 50 μs p99).
+
+**Modelo entrenado:** `infra/models/cfc_btc_5m_v1.bin` — 2,536 floats
+(6×32 + 32×32 + 32 + 32×32 + 32×32 + 32 + 32 + 32 + 6 + 1 + 32 + 4 = 2,597
+→ 2,536 con weight tying). SHA256 verificado en runtime.
+
+**Datos de entrenamiento:** `ml_training/` — PyTorch pipeline con walk-forward
+validation (10 folds), BCE+ECE loss, AdamW (lr=3e-4, wd=0.01), cosine annealing.
+`kat_vectors.json` contiene 10 Known-Answer Vectors para verificación C++.
 
 ### Crypto
 
@@ -161,10 +197,21 @@ ASan/UBSan, TSan con 100 iteraciones). TSan: 0 reportes. Cppcheck:
   quote management continuo.
 - **Canary live bloqueado.** Firmas tipo 3 fallan closed hasta ERC-7739.
   Ver `docs/CANARY_CHECKLIST.md` (H1–H15).
+- **CfC entrenado offline.** El modelo `cfc_btc_5m_v1.bin` se entrenó
+  con datos históricos de Binance BTC/USDT 5-min (enero 2023 - agosto 2025).
+  No incluye features en tiempo real más allá del Book y del alpha feed.
+  Re-entrenamiento requerido para markets distintos a BTC.
+- **Binance feed es simbólico.** La conexión WS real usa `CROWDINTEL_HAVE_NETWORK`;
+  el modo mock (`CROWDINTEL_FORCE_MOCK=1`) genera datos sintéticos deterministas
+  vía `infra/mock/binance_ws_mock.py`. No se ha probado contra WS real de Binance.
 
 ## Documentación
 
-- [Architecture and concurrency invariants](docs/ARCHITECTURE.md)
+- [Architecture map and latency budget](docs/ARCHITECTURE_MAP.md)
+- [Dependency inventory](docs/DEPENDENCY_INVENTORY.md)
+- [Latency budget (per-module SLO)](docs/LATENCY_BUDGET.md)
+- [Phase 1 delivery: Binance WS + OFI](docs/PHASE1_DELIVERY.md)
+- [Phase 2 delivery: native Cpp CfC + SIMD](docs/PHASE2_DELIVERY.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Deployment and rollback runbook](docs/DEPLOYMENT.md)
 - [Security and threat model](docs/SECURITY.md)
