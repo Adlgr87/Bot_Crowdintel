@@ -179,7 +179,10 @@ inline TokenBucket::TokenBucket(uint32_t capacity, uint32_t rate_per_sec,
 inline void TokenBucket::refill() const noexcept {
     uint64_t now = now_fn_();
     uint64_t last = last_refill_ms_.load(std::memory_order_relaxed);
-    uint64_t elapsed_ms = now - last;
+    // Guard against clock backward jump: cap elapsed to 0 if now < last
+    // so a backward jump does not wrap to UINT64_MAX (which would either
+    // starve the bucket or refill it completely — a rate-limit bypass).
+    uint64_t elapsed_ms = (now > last) ? (now - last) : 0;
     if (elapsed_ms == 0) return;
 
     // milli-tokens to add = elapsed_ms * rate_per_sec
@@ -314,8 +317,8 @@ inline void RateLimiter::on_rate_limited(RequestType type,
     if (new_backoff > config_.backoff_max_ms) {
         new_backoff = config_.backoff_max_ms;
     }
-    // Respect server's Retry-After hint if it is larger.
-    if (retry_ms > new_backoff) {
+    // Respect server's Retry-After hint, but cap to prevent malicious/DoS value.
+    if (retry_ms > new_backoff && retry_ms <= config_.backoff_max_ms) {
         new_backoff = retry_ms;
     }
 

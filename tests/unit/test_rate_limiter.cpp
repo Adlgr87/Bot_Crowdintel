@@ -218,6 +218,64 @@ static void test_post_burst_rate() {
              "no backoff after burst");
 }
 
+// ── Test 7: Clock backward jump does not wrap to UINT64_MAX ───────────────────
+// SECURITY FIX (NEMESIS): backward jump → refill() must not overflow
+void test_backward_clock_jump() {
+    std::printf("[7] Backward clock jump — no overflow\n");
+
+    RateLimitConfig cfg{};
+    cfg.orders_per_sec = 10;
+    cfg.burst_capacity = 20;
+    RateLimiter rl(cfg, mock_clock_ms);
+
+    // Set clock forward 10s (bucket should be full again after draining)
+    g_mock_time_ms = 10000;
+    // Drain all tokens
+    for (int i = 0; i < 20; i++) {
+        CHECK(rl.can_send(RequestType::ORDER), "can send during burst");
+        rl.on_sent(RequestType::ORDER);
+    }
+    CHECK(!rl.can_send(RequestType::ORDER), "burst exhausted");
+
+    // Simulate clock jumping backward by 5s
+    g_mock_time_ms = 5000;
+    // SECURITY: backward jump must NOT refill bucket (would bypass rate limit)
+    CHECK(!rl.can_send(RequestType::ORDER),
+          "Bucket NOT refilled after backward jump (no overflow bypass)");
+
+    // After backward jump, move forward again — bucket should refill normally
+    g_mock_time_ms = 5001;
+    CHECK(!rl.can_send(RequestType::ORDER),
+          "Still empty after backward+1ms (rate-limited by 10/s refill)");
+
+    // Move forward by 1 second — should have 10 new tokens
+    g_mock_time_ms = 11001;
+    CHECK(rl.can_send(RequestType::ORDER),
+          "10 tokens refill after clock passes original last_refill");
+
+    std::printf("  PASS No overflow on backward jump\n\n");
+}
+
+// ── Test 8: Unbounded retry_ms is capped ──────────────────────────────────────
+void test_retry_after_capped() {
+    std::printf("[8] Server retry_after capped at backoff_max\n");
+
+    RateLimitConfig cfg{};
+    cfg.orders_per_sec = 10;
+    cfg.burst_capacity = 5;
+    cfg.backoff_base_ms = 200;
+    cfg.backoff_max_ms = 10000;
+    RateLimiter rl(cfg, mock_clock_ms);
+
+    rl.can_send(RequestType::ORDER);
+    // Server sends absurd Retry-After
+    rl.on_rate_limited(RequestType::ORDER, UINT64_MAX);
+    uint64_t bo = rl.backoff_ms(RequestType::ORDER);
+    CHECK(bo <= 10000, "Retry-After capped at backoff_max_ms (10000)");
+
+    std::printf("  PASS Retry-After capped\n\n");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 int main() {
     std::printf("⚡ RateLimiter — Unit Tests\n");
@@ -229,6 +287,8 @@ int main() {
     test_exponential_backoff();
     test_burst_20_instant();
     test_post_burst_rate();
+    test_backward_clock_jump();
+    test_retry_after_capped();
 
     std::printf("\n=========================================\n");
     std::printf("📊 Results: %d check(s) failed\n", g_failures);
