@@ -1,15 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // test_pipeline: Acceptance test for full BTC 5m/15m pipeline integration.
 //
-// Exercises the full data path:
-//   MarketState (synthetic) → SPSC ring → drain_market_state → CfCNetwork::infer
-//   → compute_conviction → KellySizer → TWAPTracker → LadderSkewer → WindowShield
+// DSH approach — pure deterministic math, NO neural networks:
+//   Synthetic price feed → VolatilityEstimator → TwapBrownianBridge
+//   → OfiLinearFilter → WindowShield → FeeCalculator → KellySizer
+//   → LadderBuilder → TimeStrategy → CircuitBreaker → RateLimiter
 //
 // Exit code 0 = all pass. Zero external deps.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <atomic>
 #include <cstdio>
+#include <cstring>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 
 #include "engine_extensions.hpp"
 
@@ -20,7 +24,7 @@ static int g_tests = 0;
     do {                                                                      \
         ++g_tests;                                                            \
         if (cond) { std::printf("  PASS %s\n", name); }                       \
-        else { std::printf("  FAIL %s (line %d)\n", name, __LINE__);          \
+        else { std::printf("  FAIL %s (line %d)\n", name, __LINE__);         \
                ++g_failures; }                                                \
     } while (0)
 
@@ -29,232 +33,265 @@ static bool approxf(float a, float b, float eps = 1e-4f) {
 }
 
 int main() {
-    std::printf("=== BTC Specialization Pipeline Integration Tests ===\n");
+    std::printf("=== BTC Specialization Pipeline Integration Tests (DSH) ===\n");
 
-    // ── 1. Initialize all modules ─────────────────────────────────────────────
+    // ── 1. Initialize all DSH modules ───────────────────────────────────────────
     std::printf("\n[1] Module initialization\n");
 
-    // CfC network
-    CfCNetwork cfc_net;
-    bool weights_loaded = cfc_net.load_weights("infra/models/cfc_btc_5m_v1.bin");
-    CHECK(weights_loaded, "CfC model loads from binary file");
-    CHECK(cfc_net.verify_hash(cfc_net.model_hash()), "CfC SHA256 hash verified");
+    // VolatilityEstimator: multi-scale EWMA
+    VolatilityEstimator::Config vol_cfg{};
+    vol_cfg.lambda_fast = 0.94;
+    vol_cfg.lambda_slow = 0.98;
+    vol_cfg.vol_min = 0.15;
+    vol_cfg.vol_max = 2.00;
+    VolatilityEstimator vol(vol_cfg);
+    CHECK(true, "VolatilityEstimator initialized");
 
-    CfCState cfc_state{};
-    cfc_net.reset(cfc_state, 0.0f);
-    CHECK(cfc_state.active, "CfC state initialized active");
+    // TwapBrownianBridge: P(TWAP_final > K)
+    TwapBrownianBridge bb;
+    bb.set_sigma_annual(0.80);    // 80% annual vol for BTC 5m
+    bb.set_twap_so_far(60000.0);
+    CHECK(true, "TwapBrownianBridge initialized");
 
-    // OFI calculator
-    OFICalculator ofi_calc(OFIConfig{});
-    ofi_calc.reset();
-    CHECK(true, "OFI calculator initialized");
+    // OfiLinearFilter: Cont et al. OFI with z-score
+    OfiLinearFilter::Config ofi_cfg{};
+    ofi_cfg.ewma_lambda = 0.94;
+    ofi_cfg.alert_threshold = 3.0;
+    ofi_cfg.caution_threshold = 2.0;
+    OfiLinearFilter ofi(ofi_cfg);
+    CHECK(true, "OfiLinearFilter initialized");
 
-    // Kelly sizer
-    KellyConfig kelly_cfg{};
-    kelly_cfg.fraction = 0.25f;           // quarter-Kelly
-    kelly_cfg.max_bankroll_pct = 0.05f;   // max 5% per trade
+    // FeeCalculator: Polymarket CLOB V2 fees (all static methods)
+    CHECK(FeeCalculator::maker_fee(0.50) == 0.0, "Maker fee is zero");
+    CHECK(FeeCalculator::taker_fee(0.50) > 0.0, "Taker fee > 0 at p=0.50");
+
+    // KellySizer: quarter-Kelly position sizing
+    Config kelly_cfg{};
+    kelly_cfg.kelly_fraction = 0.25;
+    kelly_cfg.max_bankroll_pct = 0.05;
+    kelly_cfg.min_edge = 0.005;
+    kelly_cfg.max_position = 100.0;
     KellySizer kelly(kelly_cfg);
     CHECK(true, "KellySizer initialized");
 
-    // TWAP tracker
-    TWAPTracker twap;
-    uint64_t ts = 1'700'000'000'000'000'000ULL;
-    twap.reset(60000.0, ts);
-    CHECK(true, "TWAPTracker initialized");
-
-    // Ladder skewer
-    LadderSkewConfig skew_cfg{};
-    skew_cfg.w_cfc = 0.5f;
-    skew_cfg.w_ofi = 0.3f;
-    skew_cfg.w_twap = 0.2f;
-    skew_cfg.skew_intensity = 0.7f;
-    LadderSkewer skewer(skew_cfg);
-    CHECK(true, "LadderSkewer initialized");
-
-    // WindowShield (use BTC_5M config, not zeroed defaults)
+    // WindowShield: settlement-window lifecycle state machine
     WindowShield shield(WindowShieldConfig::BTC_5M());
-    shield.set_window_start(ts);  // REQUIRED: fail-closed until window_start is set
-    ShieldState initial_state = shield.update(ts, 0.5f);
-    CHECK(initial_state == ShieldState::MAKER_PASSIVE, "WindowShield active after init");
+    shield.set_window_start(1'700'000'000'000'000'000ULL);
+    ShieldState initial_state = shield.update(1'700'000'000'000'000'000ULL, 0.5f);
+    CHECK(initial_state == ShieldState::MAKER_PASSIVE,
+          "WindowShield active after set_window_start");
 
-    // SPSC ring for market states
-    SPSC_RingBuffer<MarketState, BinanceConfig::RING_CAPACITY> market_ring;
-    CHECK(true, "MarketState ring initialized");
+    // LadderBuilder: dynamic bid/ask ladder
+    LadderBuilder ladder;
+    CHECK(true, "LadderBuilder initialized");
 
-    // ── 2. Generate synthetic data → ring → CfC inference ───────────────────
-    std::printf("\n[2] End-to-end pipeline: synthetic data → CfC inference\n");
+    // TimeStrategy: time-based config (static class, no instance needed)
+    TimeConfig ts_cfg = TimeStrategy::get_time_config(8);  // US open
+    CHECK(true, "TimeStrategy initialized");
 
-    float last_confidence = 0.5f;
-    int valid_inferences = 0;
-    float total_conviction = 0.0f;
-    int conviction_samples = 0;
+    // CircuitBreaker: network health state machine
+    CircuitBreaker cb;
+    CHECK(true, "CircuitBreaker initialized (default)");
+
+    // RateLimiter: TokenBucket + exponential backoff
+    RateLimitConfig rl_cfg{};
+    rl_cfg.orders_per_sec = 10;
+    rl_cfg.burst_capacity = 20;
+    RateLimiter rate_limiter(rl_cfg);
+    CHECK(true, "RateLimiter initialized");
+
+    // ExtendedEngineLayers wiring
+    ExtendedEngineLayers layers;
+    layers.bb = &bb;
+    layers.vol = &vol;
+    layers.ofi = &ofi;
+    layers.window_shield = &shield;
+    layers.circuit_breaker = &cb;
+    layers.rate_limiter = &rate_limiter;
+    layers.kelly_sizer = &kelly;
+    layers.ladder = &ladder;
+    layers.w_bb = 0.5f;
+    layers.w_ofi = 0.3f;
+    layers.w_twap = 0.2f;
+    CHECK(true, "All layers wired in ExtendedEngineLayers");
+
+    // ── 2. Process synthetic data through pipeline ────────────────────────────
+    std::printf("\n[2] End-to-end pipeline processing\n");
+
+    // Simulate a bull trend: price walks from 60000 → 61000 over 10 ticks
+    uint64_t base_ts_ns = 1'700'000'000'000'000'000ULL;
+    double current_price = 60000.0;
+    double strike_price = 60500.0;  // slightly above start
+    double bankroll = 50.0;         // $50 canary capital
+    double window_sec = 300.0;      // 5-minute window
+    double elapsed_sec = 0.0;
+    double dt_sec = 10.0;           // 10-second ticks
+
+    int valid_signals = 0;
+    double last_p_up = 0.5;
+
+    // OFI: track previous book state
+    double prev_bid_vol = 1.5, prev_ask_vol = 1.5;
+    double prev_bid_px = 60000.0, prev_ask_px = 60001.0;
 
     for (int i = 0; i < 10; i++) {
-        // Synthetic MarketState: price walks from 60000 → 61000 (bull trend)
-        MarketState ms{};
-        ms.timestamp_ns = ts + static_cast<uint64_t>(i * 100'000'000ULL);
-        ms.ofi_normalized  = 0.05f * (i < 5 ? 1.0f : -1.0f);
-        ms.trade_intensity  = 0.5f;
-        ms.spread_bps       = 1.0f;
-        ms.depth_imbalance  = 0.1f * static_cast<float>(i);
-        ms.microprice       = 60000.0 + i * 10.0;
-        ms.mid_velocity     = (i < 5) ? 50.0f : -50.0f;
+        uint64_t now_ns = base_ts_ns + static_cast<uint64_t>(i * dt_sec * 1'000'000'000ULL);
+        uint64_t now_ms = (base_ts_ns / 1'000'000'000ULL + static_cast<uint64_t>(i * dt_sec)) * 1'000ULL;
 
-        // Push to ring
-        CHECK(market_ring.try_push(ms), "MarketState pushed to ring");
+        // 2a. Volatility update (synthetic log-returns)
+        double log_ret = 0.001 * (i < 5 ? 1.0 : -0.5);  // small bullish returns
+        vol.on_log_return(log_ret, dt_sec);
 
-        // Drain through pipeline
-        MarketState drained{};
-        if (market_ring.try_pop(drained)) {
-            // OFI update
-            ofi_calc.on_event(
-                static_cast<double>(ms.microprice - 0.005),  // bid
-                static_cast<double>(ms.microprice + 0.005),  // ask
-                100.0, 100.0, false,  // is_trade=false
-                ms.timestamp_ns);
+        // 2b. Feed price to Brownian Bridge
+        bb.on_price(current_price, now_ns);
 
-            MarketState ofi_state{};
-            if (ofi_calc.current_state(ofi_state)) {
-                // CfC inference
-                CfCInput input{};
-                input.features[0] = static_cast<float>(ofi_state.ofi_normalized);
-                input.features[1] = static_cast<float>(ofi_state.trade_intensity);
-                input.features[2] = static_cast<float>(ofi_state.spread_bps);
-                input.features[3] = static_cast<float>(ofi_state.depth_imbalance);
-                input.features[4] = static_cast<float>(ofi_state.microprice);
-                input.features[5] = static_cast<float>(ofi_state.mid_velocity);
-                input.timestamp_ns = drained.timestamp_ns;
+        // 2c. OFI filter: simulate book updates
+        // Bull trend: bids grow, asks shrink (positive OFI)
+        double bid_px = current_price * 0.9999;
+        double ask_px = current_price * 1.0001;
+        double bid_vol = 1.5 + i * 0.1;
+        double ask_vol = 0.8 - i * 0.05;
+        ofi.on_book_update(bid_vol, ask_vol, prev_bid_vol, prev_ask_vol,
+                           bid_px, prev_bid_px, ask_px, prev_ask_px, now_ms);
+        prev_bid_vol = bid_vol; prev_ask_vol = ask_vol;
+        prev_bid_px = bid_px; prev_ask_px = ask_px;
 
-                CfCSignal signal = cfc_net.infer(cfc_state, input, drained.timestamp_ns);
-                if (!signal.nan_guard_triggered) {
-                    valid_inferences++;
-                    last_confidence = signal.probability_up;
+        // 2d. Compute BB probability
+        auto prob = bb.compute(current_price, strike_price, window_sec, elapsed_sec);
+        CHECK(prob.sigma_annual > 0.0, "Sigma annual is positive");
+        CHECK(prob.p_up >= 0.0 && prob.p_up <= 1.0, "P(Up) in [0, 1]");
 
-                    // TWAP update
-                    twap.update(ofi_state.microprice, drained.timestamp_ns);
-                    TWAPSignal twap_sig = twap.check(
-                        drained.timestamp_ns, 300);  // 5-min window
+        // 2e. Check OFI state
+        auto ofi_state = ofi.current_state();
+        CHECK(true, "OFI state queryable after update");
 
-                    // Conviction
-                    float conviction = compute_conviction(
-                        signal.probability_up,
-                        static_cast<float>(ofi_state.ofi_normalized),
-                        static_cast<float>(twap_sig.deviation));
-                    total_conviction += conviction;
-                    conviction_samples++;
-                }
-            }
+        // 2f. WindowShield evaluation
+        auto ofi_pressure = static_cast<OfiPressure>(static_cast<uint8_t>(ofi_state.level));
+        float conviction = static_cast<float>(prob.p_up);
+        ShieldState shield_state = shield.update(now_ns, conviction, ofi_pressure);
+        CHECK(shield_state != ShieldState::HALTED || i >= 9,
+              "Shield active during normal operation");
+
+        if (prob.is_decided || prob.p_up > 0.55 || prob.p_up < 0.45) {
+            valid_signals++;
         }
+        last_p_up = prob.p_up;
+
+        // 2g. Advance
+        current_price += 10.0;
+        elapsed_sec += dt_sec;
     }
 
-    CHECK(valid_inferences > 5, "Pipeline produces valid CfC signals (>5/10)");
-    CHECK(last_confidence > 0.0f && last_confidence < 1.0f,
-          "CfC confidence in valid range [0, 1]");
+    CHECK(valid_signals > 0, "Pipeline produces valid signals (>0)");
+    CHECK(last_p_up > 0.0 && last_p_up < 1.0,
+          "P(Up) within reasonable range after bull trend");
 
-    // ── 3. Kelly sizing check ────────────────────────────────────────────────
-    std::printf("\n[3] Kelly sizing (quarter-Kelly)\n");
+    // ── 3. Kelly sizing check ─────────────────────────────────────────────────
+    std::printf("\n[3] Kelly sizing\n");
 
-    float avg_conviction = total_conviction / conviction_samples;
-    // Override with a confident bullish signal for deterministic Kelly test
-    float kelly_p = 0.75f;  // 75% win probability → positive Kelly fraction
-    uint64_t price_cents = 61000000;    // 0.61 normalized (Polymarket binary price * 1e8)
-    uint64_t bankroll_cents = 10'000'000'000;  // 100M USD bankroll (test scale)
+    // Polymarket binary-market semantics: p_model is a probability in [0,1],
+    // market_price is the contract price in [0,1].
+    double p_model = 0.65;
+    double market_price = 0.50;
+    auto sizing = kelly.compute(p_model, market_price,
+                                /*bankroll=*/10000.0,
+                                /*inventory=*/0.0,
+                                /*vol_z_score=*/0.0,
+                                /*is_taker=*/true,
+                                /*ofi_size_multiplier=*/1.0);
 
-    KellyOutput ks = kelly.compute(
-        kelly_p,
-        price_cents,
-        bankroll_cents,
-        0.0f,     // no inventory
-        0.0f,     // no vol z-score
-        false);   // taker
+    CHECK(sizing.should_trade, "Kelly sizing produces a trade with 65% model vs 50% price");
+    CHECK(sizing.size_usdc > 0.0, "Kelly size is positive");
+    CHECK(sizing.size_shares > 0.0, "Kelly shares > 0");
+    CHECK(sizing.size_usdc / 10000.0 <= 0.05 + 1e-9,
+          "Position size capped to max 5% of bankroll");
 
-    CHECK(ks.should_trade, "Kelly recommends trade (conviction 0.75 > threshold)");
-    CHECK(ks.fraction_of_bankroll > 0.0f && ks.fraction_of_bankroll <= 0.05f,
-          "Fraction capped at max_bankroll_pct (5%)");
-    CHECK(ks.order_shares > 0, "Order produces non-zero shares");
-    CHECK(ks.order_usd_cents > 0, "Order has positive USD cost");
+    // Breakeven check: market price 0.50 → breakeven ~0.518
+    double fee = FeeCalculator::taker_fee(0.50);
+    CHECK(fee > 0.0 && fee < 0.05, "Taker fee is between 0 and 5% at p=0.50");
 
-    // ── 4. Ladder skew ────────────────────────────────────────────────────────
-    std::printf("\n[4] Ladder skew (16-level order ladder)\n");
+    // ── 4. Brownian Bridge trade evaluation ─────────────────────────────────────
+    std::printf("\n[4] Brownian Bridge trade evaluation\n");
 
-    ConvictionInput ci{};
-    ci.cfc_probability = avg_conviction;
-    ci.ofi_signal = 0.1f;
-    ci.twap_signal = 0.5f;
+    bb.set_sigma_annual(0.80);
+    bb.set_twap_so_far(60200.0);
+    auto eval_prob = bb.compute(60250.0, 60500.0, 300.0, 60.0);
 
-    uint64_t mid_cents = 6100000;
-    uint64_t spread_cents = 10;  // 0.10 USD spread
-    uint64_t base_shares = 10;
-    uint64_t bankroll_c = 100'000'000;
+    CHECK(eval_prob.p_up >= 0.0 && eval_prob.p_up <= 1.0,
+          "BB probability in [0, 1]");
+    CHECK(eval_prob.twap_so_far == 60200.0, "TWAP so far preserved");
+    CHECK(eval_prob.time_remaining_sec > 0.0, "Time remaining positive");
 
-    LadderOutput ladder_out = skewer.build(ci, mid_cents, spread_cents,
-                                           base_shares, bankroll_c);
+    // ── 5. Ladder quote ────────────────────────────────────────────────────────
+    std::printf("\n[5] Ladder quote\n");
 
-    CHECK(ladder_out.n_quotes > 0, "Ladder produces quotes");
-    CHECK(ladder_out.n_quotes <= 16, "Ladder ≤ 16 quotes (8 per side)");
-    CHECK(ladder_out.conviction >= 0.0f && ladder_out.conviction <= 1.0f,
-          "Conviction in [0, 1]");
-    CHECK(std::fabs(ladder_out.skew) <= 1.0f, "Skew in [-1, 1]");
+    Quote quote = ladder.build(/*p_up=*/static_cast<double>(last_p_up),
+                               /*mid=*/0.50,
+                               /*ofi_dir=*/0.1,
+                               /*ofi_mult=*/1.0,
+                               /*inv=*/0.0,
+                               /*spread_base=*/1.0,
+                               /*vol_mult=*/1.0);
 
-    // Verify quotes have alternating bid/ask
-    bool has_bid = false, has_ask = false;
-    for (uint32_t q = 0; q < ladder_out.n_quotes; q++) {
-        if (ladder_out.quotes[q].is_bid) has_bid = true;
-        else has_ask = true;
-    }
-    CHECK(has_bid && has_ask, "Ladder has both bid and ask quotes");
+    CHECK(quote.is_active, "Ladder quote is active");
+    CHECK(quote.bid_size > 0.0 || quote.ask_size > 0.0,
+          "Ladder produces non-zero size");
+    CHECK(quote.bid_price < quote.ask_price, "Bid < Ask");
+    CHECK(quote.bid_price >= 0.01 && quote.ask_price <= 0.99,
+          "Prices within valid range [0.01, 0.99]");
 
-    // ── 5. WindowShield with stale timestamp ──────────────────────────────────
-    std::printf("\n[5] WindowShield stale-timestamp blocking\n");
+    // ── 6. WindowShield lifecycle ───────────────────────────────────────────────
+    std::printf("\n[6] WindowShield lifecycle\n");
 
-    // Fresh timestamp → should be in active state (not halted)
-    ShieldState fresh_state = shield.update(ts + 1'000'000'000ULL, avg_conviction);
-    CHECK(fresh_state != ShieldState::HALTED && fresh_state != ShieldState::CLOSE_ONLY,
-          "WindowShield allows trading on fresh timestamp");
+    // Test normal operation
+    ShieldState state = shield.update(base_ts_ns + 120'000'000'000ULL, 0.55f);
+    CHECK(state != ShieldState::HALTED, "Shield not halted during active window");
 
-    // Stale timestamp (no set_window_start) → fail-closed
-    WindowShield alt_shield(WindowShieldConfig::BTC_5M());
-    ShieldState stale_state = alt_shield.update(ts, avg_conviction);
-    CHECK(stale_state == ShieldState::HALTED,
-          "WindowShield fail-closed without set_window_start");
+    // Test fail-closed on stale timestamp
+    ShieldState stale_state = shield.update(base_ts_ns - 10'000'000'000ULL, 0.55f);
+    CHECK(stale_state == ShieldState::HALTED || stale_state == ShieldState::CLOSE_ONLY,
+          "Shield blocks trading on stale timestamp (fail-closed)");
 
-    // ── 6. Defense check integration ──────────────────────────────────────────
-    std::printf("\n[6] Defense check integration\n");
+    // Test OFI EXTREME forces CLOSE_ONLY
+    shield.set_window_start(base_ts_ns);
+    ShieldState extreme_state = shield.update(
+        base_ts_ns + 285'000'000'000ULL,  // near end of window
+        0.7f,
+        OfiPressure::EXTREME
+    );
+    CHECK(extreme_state == ShieldState::CLOSE_ONLY,
+          "OFI EXTREME forces CLOSE_ONLY in final phase");
 
-    ExtendedEngineLayers layers;
-    layers.binance_market_q = &market_ring;
-    layers.cfc_network = &cfc_net;
-    layers.cfc_state = &cfc_state;
-    layers.window_shield = &shield;
-    layers.kelly_sizer = &kelly;
-    layers.ladder = &skewer;
-    layers.twap_tracker = &twap;
+    // ── 7. Defense integration (full) ───────────────────────────────────────────
+    std::printf("\n[7] Defense integration\n");
 
-    CfCSignal dummy_signal{};
-    bool drained = drain_market_state(layers, dummy_signal, ts + 1'000'000'000ULL);
-    // Ring might be empty (drained in test above), so false is OK
-    CHECK(true, "drain_market_state callable (no crash)");
+    SignalResult result = evaluate_signal(
+        layers,
+        /*price=*/60250.0,
+        /*strike=*/60500.0,
+        /*window_sec=*/300.0,
+        /*elapsed_sec=*/60.0,
+        /*bankroll=*/50.0,
+        /*now_ns=*/base_ts_ns + 100'000'000'000ULL
+    );
 
-    bool defended = defense_check(layers, ts + 1'000'000'000ULL, avg_conviction);
-    CHECK(true, "defense_check callable (no crash)");
+    CHECK(true, "evaluate_signal callable (no segfault)");
+    CHECK(result.shield_state != ShieldState::HALTED,
+          "Defense check passes during active window");
 
-    // ── 7. Null-safe layers (legacy mode) ──────────────────────────────────────
-    std::printf("\n[7] Null-safe layers (legacy mode fallback)\n");
+    // Rate limiter check
+    bool rate_ok = rate_limiter.can_send(RequestType::ORDER);
+    CHECK(rate_ok, "Rate limiter allows first request");
 
-    ExtendedEngineLayers null_layers;
-    CfCSignal null_signal{};
-    bool null_drained = drain_market_state(null_layers, null_signal, ts);
-    CHECK(!null_drained, "drain_market_state returns false on null layers");
-
-    bool null_defended = defense_check(null_layers, ts, 0.5f);
-    CHECK(null_defended, "defense_check returns true on null layers (legacy pass-through)");
+    // Circuit breaker check (should be CLOSED = allow)
+    bool cb_ok = cb.allow_request();
+    CHECK(cb_ok, "CircuitBreaker allows request when CLOSED");
 
     // ── Summary ──────────────────────────────────────────────────────────────
     std::printf("\n========================================\n");
     std::printf("Integration: %d/%d checks passed\n",
         g_tests - g_failures, g_tests);
-    std::printf("Valid inferences: %d/10\n", valid_inferences);
-    std::printf("Avg conviction: %.3f\n", avg_conviction);
+    std::printf("Valid signals: %d/10\n", valid_signals);
     std::printf("========================================\n");
 
     return g_failures > 0 ? 1 : 0;
