@@ -47,11 +47,25 @@ int main() {
     // Note: with low burst, subsequent requests may still fail
     CHECK(true, "Rate limiter fail-closed behavior verified");
 
-    // 3. Rate-limited events tracked
+    // 3. After burst exhausted, backoff should eventually engage
     rl.on_rate_limited(RequestType::ORDER, 1000ULL);
-    auto stats = rl.get_stats();
-    CHECK(stats.total_rate_limited >= 1,
-          "Rate-limited events tracked");
+    uint64_t backoff = rl.backoff_ms(RequestType::ORDER);
+    CHECK(backoff > 0, "Backoff engaged after 429");
+
+    // 4. Backoff increases exponentially with repeated 429s
+    rl.on_rate_limited(RequestType::ORDER, 1000ULL);
+    rl.on_rate_limited(RequestType::ORDER, 1000ULL);
+    uint64_t backoff2 = rl.backoff_ms(RequestType::ORDER);
+    CHECK(backoff2 >= backoff, "Exponential backoff increases");
+
+    // 5. Wait time reflects backoff
+    uint64_t wait = rl.wait_time_ms(RequestType::ORDER);
+    CHECK(wait > 0, "Wait time > 0 when backoff active");
+
+    // 6. Reset reduces backoff
+    rl.on_sent(RequestType::ORDER);
+    uint64_t backoff3 = rl.backoff_ms(RequestType::ORDER);
+    CHECK(backoff3 < backoff2 || backoff3 == 0, "Backoff resets after success");
 
     // ── Circuit Breaker ────────────────────────────────────────────────────────
     CircuitBreaker::Config cb_cfg{};

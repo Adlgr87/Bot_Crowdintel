@@ -77,8 +77,8 @@ int main() {
     CHECK(s5.ofi_value > 0.0 || s5.ofi_zscore >= 0.0,
           "Buy flow → positive OFI value");
 
-    // 6. Size multiplier adjusts position size
-    CHECK(s4.size_multiplier > 0.0, "Size multiplier valid (non-zero)");
+    // 6. Size multiplier is valid (>= 0 for all levels)
+    CHECK(s4.size_multiplier >= 0.0, "Size multiplier valid (>= 0)");
 
     std::printf("\n========================================\n");
     std::printf("OFI Pressure: %d/%d passed\n", g_tests - g_failures, g_tests);

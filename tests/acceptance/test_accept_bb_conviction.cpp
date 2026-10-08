@@ -72,13 +72,11 @@ int main() {
     TwapBrownianBridge bb_trade;
     bb_trade.set_sigma_annual(0.80);
     bb_trade.set_twap_so_far(0.50);
+    auto pr = bb_trade.compute(0.52, 0.50, 300.0, 60.0);  // get p_up first
     auto decision = bb_trade.evaluate_trade(
-        /*spot=*/0.52,
-        /*strike=*/0.50,
-        /*window_sec=*/300.0,
-        /*elapsed_sec=*/60.0,
-        /*bankroll=*/100.0,
+        /*p_up=*/pr.p_up,
         /*market_price_up=*/0.50,  // Polymarket contract price
+        /*bankroll=*/100.0,
         /*is_taker=*/true          // pay taker fee
     );
     CHECK(decision.should_trade || !decision.should_trade,
