@@ -130,7 +130,7 @@ desactivado, el hot path cae al comportamiento legacy sin overhead.
 | **P3** | RateLimiter + CircuitBreaker + RequestPrioritizer | `rate_limiter.hpp`, `circuit_breaker.hpp`, `request_prioritizer.hpp` | TokenBucket: O(1) | 14 tests | ✅ Completado |
 | **P4** | FeeCalculator + KellySizer + LadderBuilder + TimeStrategy | `fee_calculator.hpp`, `kelly_sizer.hpp`, `ladder_builder.hpp`, `time_strategy.hpp` | Fee: <50 ns<br>Kelly: <200 ns | 56/56 | ✅ Completado |
 | **P5** | Integration + paper trading | `engine_extensions.hpp` v2 | Pipeline <15μs p99 | 8 acceptance tests + 84 integration checks | ✅ Completado |
-| **P6** | Canary deploy ($50) + monitoring | `docs/DEPLOYMENT.md#canary` | — | H1-H15 checklist | 🔄 En despliegue |
+| **P6** | Canary deploy ($50) + monitoring | `docs/DEPLOYMENT.md#canary` | — | H1-H15 checklist | ✅ Completado |
 
 **Total de tests unitarios: 120 checks, todos pass.** ASan/UBSan limpios.
 
