@@ -233,8 +233,10 @@ add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
 add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
 add_test(NAME ofi_units COMMAND $<TARGET_FILE:test_ofi>)
 if(HAVE_AVX2_INTRINSICS)
-    add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>)
-    add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>)
+    add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+    add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 endif()
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
