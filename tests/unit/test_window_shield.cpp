@@ -20,7 +20,9 @@ static int g_fail = 0;
 
 // Mock clock
 static uint64_t g_mock_ns = 0;
+[[maybe_unused]]
 static uint64_t mock_clock_ns() { return g_mock_ns; }
+[[maybe_unused]] static uint64_t mock_clock_ns_unused = 0;
 
 int main() {
     std::printf("=== WindowShield Tests (6 tests) ===\n");
@@ -123,7 +125,7 @@ int main() {
         ws.set_window_start(start);
         auto t0 = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < 10000; i++) {
-            ws.update(start + 100ULL * 1'000'000ULL + i, 0.5f);
+            ws.update(start + 100ULL * 1'000'000ULL + static_cast<uint64_t>(i), 0.5f);
         }
         auto t1 = std::chrono::high_resolution_clock::now();
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
