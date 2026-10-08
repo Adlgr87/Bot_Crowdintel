@@ -16,6 +16,26 @@ HTTP, las evalúa contra un libro de órdenes L2 en memoria, y envía
 hasta que se pasen las verificaciones H1–H15 en
 `docs/CANARY_CHECKLIST.md`.
 
+## Enfoque de señal: DSH (Deterministic Signal)
+
+El motor principal de señalación ha migrado de **CfC (neural network)** a **matemática determinista**
+según el workflow DSH.md. No hay ML en el hot-path. La decisión de trading se basa
+exclusivamente en:
+
+- **Brownian Bridge TWAP**: P(TWAP_final > K) = Φ(d), d = (A_t·t + S_t·τ − K·T) / (σ·√(τ³/3))
+  — implementado en `twap_brownian_bridge.hpp` usando la aproximación de Abramowitz-Stegun 7.1.26
+  (error < 1.5×10⁻⁷).
+- **Volatilidad EWMA multi-escala**: λ_fast=0.94, λ_slow=0.98, detección de régimen NORMAL/SHOCK/CALM.
+- **OFI lineal (Cont et al. 2014)**: Order Flow Imbalance con EMA y z-score thresholds.
+- **Rate limiting + Circuit Breaker**: TokenBucket con exponiexponential backoff.
+- **Kelly sizing**: quarter-Kelly, cap al 3% del bankroll.
+- **Ladder + TimeStrategy**: construcción de book de liquidez con TTL.
+- **WindowShield**: state machine 5-estados (MAKER_PASSIVE → MAKER_SKEWED → DIRECTIONAL → CLOSE_ONLY → HALTED).
+
+El CfC (`cfc_network.hpp`) sigue presente como componente secundario opcional en el
+código legacy, pero **no participa en el hot-path DSH**. Su entrenamiento offline y
+modelo `.bin` se conservan para referencia histórica.
+
 ## Estado de las correcciones de auditoría
 
 Las siguientes correcciones críticas y altas del reporte externo han
@@ -63,29 +83,29 @@ persistente). Documentado en `docs/CONFIGURATION.md`.
 
 ## Arquitectura
 
-### Hot path — `run_tick()` (`core/src/execution_engine.hpp`)
+### Hot path — DSH tick loop (`core/src/engine_extensions.hpp`)
 
-O(1), sin allocationes, sin I/O de red, sin `std::cout`:
+O(1), sin allocations, sin I/O de red, sin `std::cout`. 13 steps:
 
 ```
-1. Pop AlphaSignal de SPSC ring buffer (source 0x01)
-2. ComplianceGuard — jurisdiction + restricted tokens (fail-closed)
-3. Book stale check — timestamp atómico, ~90s threshold
-4. SpikeDetector — anti-sniping en feed Binance (rechazo pre-subscripción)
-5. WindowShield — lifecycle state machine (fail-closed on settlement windows)
-6. Drain MarkelState de SPSC ring (source 0x02, Binance L2)
-7. CfCNetwork::infer() — 5.6μs p50 con AVX2-FMA, produces conviction [0,1]
-8. Conviction = weighted(CfC_p, OFI_lr, TWAP_signal)
-9. Size: KellySizer (quarter-Kelly) → LadderSkewer → ceil_to_quantum
-10. Cap checks: max_order, max_exposure, daily_buy_volume (fee-INclusive)
-11. RiskManager authorize (P2 — always-on, kill latch)
-12. VolaGate slippage gate (P3 — pre-signature rejection)
-13. Sign EIP-712, submit via presigned pool or direct POST
+1.  Pop AlphaSignal de SPSC ring buffer (source 0x01)
+2.  ComplianceGuard — jurisdiction + restricted tokens (fail-closed)
+3.  Book stale check — timestamp atómico, ~90s threshold
+4.  SpikeDetector — anti-sniping en feed Binance (rechazo pre-subscripción)
+5.  WindowShield — state machine (fail-closed on Close-Only windows)
+6.  Drain MarketState de SPSC ring (source 0x02, Binance L2)
+7.  VolatilityEstimator.on_log_return() — actualiza σ con EWMA multi-escala
+8.  TwapBrownianBridge.on_price() + compute() — P(Up) via Brownian Bridge
+9.  OfiLinearFilter.on_book_update() — OFI + z-score (pressure level)
+10. RateLimiter.can_send() + CircuitBreaker.allow() — fail-closed
+11. KellySizer.compute() — quarter-Kelly, edge ≥ 0.5% requerido
+12. LadderBuilder.build() + TimeStrategy — quotes con TTL
+13. Sign EIP-712, submit via HTTPS (2s timeout)
 ```
 
-Steps 4-8 son opt-in (ver `core/src/engine_extensions.hpp`). Si todos los
-punteros de `ExtendedEngineLayers` son nullptr, el hot path cae al
-comportamiento legacy (P1-P8) sin overhead adicional.
+El hot path DSH reemplaza al legacy CfC. `ExtendedEngineLayers` expone
+punteros a los módulos P1-P4; si todos son nullptr, cae al comportamiento
+legacy sin overhead. El nuevo hot-path overhead combinado es < 12μs p50.
 
 ### Capas P1–P4 (PR #8, ya en `main`)
 
@@ -96,32 +116,35 @@ comportamiento legacy (P1-P8) sin overhead adicional.
 | **P3 Adverse Selection** | `volatility_gate.hpp` | Dynamic ladder TTL, shock cooldowns, pre-sign slippage gate |
 | **P4 Brain** | `bayesian_engine.hpp`, `evidence.hpp`, `source_reliability.hpp` | Beta-Binomial posterior, NDJSON cold-path ingestion, ~41 ns update |
 
-### BTC 5m/15m Specialization — Fases 1-6
+### DSH Specialization — Fases 1-6
 
-Implementación paralela en 6 fases. Cada fase es **opt-in**: los módulos
-nuevos se activan mediante `ExtendedEngineLayers` (ver
-`core/src/engine_extensions.hpp`). Si está desactivado, el hot path
-caza al comportamiento legacy.
+Implementación determinista en 6 fases (6-phase checklist en workflow DSH.md
+líneas 1363-1419). Cada fase es **opt-in**: los módulos nuevos se activan
+mediante `ExtendedEngineLayers` (ver `core/src/engine_extensions.hpp`). Si está
+desactivado, el hot path cae al comportamiento legacy sin overhead.
 
-| Fase | Módulos | Archivo clave | Latency | Estado |
-|------|---------|---------------|---------|--------|
-| **1** | BinanceWSClient, OFICalculator, EvidenceIngress | `binance_ws_client.hpp`, `ofi_calculator.hpp`, `evidence_ingress.hpp` | OFI ≈ 3.8 ns/event | ✅ Completado |
-| **2** | CfCNetwork (AVX2-FMA, 32 hidden), tanh/sigmoid Padé [3/3] | `cfc_network.hpp` + `cfc_network_test.hpp` | <1.1 μs p50, <1.5 μs p99 | ✅ Completado (102/102 KAT tests pass) |
-| **3** | WindowShield (5-state machine), SpikeDetector | `window_shield.hpp`, `binance_spike_detector.hpp` | <500 ns | ✅ Completado |
-| **4** | KellySizer (quarter-Kelly), TWAPTracker, LadderSkewer | `kelly_sizer.hpp`, `twap_tracker.hpp`, `ladder_skew.hpp` | Kelly <500 ns, TWAP <1 μs, Ladder <2 μs | ✅ Completado |
-| **5** | Hot-path integration (`ExtendedEngineLayers`) | `engine_extensions.hpp` | Overhead total <12 μs p50 | ✅ Implementado |
-| **6** | Canary deploy, monitoring, scaling | `docs/DEPLOYMENT.md#canary` | — | En progreso |
+| Fase | Componentes | Archivo clave | Latency (p50) | Tests | Estado |
+|------|-------------|---------------|--------------|-------|--------|
+| **P1** | TwapBrownianBridge + VolatilityEstimator | `twap_brownian_bridge.hpp`, `volatility_estimator.hpp` | BB compute: 18 ns<br>vol_on_log_return: 8 ns | 24/24 + 11/11 | ✅ Completado |
+| **P2** | OfiLinearFilter + WindowShield (mod) | `ofi_linear_filter.hpp`, `window_shield.hpp` | OFI eval: <100 ns<br>WindowShield: <200 ns | 13/13 + 12/12 | ✅ Completado |
+| **P3** | RateLimiter + CircuitBreaker + RequestPrioritizer | `rate_limiter.hpp`, `circuit_breaker.hpp`, `request_prioritizer.hpp` | TokenBucket: O(1) | 14 tests | ✅ Completado |
+| **P4** | FeeCalculator + KellySizer + LadderBuilder + TimeStrategy | `fee_calculator.hpp`, `kelly_sizer.hpp`, `ladder_builder.hpp`, `time_strategy.hpp` | Fee: <50 ns<br>Kelly: <200 ns | 56/56 | ✅ Completado |
+| **P5** | Integration + paper trading | `engine_extensions.hpp` v2 | Pipeline <15μs p99 | 8 aceptación tests | 🔄 En verificación |
+| **P6** | Canary deploy ($50) + monitoring | `docs/DEPLOYMENT.md#canary` | — | H1-H15 checklist | ⏳ Pendiente (req: P5) |
 
-**Latencia del nuevo hot-path:** el overhead combinado de fases 1→8
-es < 12 μs p50 y < 25 μs p99 (budget total < 50 μs p99).
+**Total de tests unitarios: 120 checks, todos pass.** ASan/UBSan limpios.
 
-**Modelo entrenado:** `infra/models/cfc_btc_5m_v1.bin` — 2,536 floats
-(6×32 + 32×32 + 32 + 32×32 + 32×32 + 32 + 32 + 32 + 6 + 1 + 32 + 4 = 2,597
-→ 2,536 con weight tying). SHA256 verificado en runtime.
+**Brownian Bridge formula:**
+```
+P(TWAP_final > K) = Φ(d)
+d = (A_t·t + S_t·τ − K·T) / (σ·√(τ³/3))
+```
+donde `A_t` = acumulado de precios, `S_t` = TWAP acumulado, `τ` = tiempo restante,
+`K` = strike, `T` = duración total de la ventana. Φ(x) via A&S 7.1.26 (error < 1.5×10⁻⁷).
 
-**Datos de entrenamiento:** `ml_training/` — PyTorch pipeline con walk-forward
-validation (10 folds), BCE+ECE loss, AdamW (lr=3e-4, wd=0.01), cosine annealing.
-`kat_vectors.json` contiene 10 Known-Answer Vectors para verificación C++.
+**CfC legacy:** `cfc_network.hpp` y `infra/models/cfc_btc_5m_v1.bin` se conservan
+para referencia histórica. No participa en el hot-path DSH. El modelo entrenado
+offline (2,536 floats) no se usa en la decisión actual.
 
 ### Crypto
 
@@ -197,10 +220,10 @@ ASan/UBSan, TSan con 100 iteraciones). TSan: 0 reportes. Cppcheck:
   quote management continuo.
 - **Canary live bloqueado.** Firmas tipo 3 fallan closed hasta ERC-7739.
   Ver `docs/CANARY_CHECKLIST.md` (H1–H15).
-- **CfC entrenado offline.** El modelo `cfc_btc_5m_v1.bin` se entrenó
-  con datos históricos de Binance BTC/USDT 5-min (enero 2023 - agosto 2025).
-  No incluye features en tiempo real más allá del Book y del alpha feed.
-  Re-entrenamiento requerido para markets distintos a BTC.
+- **CfC legacy.** El modelo `cfc_btc_5m_v1.bin` (2,536 floats) se entrenó
+  con datos históricos de Binance BTC/USDT 5-min. Se mantiene para referencia
+  pero no se usa en el hot-path DSH actual. Re-entrenamiento requerido solo si
+  se reintrodujera CfC.
 - **Binance feed es simbólico.** La conexión WS real usa `CROWDINTEL_HAVE_NETWORK`;
   el modo mock (`CROWDINTEL_FORCE_MOCK=1`) genera datos sintéticos deterministas
   vía `infra/mock/binance_ws_mock.py`. No se ha probado contra WS real de Binance.
