@@ -193,6 +193,20 @@ add_executable(test_ofi ../tests/unit/test_ofi.cpp)
 crowdintel_target(test_ofi)
 set_target_properties(test_ofi PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ── Phase 4: Fee, Kelly, Ladder, Time strategy tests ───────────────────────────
+# Pure-math components, no AVX2 or network deps.
+add_executable(test_fees ../tests/unit/test_fees.cpp)
+crowdintel_target(test_fees)
+set_target_properties(test_fees PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_kelly ../tests/unit/test_kelly.cpp)
+crowdintel_target(test_kelly)
+set_target_properties(test_kelly PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_ladder ../tests/unit/test_ladder.cpp)
+crowdintel_target(test_ladder)
+set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ── Phase 2: CfC Network tests ─────────────────────────────────────────────────
 # Only build when AVX2+FMA intrinsics are available.
 if(HAVE_AVX2_INTRINSICS)
@@ -214,30 +228,84 @@ if(HAVE_AVX2_INTRINSICS)
     # bench_cfc must run from the repo root to find the model file
     set_target_properties(bench_cfc PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
-
-    # Integration test (also requires AVX2 for CfC)
-    add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
-    crowdintel_target(test_pipeline)
-    target_compile_options(test_pipeline PRIVATE -mavx2 -mfma)
-    set_target_properties(test_pipeline PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-    set_target_properties(test_pipeline PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 else()
     message(STATUS "AVX2 not available — skipping CfC tests/benchmarks")
 endif()
+
+# ── Phase 5: Integration test (DSH, NO AVX2 required) ─────────────────────────
+# Pure deterministic math pipeline: BB + Vol + OFI + WindowShield + Kelly + Ladder
+add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
+crowdintel_target(test_pipeline)
+set_target_properties(test_pipeline PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ── Phase 1 & 2: Deterministic Math ─────────────────────────────────────────────
+# Brownian Bridge TWAP probability, volatility estimator, OFI filter, WindowShield
+
+add_executable(test_twap_bb ../tests/unit/test_twap_bb.cpp)
+crowdintel_target(test_twap_bb)
+target_compile_options(test_twap_bb PRIVATE -Werror)
+set_target_properties(test_twap_bb PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_vol_estimator ../tests/unit/test_vol_estimator.cpp)
+crowdintel_target(test_vol_estimator)
+target_compile_options(test_vol_estimator PRIVATE -Werror)
+set_target_properties(test_vol_estimator PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_ofi_filter ../tests/unit/test_ofi_filter.cpp)
+crowdintel_target(test_ofi_filter)
+target_compile_options(test_ofi_filter PRIVATE -Werror)
+set_target_properties(test_ofi_filter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_window_shield ../tests/unit/test_window_shield.cpp)
+crowdintel_target(test_window_shield)
+target_compile_options(test_window_shield PRIVATE -Werror)
+set_target_properties(test_window_shield PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ── Phase 3: Network-layer primitives ──────────────────────────────────────────
+# Rate limiter, circuit breaker, request prioritizer.
+# -Werror enforced: these headers must be warning-clean under -Wall -Wextra
+# -Wpedantic -Wconversion -Wshadow.
+add_executable(test_rate_limiter ../tests/unit/test_rate_limiter.cpp)
+crowdintel_target(test_rate_limiter)
+target_compile_options(test_rate_limiter PRIVATE -Werror)
+set_target_properties(test_rate_limiter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_circuit_breaker ../tests/unit/test_circuit_breaker.cpp)
+crowdintel_target(test_circuit_breaker)
+target_compile_options(test_circuit_breaker PRIVATE -Werror)
+set_target_properties(test_circuit_breaker PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(test_request_prioritizer ../tests/unit/test_request_prioritizer.cpp)
+crowdintel_target(test_request_prioritizer)
+target_compile_options(test_request_prioritizer PRIVATE -Werror)
+set_target_properties(test_request_prioritizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 enable_testing()
 add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
 add_test(NAME core_units COMMAND $<TARGET_FILE:test_core>)
 add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
 add_test(NAME ofi_units COMMAND $<TARGET_FILE:test_ofi>)
+add_test(NAME fee_units COMMAND $<TARGET_FILE:test_fees>)
+add_test(NAME kelly_units COMMAND $<TARGET_FILE:test_kelly>)
+add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
-    add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 endif()
+add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
+
+# Phase 3: network-layer primitives
+add_test(NAME rate_limiter_units COMMAND $<TARGET_FILE:test_rate_limiter>)
+add_test(NAME circuit_breaker_units COMMAND $<TARGET_FILE:test_circuit_breaker>)
+add_test(NAME request_prioritizer_units COMMAND $<TARGET_FILE:test_request_prioritizer>)
+
+# Phase 1 & 2: deterministic math tests
+add_test(NAME twap_bb_kat COMMAND $<TARGET_FILE:test_twap_bb>)
+add_test(NAME vol_estimator COMMAND $<TARGET_FILE:test_vol_estimator>)
+add_test(NAME ofi_filter COMMAND $<TARGET_FILE:test_ofi_filter>)
+add_test(NAME window_shield COMMAND $<TARGET_FILE:test_window_shield>)
 # bench_cfc and latency_bench are benchmarks, not correctness tests; CI invokes them explicitly.
