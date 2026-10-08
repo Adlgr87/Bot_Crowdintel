@@ -105,6 +105,15 @@ struct MarketConfig {
     char tls_pin[128]{};
     char kill_switch_file[192] = "/tmp/crowdintel.kill";
 
+    // ── Multi-feed configuration (PHASE-1 enhancement) ──────────────────────
+    uint32_t strategy_window_seconds = 300;  // 300=5m, 900=15m
+    char kline_interval[16] = "@kline_5m";   // Binance kline stream suffix
+    double pyth_weight = 0.55;               // Pyth feed weight in fusion
+    double binance_weight = 0.45;            // Binance feed weight in fusion
+    bool enable_pyth_feed = true;            // enable/disable Pyth stream
+    uint64_t feed_stale_ns = 500'000'000ULL;  // 500ms staleness threshold
+    bool feed_failover_enabled = true;       // failover when primary drops
+
     ~MarketConfig() {
         secure_zero(private_key_hex, sizeof(private_key_hex));
         secure_zero(api_secret_b64, sizeof(api_secret_b64));

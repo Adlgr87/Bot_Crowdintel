@@ -342,6 +342,13 @@ add_test(NAME dsh_pipeline COMMAND $<TARGET_FILE:test_dsh_pipeline>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 add_test(NAME paper_trade COMMAND $<TARGET_FILE:test_paper_trade>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+# Phase 1 enhancement: Multi-feed integration tests
+add_executable(test_multi_feed ../tests/integration/test_multi_feed.cpp)
+crowdintel_target(test_multi_feed)
+set_target_properties(test_multi_feed PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_test(NAME multi_feed COMMAND $<TARGET_FILE:test_multi_feed>
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 add_test(NAME backtester_smoke COMMAND $<TARGET_FILE:l2_backtester>
          ${CMAKE_CURRENT_SOURCE_DIR}/../tests/replay/sample_ticks.csv)
 

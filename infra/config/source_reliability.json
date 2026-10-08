@@ -1,9 +1,63 @@
 {
-  "description": "Source reliability weights for evidence sources. Hot-reloaded by EvidenceFileReplayer and BinanceOFIAdapter.",
-  "schema_version": 1,
-  "sources": {
-    "1": 0.90,
-    "2": 0.85,
-    "3": 0.50
+  "description": "Source reliability weights for multi-feed fusion (Phase 1 enhancement)",
+  "version": "1.1.0",
+  "schema_version": 2,
+  "default_strategy": "5m",
+  "sources": [
+    {
+      "name": "pyth",
+      "source_id": 3,
+      "feed_type": "price",
+      "weight": 0.55,
+      "endpoint": "wss://stream.pyth.network",
+      "max_latency_ms": 400,
+      "health_check_interval_sec": 10,
+      "stale_after_ms": 500,
+      "primary": true,
+      "failover_to": ["binance"]
+    },
+    {
+      "name": "binance",
+      "source_id": 2,
+      "feed_type": "orderbook",
+      "weight": 0.45,
+      "endpoint": "wss://stream.binance.com:9443/stream",
+      "max_latency_ms": 100,
+      "health_check_interval_sec": 5,
+      "stale_after_ms": 300,
+      "primary": false,
+      "failover_to": ["pyth"],
+      "streams": ["depth20@100ms", "trade", "kline_5m"]
+    },
+    {
+      "name": "legacy_weight_2",
+      "source_id": 2,
+      "weight": 0.85
+    },
+    {
+      "name": "legacy_weight_3",
+      "source_id": 3,
+      "weight": 0.50
+    }
+  ],
+  "kline_interval_map": {
+    "5m": "@kline_5m",
+    "15m": "@kline_15m",
+    "1m": "@kline_1m"
+  },
+  "fusion_strategy": {
+    "both_connected": "weighted_average",
+    "single_feed": "pass_through",
+    "none_connected": "fail_closed",
+    "weight_adjust_on_failover": {
+      "pyth_only": 1.0,
+      "binance_only": 1.0
+    }
+  },
+  "circuit_breaker": {
+    "reconnect_base_delay_ms": 100,
+    "reconnect_max_delay_ms": 30000,
+    "half_open_after_sec": 60,
+    "failure_threshold": 5
   }
 }

@@ -69,15 +69,27 @@ struct BinanceConfig {
     static constexpr uint64_t RECONNECT_BASE_DELAY_NS = 1'000'000'000ULL;  // 1s
     static constexpr uint64_t RECONNECT_MAX_DELAY_NS = 30'000'000'000ULL;  // 30s
 
-    // Streams: {symbol}@depth20@100ms/{symbol}@trade/{symbol}@kline_1m
+    // Streams: configurable kline interval for 5m/15m strategy alignment.
+    // Default uses 1m (for high-frequency signal); switch to 5m/15m for
+    // direct candle aggregation and reduced client-side computation.
     const char* symbol = "btcusdt";
     const char* depth_stream = "@depth20@100ms";
     const char* trade_stream = "@trade";
-    const char* kline_stream = "@kline_1m";
+    const char* kline_1m_stream = "@kline_1m";
+    const char* kline_5m_stream = "@kline_5m";
+    const char* kline_15m_stream = "@kline_15m";
+    const char* kline_stream = "@kline_5m";  // ✅ PHASE-1: default to 5m
+
+    // Strategy window: 300 = 5m, 900 = 15m
+    uint32_t strategy_window_seconds = 300;
 
     // Hot-reload from infra/config/source_reliability.json
     const char* source_reliability_path = "infra/config/source_reliability.json";
     double binance_weight = 0.85;
+
+    // Optional CircuitBreaker integration (nullptr = legacy reconnect)
+    // When set, reconnect logic checks CB state: if OPEN, suspend reconnection.
+    void* circuit_breaker = nullptr;  // CircuitBreaker*
 };
 
 // ── Public Interface ───────────────────────────────────────────────────────────
@@ -321,6 +333,18 @@ inline void BinanceWSClient::run_network_loop() {
         asks_.fill(Level{});
 
         if (attempt > 0) {
+            // ✅ PHASE-1: CircuitBreaker integration
+            // If CircuitBreaker is OPEN, suspend reconnection until HALF_OPEN.
+            if (cfg_.circuit_breaker) {
+                auto* cb = static_cast<CircuitBreaker*>(cfg_.circuit_breaker);
+                if (cb->state() == CircuitBreaker::State::OPEN) {
+                    // Respect CB cooldown — sleep longer
+                    std::this_thread::sleep_for(std::chrono::milliseconds(
+                        CircuitBreaker::RECOVERY_CHECK_INTERVAL_MS));
+                    continue;
+                }
+            }
+
             const uint64_t actual_delay = std::min(
                 delay_ns, BinanceConfig::RECONNECT_MAX_DELAY_NS);
             const uint64_t secs = actual_delay / 1'000'000'000ULL;
