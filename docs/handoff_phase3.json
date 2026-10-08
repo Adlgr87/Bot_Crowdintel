@@ -1,0 +1,167 @@
+{
+  "phase": 3,
+  "title": "Network-Layer Primitives: Rate Limiting, Circuit Breaking, and Request Prioritisation",
+  "repo": "/home/adlg/Escritorio/Proyectos/Bot_BajaLatencia/Bot_Crowdintel",
+  "delivered_by": "NETWORK-AGENT (Phase 3 subagent)",
+  "parent_agent": "session-4e953a67-458e-4a65-bcd0-51f43ccc9dea",
+  "summary": "Implements three C++20 header-only components that protect the Polymarket trading bot against Cloudflare HTTP 429 bursts, 5xx cascades, and order-sniping latency. All components are stack-only (zero heap allocation), deterministic via injectable clocks, and pass -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror plus ASan/UBSan clean.",
+
+  "components": [
+    {
+      "name": "TokenBucket + RateLimiter",
+      "header": "core/src/rate_limiter.hpp",
+      "description": "Fixed-point (milli-token) token bucket with multi-request-type support and exponential backoff. Prevents HTTP 429 bursts by gating order/cancel/query egress through per-type token buckets and doubling backoff on each rate-limited response (200→400→800ms, capped at backoff_max_ms).",
+      "api": {
+        "TokenBucket": [
+          "try_consume() — atomic CAS, O(1) hot path, returns bool",
+          "ms_until_available() — returns milliseconds until next token, 0 if available",
+          "refill() — lazy refill using integer milli-token accumulation",
+          "tokens_remaining() — current whole-token count for telemetry",
+          "reset() — restore bucket to full capacity"
+        ],
+        "RateLimiter": [
+          "can_send(RequestType) — checks backoff + token, consumes on success",
+          "on_sent(RequestType) — resets exponential backoff on success",
+          "on_rate_limited(RequestType, retry_ms) — doubles backoff, respects Retry-After",
+          "wait_time_ms(RequestType) — max(backoff_remaining, token_wait)",
+          "backoff_ms(RequestType) — current backoff value (for tests)",
+          "status() — RateStatus snapshot for ORDER type"
+        ],
+        "types": [
+          "RequestType { ORDER=0, CANCEL=1, QUERY=2 }",
+          "RateLimitConfig { orders_per_sec, cancels_per_sec, queries_per_sec, burst_capacity, backoff_base_ms, backoff_max_ms, backoff_multiplier }",
+          "RateStatus { allowed, wait_ms, backoff_ms, tokens_remaining }"
+        ]
+      },
+      "key_design_decisions": [
+        "Milli-tokens (scale=1000) for sub-millisecond refill precision at any integer rate, using purely uint64_t arithmetic — no floating-point drift",
+        "std::atomic<uint64_t> for tokens and last_refill_ms with CAS-based refill claiming to prevent double-refill under contention",
+        "Backoff resets on on_sent() (success); each on_rate_limited() doubles the previous backoff starting from backoff_base_ms",
+        "ClockFn function-pointer injection enables deterministic unit tests without real sleeps"
+      ]
+    },
+    {
+      "name": "CircuitBreaker",
+      "header": "core/src/circuit_breaker.hpp",
+      "description": "State machine that trips OPEN after 3 consecutive failures (429/502/503/timeout), stays OPEN for 5000ms, then probes with 1 trial request (HALF_OPEN). Recovers to CLOSED after 2 successful probes, or returns to OPEN on any probe failure. When OPEN, trading_mode() returns CLOSE_ONLY, signalling WindowShield to force close-only mode.",
+      "api": [
+        "allow_request() — gate check, returns bool",
+        "on_success() — increments success counter in HALF_OPEN, may close circuit",
+        "on_failure() — increments failure counter, may open circuit",
+        "state() — returns CLOSED / OPEN / HALF_OPEN",
+        "ms_until_retry() — remaining OPEN duration (0 when not OPEN)",
+        "trading_mode() — NORMAL (CLOSED), CLOSE_ONLY (OPEN/HALF_OPEN), HALTED",
+        "reset() — returns to CLOSED state"
+      ],
+      "state_machine": {
+        "CLOSED → OPEN": "failure_count >= failure_threshold (default 3)",
+        "OPEN → HALF_OPEN": "now - opened_at_ms >= open_duration_ms (default 5000ms)",
+        "HALF_OPEN → CLOSED": "half_open_successes >= success_threshold (default 2)",
+        "HALF_OPEN → OPEN": "any failure during probing",
+        "OPEN behaviour": "allow_request() returns false; logs 'CB_OPEN: relying on TTL expiry'; trading_mode() == CLOSE_ONLY"
+      },
+      "key_design_decisions": [
+        "Configurable thresholds with production defaults matching Polymarket 5m/15m window semantics",
+        "TradingMode enum provides a clean integration point with WindowShield for strategy-layer mode switching",
+        "Optional LogFn callback for observability (std::printf by default, null in tests)",
+        "All state is plain (non-atomic) — CircuitBreaker is called from a single trading thread",
+        "ms_until_retry() is non-blocking and O(1)"
+      ]
+    },
+    {
+      "name": "RequestPrioritizer",
+      "header": "core/src/request_prioritizer.hpp",
+      "description": "Four-band priority queue (CRITICAL > HIGH > NORMAL > LOW) backed by fixed-capacity ring buffers. Guarantees that order-cancellation and emergency-unwind requests are always dequeued before new entry orders or telemetry queries.",
+      "api": [
+        "enqueue(Priority, id) — returns false if band is full (request is dropped)",
+        "dequeue() — returns Priority of the highest-priority pending request",
+        "last_id() — id of the most recently dequeued request",
+        "cancel(id) — O(n) removal across all bands, preserves FIFO within band",
+        "size(Priority) — count at a given priority level",
+        "size() — total across all bands",
+        "empty() — true when all bands empty"
+      ],
+      "priority_mapping": {
+        "CRITICAL": "cancel orders, emergency unwind",
+        "HIGH": "close-only mode, risk reduction",
+        "NORMAL": "new entry orders",
+        "LOW": "telemetry / queries"
+      },
+      "key_design_decisions": [
+        "FixedRingBuffer<64> per priority band = 256 uint32_t = 1 KiB total stack footprint",
+        "std::array-backed ring buffer with head/tail/count indices — no std::queue/deque/vector",
+        "cancel() uses linear scan + shift to preserve FIFO order within band",
+        "dequeue() checks bands in fixed priority order (CRITICAL→HIGH→NORMAL→LOW)",
+        "priority_order_ is a static constexpr std::array for zero runtime initialisation cost"
+      ]
+    }
+  ],
+
+  "tests": {
+    "test_rate_limiter": {
+      "file": "tests/unit/test_rate_limiter.cpp",
+      "count": 6,
+      "scenarios": [
+        {"name": "test_10_orders_per_second", "description": "10 orders in 1s, 100ms apart — all allowed by rate + burst"},
+        {"name": "test_11th_order_rejected", "description": "10 instant orders exhaust burst=10; 11th rejected; wait_time = 100ms (1 token refill interval)"},
+        {"name": "test_30_cancels_allowed", "description": "30 instant cancels allowed with burst=30, rate=30/s"},
+        {"name": "test_exponential_backoff", "description": "429 backoff: 200→400→800 ms; backoff blocks can_send(); capped at backoff_max_ms; resets on on_sent()"},
+        {"name": "test_burst_20_instant", "description": "20 instant orders allowed at burst=20; 21st rejected"},
+        {"name": "test_post_burst_rate", "description": "After draining 20-token burst, only 10 tokens/s refill in 1s (not 20/s)"}
+      ]
+    },
+    "test_circuit_breaker": {
+      "file": "tests/unit/test_circuit_breaker.cpp",
+      "count": 5,
+      "scenarios": [
+        {"name": "test_three_failures_open", "description": "3 consecutive on_failure() calls → state transitions CLOSED→OPEN"},
+        {"name": "test_open_blocks_requests", "description": "In OPEN state, allow_request() returns false; ms_until_retry > 0"},
+        {"name": "test_half_open_allows_one", "description": "After 5s TTL, OPEN→HALF_OPEN; allow_request() returns true for 1 trial; second request blocked (half_open_max=1)"},
+        {"name": "test_half_open_two_successes_closed", "description": "HALF_OPEN with half_open_max=2: 2 successes → CLOSED"},
+        {"name": "test_open_forces_close_only", "description": "OPEN → trading_mode()==CLOSE_ONLY; HALF_OPEN → CLOSE_ONLY; recovery → NORMAL"}
+      ]
+    },
+    "test_request_prioritizer": {
+      "file": "tests/unit/test_request_prioritizer.cpp",
+      "count": 3,
+      "scenarios": [
+        {"name": "test_priority_ordering", "description": "Enqueue LOW, NORMAL, HIGH, CRITICAL — dequeue returns CRITICAL→HIGH→NORMAL→LOW; last_id() returns dequeued id"},
+        {"name": "test_cancel", "description": "Cancel id=20 removes it from HIGH band; dequeue skips cancelled; nonexistent cancel returns false"},
+        {"name": "test_size_per_priority", "description": "size(Priority) matches enqueued count; 64-slot capacity enforced; 65th push rejected"}
+      ]
+    }
+  },
+
+  "build_verification": {
+    "compiler": "g++ 16.2.1",
+    "cxx_standard": "C++20",
+    "compile_flags": "-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -O1",
+    "all_tests_pass": true,
+    "asan_clean": true,
+    "ubsan_clean": true,
+    "zero_heap_alloc": true,
+    "cmake_targets_added": [
+      "test_rate_limiter",
+      "test_circuit_breaker",
+      "test_request_prioritizer"
+    ],
+    "ctest_entries_added": [
+      "rate_limiter_units",
+      "circuit_breaker_units",
+      "request_prioritizer_units"
+    ],
+    "note": "Full CMake build requires libsecp256k1 (already a hard dependency of the project). Standalone compile with g++ confirmed clean. CMake target configuration verified via a separate minimal CMake project."
+  },
+
+  "integration_points": {
+    "order_gateway": "RateLimiter::can_send() gates each HTTP egress; on 429, on_rate_limited() is called. CircuitBreaker::allow_request() is checked before every send.",
+    "window_shield": "CircuitBreaker::trading_mode() returns CLOSE_ONLY when OPEN/HALF_OPEN. The strategy layer should combine this with WindowShield::current_state() to determine effective mode.",
+    "execution_engine": "RequestPrioritizer::dequeue() feeds the execution engine with priority-ordered requests, ensuring cancels and emergency unwinds are processed first."
+  },
+
+  "known_limitations": [
+    "CircuitBreaker is single-threaded (non-atomic state) — safe for the single-threaded hot path but not thread-safe.",
+    "RequestPrioritizer::cancel() is O(n) per band — acceptable for <64 pending requests, but degrades if the queue fills.",
+    "Backoff uses double for the multiplier — this is exact for multiplier=2.0 but could introduce sub-ULP drift for non-power-of-2 values (acceptable within backoff_max_ms cap)."
+  ]
+}

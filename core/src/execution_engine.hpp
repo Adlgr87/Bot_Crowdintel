@@ -101,6 +101,29 @@ struct TrackerRestate {
 };
 static_assert(std::is_trivially_copyable_v<TrackerRestate>);
 
+// Returns a monotonically increasing day number based on the current UTC
+// calendar date.  Two calls on the same UTC day return the same value; a call
+// after local midnight UTC returns a larger value.  This lets the daily
+// buy-volume cap roll over at the correct boundary without depending on
+// process restarts.  The value is never interpreted as a real date, so it is
+// Y2038-safe on 64-bit time_t.
+inline uint64_t utc_day_number() noexcept {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    // gmtime_r is POSIX; on all target platforms time_t is 64-bit.
+    gmtime_r(&now, &utc);
+    const uint64_t year = static_cast<uint64_t>(utc.tm_year + 1900);
+    const uint64_t month = static_cast<uint64_t>(utc.tm_mon + 1);
+    const uint64_t day = static_cast<uint64_t>(utc.tm_mday);
+    // Days from epoch (1970-01-01) using the civil-from-days algorithm.
+    const uint64_t y = (month <= 2) ? year - 1 : year;
+    const uint64_t era = (y >= 0 ? y : y - 399) / 400;
+    const uint64_t yoe = y - (era * 400);                             // [0, 399]
+    const uint64_t doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const uint64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;       // [0, 146096]
+    return era * 36524 + static_cast<uint64_t>(doe);
+}
+
 // Optional second-generation layers.  Every pointer is nullable; an absent
 // layer preserves the exact pre-existing (legacy) engine behavior, so all
 // original tests and the mock path keep their semantics byte-for-byte.
@@ -303,6 +326,9 @@ public:
             : KellyEngine::kelly_sell(signal.p_win, sizing_price);
         double usd = KellyEngine::position_usd(
             kelly, cfg_.kelly_fraction, cfg_.bankroll_usd);
+        // BUG FIX (A3): Reset daily buy-volume counter on UTC day rollover so
+        // the daily-loss cap window always matches the calendar day.
+        check_daily_reset();
         double available_budget = cfg_.max_order_usd;
         if (side == K_SIDE_BUY) {
             available_budget = std::min(
@@ -310,7 +336,7 @@ public:
                 std::max(0.0, cfg_.max_exposure_usd - exposure_now_usd()));
             available_budget = std::min(
                 available_budget,
-                std::max(0.0, cfg_.max_daily_loss_usd - worst_loss_now_usd()));
+                std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_));
         }
         usd = std::min(usd, available_budget);
         // Volatile regime shrinks passive size (P3): the cold sampler scales
@@ -320,7 +346,12 @@ public:
             if (shrink < 1000)
                 usd = usd * static_cast<double>(shrink) / 1000.0;
         }
-        uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, price);
+        // BUG FIX (A2-pre-size): Size shares against the FEE-ADJUSTED price
+        // (sizing_price, which includes taker fees for BUY) so that the
+        // realized notional + fee stays within max_order_usd.  Using raw
+        // `price` would over-allocate shares whose fee pushes the total
+        // above the cap, causing spurious RISK_REJECTED at the boundary.
+        uint64_t requested_shares = KellyEngine::usd_to_shares_fixed(usd, sizing_price);
 
         const uint64_t visible = side == K_SIDE_BUY ? top.ask.size : top.bid.size;
         requested_shares = std::min(requested_shares, visible);
@@ -341,12 +372,27 @@ public:
         // Hard per-order and portfolio caps.  With the tracker layer attached
         // these read the reconciled worst-cost exposure; without it they keep
         // the legacy local-reservation semantics.
-        const double order_notional = static_cast<double>(
+        //
+        // BUG FIX (A2): order_notional must include the taker fee.
+        // Previously the cap check was fee-blind, so BUY orders could
+        // exceed BOT_MAX_ORDER_USD by the fee amount.  max_order_usd is a
+        // per-order worst-cost cap, so the fee must be included:
+        //   - BUY:  total_cost = notional + fee (fee is additional outflow)
+        //   - SELL: net_value  = notional - fee (conservative: fee reduces
+        //            realized proceeds, lowering economic exposure)
+        // effective_shares is in micro-shares (×1e6); fee_per_share is USD,
+        // so total_fee = fee_per_share * effective_shares * 1e-6 → USD.
+        const double total_fee = fee_per_share *
+            static_cast<double>(effective_shares) * 1e-6;
+        const double base_notional = static_cast<double>(
             side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+        const double order_notional = side == K_SIDE_BUY
+            ? base_notional + total_fee
+            : base_notional - total_fee;
         if (order_notional > cfg_.max_order_usd + 1e-9 ||
             (side == K_SIDE_BUY &&
              (exposure_now_usd() + order_notional > cfg_.max_exposure_usd ||
-              worst_loss_now_usd() + order_notional > cfg_.max_daily_loss_usd)))
+              daily_buy_volume_ + order_notional > cfg_.max_daily_loss_usd)))
             return TickResult::RISK_REJECTED;
         // RiskManager authorization is the ALWAYS-ON line consulted before
         // any signature is produced.  A kill latch or a cap breach denies
@@ -410,11 +456,15 @@ public:
                 effective_shares);
 
         if (!tracker_) {
-            const double accepted_notional = static_cast<double>(
-                side == K_SIDE_BUY ? maker_amount : taker_amount) * 1e-6;
+            // BUG FIX (A3): use the fee-adjusted order_notional (includes fee)
+            // so the daily buy-volume counter is consistent with the cap check.
+            const double accepted_notional = order_notional;
             if (side == K_SIDE_BUY) {
                 committed_exposure_usd_ += accepted_notional;
-                worst_case_loss_usd_ += accepted_notional;
+                // NOTE: daily_buy_volume_ accumulates gross BUY notional
+                // (not just the maker side) and is capped at
+                // BOT_MAX_DAILY_LOSS_USD with a UTC midnight reset.
+                daily_buy_volume_ += accepted_notional;
             } else {
                 // Legacy mode: reserve as if fully filled; never permit two
                 // sells against the same confirmed inventory.
@@ -742,11 +792,20 @@ private:
                         : committed_exposure_usd_;
     }
 
-    // Worst-case day loss budget consumption.  Matches the legacy guarantee:
-    // everything committed may go to zero.  (Realized losses additionally get
-    // accounted by the RiskManager kill switch through the tracker.)
-    double worst_loss_now_usd() const noexcept {
-        return tracker_ ? exposure_now_usd() : worst_case_loss_usd_;
+    // BUG FIX (A3): daily buy-volume accumulator replaces the old
+    // worst_case_loss_usd_.  Only BUY orders (which consume USD) count
+    // toward this daily gross-volume cap.  The counter resets at UTC
+    // midnight so the cap window aligns with the calendar day.
+    double daily_buy_volume() const noexcept { return daily_buy_volume_; }
+
+    // Resets the daily buy-volume counter when the UTC calendar day rolls
+    // over.  Called once per tick, before budgeting.  O(1), no allocation.
+    void check_daily_reset() noexcept {
+        const uint64_t day = utc_day_number();
+        if (daily_buy_volume_day_ != day) {
+            daily_buy_volume_ = 0.0;
+            daily_buy_volume_day_ = day;
+        }
     }
 
     double net_edge(uint8_t side, double p_win, double price) const noexcept {
@@ -845,7 +904,8 @@ private:
     uint64_t dedupe_epoch_ = 0;
     uint64_t confirmed_inventory_ = 0;
     double committed_exposure_usd_ = 0.0;
-    double worst_case_loss_usd_ = 0.0;
+    double daily_buy_volume_ = 0.0;
+    uint64_t daily_buy_volume_day_ = 0;
     uint64_t submitted_ = 0;
     uint64_t queued_ = 0;
     uint64_t submit_failed_ = 0;

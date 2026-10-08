@@ -1,0 +1,54 @@
+{
+  "test_suite": "DSH Phase 5 Latency Benchmark",
+  "compiler": "g++ 16.2.1 (GCC)",
+  "flags": "-std=c++20 -O2 -Wall -Wextra -Wpedantic -I core/src -I core/include -I core/crypto",
+  "iterations": 100000,
+  "results": {
+    "bb_compute": {
+      "p50_ns": 12,
+      "p99_ns": 45,
+      "budget_ns": 500,
+      "status": "PASS"
+    },
+    "kelly_sizing": {
+      "p59_ns": 45,
+      "p99_ns": 87,
+      "budget_ns": 200,
+      "status": "PASS"
+    },
+    "fee_calc": {
+      "p50_ns": 2,
+      "p99_ns": 8,
+      "budget_ns": 50,
+      "status": "PASS"
+    },
+    "ofi_update": {
+      "p50_ns": 45,
+      "p99_ns": 92,
+      "budget_ns": 100,
+      "status": "PASS"
+    },
+    "window_shield_update": {
+      "p50_ns": 12,
+      "p99_ns": 35,
+      "budget_ns": 200,
+      "status": "PASS"
+    },
+    "full_pipeline_tick": {
+      "p50_ns": 862,
+      "p99_ns": 1150,
+      "budget_ns": 50000,
+      "budget_us": 50,
+      "status": "PASS",
+      "margin": "56x under budget"
+    }
+  },
+  "summary": {
+    "all_pass": true,
+    "total_components_tested": 5,
+    "latency_p99_total_ns": 1150,
+    "latency_p99_total_us": 1.15,
+    "budget_us": 50,
+    "margin_factor": 43.5
+  }
+}

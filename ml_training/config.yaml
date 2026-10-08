@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CfC Training Configuration — PHASE 2
+# Closed-Form Continuous-time Network for Polymarket CLOB V2
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Model hyperparameters
+model:
+  n_hidden: 32
+  d_input: 6           # OFI, trade_intensity, spread, depth_imbalance, microprice, mid_velocity
+  dt_seconds: 0.1      # fixed time-step (100ms L2 tick cadence)
+
+# Training data
+data:
+  sources:
+    - binance_l2_100ms_7d:      # Binance L2 snapshots at 100ms cadence, 7 days
+        path: data/binance_l2_sample.parquet
+    - trades_tick_by_tick:      # Polymarket tick-by-tick trades
+        path: data/polymarket_trades_sample.parquet
+    - polymarket_clob_settlements:  # Chainlink settlement prices
+        path: data/polymarket_settlements_sample.parquet
+  label:
+    source: chainlink_settlement_price
+    horizon: 5m                 # predict direction 5 minutes ahead
+  features:
+    - ofi_norm                   # Order Flow Imbalance (normalized)
+    - trade_intensity            # trades per second
+    - spread_bps                 # bid-ask spread in basis points
+    - depth_imbalance            # (bid_depth - ask_depth) / (bid_depth + ask_depth)
+    - microprice                 # weighted mid-price from order book
+    - mid_velocity              # mid-price velocity (price change rate)
+    # Additional features for training (not used directly by CfC D_INPUT=6)
+    - realized_vol_1h           # 1-hour realized volatility
+    - funding_rate              # perpetual funding rate
+    - volume_zscore             # volume z-score vs rolling mean
+  feature_pipeline:
+    normalization: zscore       # z-score normalization per feature
+    oversample_window_seconds: 15  # oversample last 15s of each window
+    train_ratio: 0.85          # 85% train, 15% validation
+
+# Training
+training:
+  loss:
+    function: bce_calibrated    # BCE + Expected Calibration Error penalty
+    ece_threshold: 0.03        # ECE must be < 3%
+    ece_bins: 15              # number of bins for ECE computation
+    penalty_weight: 0.5       # weight of calibration penalty term
+  optimizer:
+    name: adamw
+    lr: 1.0e-3
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+  scheduler:
+    name: cosine_annealing
+    T_max: 50                # epochs
+  walk_forward:
+    train_days: 5
+    validate_days: 1
+    slide_days: 1
+    max_epochs: 50
+    early_stopping:
+      patience: 10           # early stop after 10 epochs without improvement
+      min_delta: 1.0e-5
+      metric: validation_loss
+  batch_size: 256
+  seed: 42
+
+# Export
+export:
+  model_path: infra/models/cfc_btc_5m_v1.bin
+  dtype: float32
+  # Binary layout order: W_x, W_h, b, W_gx, W_gh, b_g, W_tau, b_tau, W_out, b_out
+  # Each weight stored in row-major format, no headers (raw floats)
+  write_sha256: true     # prepend 64-byte SHA256 hex header
+
+# Walk-forward backtest
+backtest:
+  initial_capital_usd: 10000.0
+  position_sizing: kelly_half   # half-Kelly for risk control
+  fee_bps: 10                 # maker fee 10bps (Polymarket CLOB V2)
+  slippage_bps: 5            # assumed slippage per trade
+  min_confidence: 0.70       # minimum p_up to trade
+  max_daily_trades: 50
+  max_drawdown_pct: 0.15    # max 15% drawdown before stop

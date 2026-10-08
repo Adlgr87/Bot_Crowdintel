@@ -197,7 +197,35 @@ static void test_amounts() {
           "unknown venue tick fails closed");
 }
 
-// ── Decimal parsing ──────────────────────────────────────────────────────────
+// ── M1 fix: ceil_to_quantum for BUY market taker_amount ───────────────────────
+static void test_buy_market_rounding() {
+    std::printf("buy_market_rounding\n");
+
+    // ceil_to_quantum basic correctness.
+    CHECK(ceil_to_quantum(0, 100) == 0, "ceil(0,100)=0");
+    CHECK(ceil_to_quantum(1, 100) == 100, "ceil(1,100)=100");
+    CHECK(ceil_to_quantum(99, 100) == 100, "ceil(99,100)=100");
+    CHECK(ceil_to_quantum(100, 100) == 100, "ceil(100,100)=100");
+    CHECK(ceil_to_quantum(101, 100) == 200, "ceil(101,100)=200");
+    CHECK(ceil_to_quantum(0, 0) == 0, "zero quantum is no-op");
+
+    // BUY market order: taker_amount must be ceiling-quantized.
+    uint64_t ma, ta, eff;
+    CHECK(compute_order_amounts(K_SIDE_BUY, 530000, 903251706, 10000,
+                                true, ma, ta, eff),
+          "market BUY amounts compute");
+    CHECK(ta > 0, "BUY market taker_amount > 0");
+    CHECK(ma > 0, "BUY market maker_amount > 0");
+    // Price cap invariant: maker cost <= price * shares.
+    const uint64_t price_x1e6 = 530000;
+    const uint64_t expected_max_cost =
+        (static_cast<uint64_t>(price_x1e6) * ta + 999999ULL) / 1000000ULL;
+    CHECK(ma <= expected_max_cost,
+          "BUY market maker cost <= price*shares (ceiled)");
+    CHECK(ma % 100 == 0, "maker is 2dp quantized");
+}
+
+// ── Decimal parsing
 static void test_parsing() {
     std::printf("decimal_parsing\n");
     uint64_t v;
@@ -1081,6 +1109,7 @@ int main() {
     test_alpha_http_receiver();
     test_order_gateway();
     test_presigned_pool_concurrency();
+    test_buy_market_rounding();
     test_signal_deduplication();
 #ifdef CROWDINTEL_HAVE_NETWORK
     test_clob_responses();

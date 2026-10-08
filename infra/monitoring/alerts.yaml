@@ -1,0 +1,81 @@
+# Monitoring alerts for CrowdIntel canary deployment
+# Consumed by Prometheus Alertmanager or the bot's internal metrics scraper.
+
+alerts:
+  # ── CRITICAL (halt immediately) ──────────────────────────────────────────────
+  - name: crash_or_fail_closed
+    severity: critical
+    expr: crowdintel_crashes_total > 0 OR crowdintel_fail_closed_total > 0
+    annotation: "Bot crashed or entered fail-closed state."
+
+  - name: daily_pnl_breach
+    severity: critical
+    expr: crowdintel_daily_pnl_pct < -5.0
+    annotation: "Daily PnL below -5% bankroll. Halt + manual review."
+
+  - name: memory_exceeded
+    severity: critical
+    expr: crowdintel_rss_mb > 100
+    annotation: "Memory RSS exceeded 100MB. Possible leak."
+
+  - name: cb_open_duration
+    severity: critical
+    expr: crowdintel_cb_open_seconds > 60
+    annotation: "CircuitBreaker OPEN for >60s."
+
+  - name: cb_open_frequency
+    severity: critical
+    expr: rate(crowdintel_cb_open_total[1h]) > 3
+    annotation: "CircuitBreaker OPEN > 3 times in 1 hour. Halt."
+
+  # ── WARNING (investigate) ────────────────────────────────────────────────────
+  - name: winrate_low
+    severity: warning
+    expr: crowdintel_winrate_24h < 0.50
+    annotation: "Win rate below 50% in 24h."
+
+  - name: drawdown_exceeded
+    severity: warning
+    expr: crowdintel_max_drawdown > 0.03
+    annotation: "Max drawdown > 3%."
+
+  - name: latency_p99_exceeded
+    severity: warning
+    expr: crowdintel_latency_p99_us > 100
+    annotation: "Latency p99 > 100μs. Investigate hot path."
+
+  - name: min_edge_violation
+    severity: warning
+    expr: crowdintel_min_edge < 0.005
+    annotation: "Observed edge below 0.5% min threshold after fees. Review model calibration."
+
+  - name: rate_limited
+    severity: warning
+    expr: rate(crowdintel_429_total[1m]) > 5
+    annotation: ">5 HTTP 429s per minute. Auto-throttling."
+
+  - name: bb_calibration_drift
+    severity: warning
+    expr: crowdintel_bb_ece > 0.05
+    annotation: "Brownian Bridge calibration ECE > 0.05. Volatility may be miscalibrated."
+
+  # ── INFO (log only) ───────────────────────────────────────────────────────────
+  - name: window_completed
+    severity: info
+    expr: crowdintel_windows_completed_total > 0
+    annotation: "Time window completed. Logging."
+
+  - name: ofi_extreme_event
+    severity: info
+    expr: crowdintel_ofi_extreme_total > 0
+    annotation: "OFI EXTREME pressure detected. WindowShield in CLOSE_ONLY."
+
+  - name: cb_transition
+    severity: info
+    expr: crowdintel_cb_transitions_total > 0
+    annotation: "CircuitBreaker state transition."
+
+  - name: rate_limit_throttle
+    severity: info
+    expr: crowdintel_auto_throttle_total > 0
+    annotation: "Rate limit auto-throttle engaged."

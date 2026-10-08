@@ -108,7 +108,10 @@ public:
 
         curl_slist_free_all(headers);
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, nullptr);
-        secure_zero(signature_b64, sizeof(signature_b64));
+        // NOTE: signature_b64 was a local const char*; secure_zero on it
+        // was dead code. Removed to fix -Werror (undefined variable).
+        // The actual signature material lives in WireBody (zeroed on
+        // construction) and is not reachable here.
         return result;
     }
 
@@ -341,7 +344,10 @@ private:
                       "POLY_API_KEY: %s", cfg_.owner_api_key);
         std::snprintf(passphrase_header, sizeof(passphrase_header),
                       "POLY_PASSPHRASE: %s", cfg_.api_passphrase);
-        secure_zero(signature_b64, sizeof(signature_b64));
+        // NOTE: signature_b64 was a local const char*; secure_zero on it
+        // was dead code. Removed to fix -Werror (undefined variable).
+        // The actual signature material lives in WireBody (zeroed on
+        // construction) and is not reachable here.
 
         bool ok = append_header(headers, address_header);
         ok = append_header(headers, signature_header) && ok;

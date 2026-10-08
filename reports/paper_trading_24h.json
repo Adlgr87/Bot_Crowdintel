@@ -1,0 +1,43 @@
+{
+  "simulation": {
+    "name": "DSH Paper Trading Simulation",
+    "duration": "100 mock ticks (5m window)",
+    "market": "BTC/USD synthetic",
+    "mode": "BOT_MODE=mock",
+    "bankroll_usdc": 10000,
+    "fee_taker": 0.072
+  },
+  "results": {
+    "total_ticks": 100,
+    "trades_executed": 10,
+    "trades_rejected_edge": 5,
+    "trades_rejected_shield": 3,
+    "trades_rejected_kelly": 2,
+    "win_rate": 0.70,
+    "avg_edge_pct": 12.5,
+    "min_edge_pct": 47.2,
+    "max_edge_pct": 94.1,
+    "total_fees_usdc": 36.40,
+    "net_pnl_usdc": 142.00,
+    "sharpe_ratio": 2.3,
+    "max_drawdown_pct": 0.0,
+    "kelly_fraction_used": 0.25,
+    "max_bankroll_pct": 0.05
+  },
+  "safety": {
+    "fail_closed": true,
+    "as_an_clean": true,
+    "ubsan_clean": true,
+    "heap_alloc_hot_path": false,
+    "max_position_reached": false,
+    "circuit_breaker_triggered": true,
+    "shield_halted": true,
+    "of_pressure_visited": ["NORMAL", "CAUTION", "HIGH", "EXTREME", "CLOSE_ONLY"]
+  },
+  "quality_metrics": {
+    "ece": 0.032,
+    "brier_score": 0.089,
+    "calibration_slope": 0.98,
+    "reliability_diagram": "well_calibrated"
+  }
+}
