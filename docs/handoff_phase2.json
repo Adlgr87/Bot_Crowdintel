@@ -1,0 +1,39 @@
+{
+  "phase_id": "P2",
+  "phase_name": "Defense Layer — OFI Linear Filter + WindowShield Integration",
+  "status": "complete",
+  "files_created": [
+    {
+      "path": "core/src/ofi_linear_filter.hpp",
+      "class": "OfiLinearFilter",
+      "description": "Cont et al. (2014) Order Flow Imbalance with EWMA smoothing and z-score thresholds. 4 pressure levels: NORMAL/CAUTION/HIGH/EXTREME. Deterministic, zero-heap.",
+      "key_methods": ["on_book_update(bid_vol, ask_vol, bid_vol_prev, ask_vol_prev, best_bid, best_bid_prev, best_ask, best_ask_prev, ts_ms)", "current_state()", "reset()", "ofi_direction()"]
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "core/src/window_shield.hpp",
+      "description": "Added OfiPressure enum, ofi_pressure_ member, and CLOSE_ONLY override when OFI pressure is EXTREME. update() now accepts optional OfiPressure parameter (default NORMAL).",
+      "changes": [
+        "Added #include ofi_linear_filter.hpp",
+        "Added OfiPressure enum class (NORMAL/CAUTION/HIGH/EXTREME)",
+        "Added ofi_pressure_ member to ShieldStateInfo",
+        "Added ofi_pressure_ member to WindowShield class",
+        "update() now accepts OfiPressure parameter, forces CLOSE_ONLY on EXTREME",
+        "snapshot() returns ofi_pressure field"
+      ]
+    }
+  ],
+  "files_archived": [],
+  "tests_created": [
+    "tests/unit/test_ofi_filter.cpp — 8 tests (13 checks, all pass)",
+    "tests/unit/test_window_shield.cpp — 8 tests (12 checks, all pass)"
+  ],
+  "tests_passed": [
+    "test_ofi_filter: 13/13 checks passed",
+    "test_window_shield: 12/12 checks passed"
+  ],
+  "blockers": [],
+  "ready_for_integration": true,
+  "integration_notes": "When OfiPressure::EXTREME, WindowShield::update() forces ShieldState::CLOSE_ONLY regardless of time-in-window. Pressure level is stored in ShieldStateInfo::ofi_pressure for strategy layer consumption. WindowShield snapshot now includes ofi_pressure field."
+}

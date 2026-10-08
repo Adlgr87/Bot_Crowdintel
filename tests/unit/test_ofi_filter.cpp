@@ -50,7 +50,7 @@ int main() {
                 100.0, 100.0,  // prev
                 50000.0, 50000.0,
                 50001.0, 50001.0,
-                1700000000ULL + i * 1000ULL
+                1700000000ULL + static_cast<uint64_t>(i) * 1000ULL
             );
         }
         auto state = ofi.current_state();
@@ -69,7 +69,7 @@ int main() {
                 100.0, 100.0,
                 50000.0 - i * 0.1, 50000.0,   // bid drops slightly
                 50002.0 + i * 0.1, 50001.0,   // ask rises → e_a = -100 (negative)
-                1700000000ULL + i * 1000ULL
+                1700000000ULL + static_cast<uint64_t>(i) * 1000ULL
             );
         }
         auto state = ofi.current_state();
@@ -91,7 +91,7 @@ int main() {
                 10.0, 10.0,
                 50000.0, 50000.0,
                 50001.0, 50001.0,
-                1700000000ULL + i * 1000ULL
+                1700000000ULL + static_cast<uint64_t>(i) * 1000ULL
             );
         }
         auto state = ofi.current_state();
@@ -113,12 +113,12 @@ int main() {
                 // Strong buy: bid grows, ask shrinks
                 ofi.on_book_update(200.0, 50.0, 100.0, 100.0,
                                    50000.5, 50000.0, 50001.0, 50001.0,
-                                   1700000000ULL + i * 1000ULL);
+                                   1700000000ULL + static_cast<uint64_t>(i) * 1000ULL);
             } else {
                 // Neutral: no volume change
                 ofi.on_book_update(100.0, 100.0, 100.0, 100.0,
                                    50000.0, 50000.0, 50001.0, 50001.0,
-                                   1700000000ULL + i * 1000ULL);
+                                   1700000000ULL + static_cast<uint64_t>(i) * 1000ULL);
             }
         }
         auto state = ofi.current_state();
@@ -159,7 +159,7 @@ int main() {
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < 10000; i++) {
             ofi.on_book_update(100, 100, 100, 100, 50000, 50000, 50001, 50001,
-                               base + i * 100ULL);
+                               base + static_cast<uint64_t>(i) * 100ULL);
         }
         auto end = std::chrono::high_resolution_clock::now();
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();

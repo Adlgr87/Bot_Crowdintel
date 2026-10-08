@@ -1,0 +1,113 @@
+{
+  "phase": 4,
+  "name": "Strategy Components — Fees, Kelly, Ladder, Time",
+  "status": "complete",
+  "language": "C++20",
+  "build_flags": "-Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer",
+  "zero_heap_alloc": true,
+  "asn_clean": true,
+  "ubsan_clean": true,
+  "components": {
+    "fee_calculator": {
+      "file": "core/src/fee_calculator.hpp",
+      "class": "FeeCalculator",
+      "api": {
+        "taker_fee(price)": "0.072 * price * (1 - price)",
+        "maker_fee(price)": "0.0 (liquidity provision)",
+        "breakeven_winrate(price, is_taker)": "price + (is_taker ? taker_fee(price) : 0.0)",
+        "edge_after_fees(p_model, market_price, is_taker)": "p_model - market_price - fee"
+      },
+      "notes": [
+        "Taker fee = 7.2% of the binary payout (price * (1-price)).",
+        "Breakeven win-rate at price=0.50, taker = 51.8%.",
+        "Edge < fee → negative EV, no trade opportunity.",
+        "Pure functions, no instance state, noexcept."
+      ]
+    },
+    "kelly_sizer": {
+      "file": "core/src/kelly_sizer.hpp",
+      "class": "KellySizer",
+      "replaces": "core/src/archive/kelly_sizer.hpp.archived (old API: KellyConfig, KellyOutput, compute_fraction)",
+      "config_struct": "Config { kelly_fraction=0.25, max_bankroll_pct=0.05, min_edge=0.005, max_position=100.0 }",
+      "result_struct": "SizingResult { should_trade, size_shares, size_usdc, kelly_raw, kelly_fractioned, edge, fee_cost }",
+      "logic": [
+        "edge = p_model - market_price - fee (fee from FeeCalculator)",
+        "if edge < min_edge: should_trade = false",
+        "odds = (1/market_price) - 1; q = 1 - p_model",
+        "kelly_raw = (p_model * odds - q) / odds",
+        "if kelly_raw <= 0: should_trade = false",
+        "kelly_fractioned = kelly_raw * kelly_fraction",
+        "inv_adjust = clamp(1 - |inventory|, 0, inf)",
+        "vol_adjust = 1 / (1 + max(0, vol_z_score))",
+        "kelly_fractioned *= inv_adjust * vol_adjust * ofi_size_multiplier",
+        "size_usdc = min(kelly_fractioned * bankroll, bankroll * max_bankroll_pct)",
+        "size_shares = min(size_usdc / market_price, max_position)",
+        "if size_shares < 1: should_trade = false (floor)"
+      ],
+      "consumers_updated": [
+        "core/src/engine_extensions.hpp (uses new Config/SizingResult API)",
+        "tests/integration/test_pipeline.cpp (adapted to Polymarket binary-market pricing)"
+      ]
+    },
+    "ladder_builder": {
+      "file": "core/src/ladder_builder.hpp",
+      "class": "LadderBuilder",
+      "replaces": "core/src/archive/ladder_skew.hpp.archived (old API: LadderSkewer, ConvictionInput, LadderOutput)",
+      "quote_struct": "Quote { bid_price, ask_price, bid_size, ask_size, is_active }",
+      "logic": [
+        "spread = clamp(spread_base * vol_multiplier, 1.0, 10.0) cents",
+        "bb_skew = (p_up - 0.5) * 2; ofi_skew = ofi_direction * 0.3; inv_skew = -inventory * 0.5",
+        "skew = clamp(bb_skew*0.5 + ofi_skew*0.2 + inv_skew*0.3, -0.7, 0.7)",
+        "bid_price = clamp(market_mid - spread/200*(1-skew), 0.01, 0.99)",
+        "ask_price = clamp(market_mid + spread/200*(1+skew), 0.01, 0.99)",
+        "bid_size = 10 * ofi_multiplier * (1 + skew); ask_size = 10 * ofi_multiplier * (1 - skew)",
+        "|inventory| > 0.8 and inv > 0: only ask (bid_size = 0)",
+        "|inventory| > 0.8 and inv < 0: only bid (ask_size = 0)",
+        "is_active = (ofi_multiplier > 0)"
+      ]
+    },
+    "time_strategy": {
+      "file": "core/src/time_strategy.hpp",
+      "class": "TimeStrategy",
+      "config_struct": "TimeConfig { size_mult, spread_mult, confidence_threshold }",
+      "schedule": {
+        "00-05 (Asia lull)":    { "size_mult": 1.3, "spread_mult": 1.0, "confidence_threshold": 0.55 },
+        "06-12 (US open-noon)": { "size_mult": 1.0, "spread_mult": 1.0, "confidence_threshold": 0.60 },
+        "13-16 (US afternoon)": { "size_mult": 0.5, "spread_mult": 1.5, "confidence_threshold": 0.70 },
+        "17-19 (US close)":      { "size_mult": 0.8, "spread_mult": 1.0, "confidence_threshold": 0.60 },
+        "20 (settlement edge)":  { "size_mult": 0.3, "spread_mult": 2.0, "confidence_threshold": 0.75 },
+        "21-23 (overnight)":    { "size_mult": 1.1, "spread_mult": 1.0, "confidence_threshold": 0.58 }
+      },
+      "api": "static TimeConfig get_time_config(uint32_t hour_utc)"
+    }
+  },
+  "tests": {
+    "test_fees": {
+      "file": "tests/unit/test_fees.cpp",
+      "test_count": 6,
+      "checks": 10,
+      "status": "all_pass"
+    },
+    "test_kelly": {
+      "file": "tests/unit/test_kelly.cpp",
+      "test_count": 7,
+      "checks": 28,
+      "status": "all_pass"
+    },
+    "test_ladder": {
+      "file": "tests/unit/test_ladder.cpp",
+      "test_count": 4,
+      "checks": 18,
+      "status": "all_pass"
+    }
+  },
+  "build_system": {
+    "cmakelists": "core/CMakeLists.txt",
+    "new_targets": ["test_fees", "test_kelly", "test_ladder"],
+    "ctest_entries": ["fee_units", "kelly_units", "ladder_units"]
+  },
+  "archived_files": [
+    "core/src/archive/kelly_sizer.hpp.archived",
+    "core/src/archive/ladder_skew.hpp.archived"
+  ]
+}
