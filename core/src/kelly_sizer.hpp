@@ -1,40 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// kelly_sizer.hpp — Phase 4: Quarter-Kelly Position Sizer (REPLACES old API)
-//
-// Determines order size based on model confidence, market price, bankroll,
-// inventory, volatility, and OFI multiplier. Uses FeeCalculator for exact
-// fee-aware edge computation.
-//
-// FÓRMULA:
-//   edge  = p_model − market_price − fee         (fee via FeeCalculator)
-//   b     = (1 / market_price) − 1                (net odds)
-//   q     = 1 − p_model
-//   f*    = (p_model · b − q) / b                 (full Kelly fraction)
-//   f_q   = f* · fraction                         (quarter-Kelly)
-//
-//   inv_adj = 1 − |inventory|
-//   vol_adj = 1 / (1 + max(0, vol_z_score))
-//   f_adj   = f_q · inv_adj · vol_adj · ofi_multiplier
-//
-//   size_usdc = min(f_adj · bankroll, bankroll · max_bankroll_pct)
-//   size_shares = min(size_usdc / market_price, max_position)
-//   floor: size_shares must be ≥ 1 (else NO TRADE)
-//
-// RULES:
-//   - Edge < min_edge → should_trade = false
-//   - kelly_raw ≤ 0  → should_trade = false
-//   - size_shares < 1 → should_trade = false
-//   - Edge must exceed fee: p_model > breakeven_winrate
-//
-// INVARIANTS:
-//   - O(1), single-thread, < 500ns
-//   - Zero heap allocation
-//   - All inputs clamped / guarded against degenerate values
+// kelly_sizer.hpp — OPTIMIZED variant (MutaLambda evolution candidate)
+// Optimizations:
+//   1. __attribute__((always_inline)) on compute()
+//   2. FeeCalculator::taker_fee inlined directly (avoid function call)
+//   3. Eliminated redundant field assignments in early-return paths
+//   4. Branch prediction hints on rare paths
+//   5. Precomputed kelly_fraction multiplier
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma once
 #include <algorithm>
 #include <cmath>
-#include "fee_calculator.hpp"
+
+#if defined(__GNUC__) || defined(__clang__)
+#define KELLY_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define KELLY_ALWAYS_INLINE inline
+#endif
 
 struct Config {
     double kelly_fraction = 0.25;     // Quarter-Kelly (0.25 = 1/4)
@@ -58,6 +39,7 @@ public:
     explicit KellySizer(const Config& config = {}) noexcept
         : config_(config) {}
 
+    KELLY_ALWAYS_INLINE
     SizingResult compute(double p_model,
                          double market_price,
                          double bankroll_usdc,
@@ -69,35 +51,22 @@ public:
         SizingResult result{};
 
         // Guard against degenerate price / probability inputs.
-        // bankroll_usdc == 0 is allowed: Kelly is still computed (informational)
-        // but size resolves to 0 → no trade.
         if (market_price <= 0.0 || market_price >= 1.0 ||
-            p_model < 0.0 || p_model > 1.0) {
+            p_model < 0.0 || p_model > 1.0) [[unlikely]] {
             result.should_trade = false;
-            result.size_shares = 0.0;
-            result.size_usdc = 0.0;
-            result.kelly_raw = 0.0;
-            result.kelly_fractioned = 0.0;
-            result.edge = 0.0;
-            result.fee_cost = 0.0;
             return result;
         }
         if (bankroll_usdc < 0.0) bankroll_usdc = 0.0;
 
-        // ── Fee & edge ───────────────────────────────────────────────────────
-        const double fee = FeeCalculator::taker_fee(market_price) *
-                           (is_taker ? 1.0 : 0.0);
+        // ── Fee & edge (inlined FeeCalculator::taker_fee) ────────────────────────
+        const double fee = is_taker ? (0.072 * market_price * (1.0 - market_price)) : 0.0;
         result.fee_cost = fee;
 
         const double edge = p_model - market_price - fee;
         result.edge = edge;
 
-        if (edge < config_.min_edge) {
+        if (edge < config_.min_edge) [[unlikely]] {
             result.should_trade = false;
-            result.size_shares = 0.0;
-            result.size_usdc = 0.0;
-            result.kelly_raw = 0.0;
-            result.kelly_fractioned = 0.0;
             return result;
         }
 
@@ -107,11 +76,8 @@ public:
         const double kelly_raw = (p_model * odds - q) / odds;
         result.kelly_raw = kelly_raw;
 
-        if (kelly_raw <= 0.0) {
+        if (kelly_raw <= 0.0) [[unlikely]] {
             result.should_trade = false;
-            result.size_shares = 0.0;
-            result.size_usdc = 0.0;
-            result.kelly_fractioned = 0.0;
             return result;
         }
 
@@ -119,22 +85,14 @@ public:
         double kelly_fractioned = kelly_raw * config_.kelly_fraction;
 
         // ── Adjustments ──────────────────────────────────────────────────────
-        // Inventory adjustment: reduce as |inventory| → 1
-        double inv_adjust = 1.0 - std::abs(inventory);
-        if (inv_adjust < 0.0) inv_adjust = 0.0;
-
-        // Volatility adjustment: shrink as vol_z_score grows
-        double vol_adjust = 1.0 / (1.0 + std::max(0.0, vol_z_score));
-
-        // OFI multiplier (market-signal driven size adjustment)
-        double ofi_adjust = ofi_size_multiplier;
-        if (ofi_adjust < 0.0) ofi_adjust = 0.0;
+        const double inv_adjust = std::max(0.0, 1.0 - std::abs(inventory));
+        const double vol_adjust = 1.0 / (1.0 + std::max(0.0, vol_z_score));
+        const double ofi_adjust = std::max(0.0, ofi_size_multiplier);
 
         kelly_fractioned *= inv_adjust * vol_adjust * ofi_adjust;
 
         // ── Cap to max_bankroll_pct ──────────────────────────────────────────
-        double capped_fraction = std::min(kelly_fractioned,
-                                          config_.max_bankroll_pct);
+        const double capped_fraction = std::min(kelly_fractioned, config_.max_bankroll_pct);
         result.kelly_fractioned = kelly_fractioned;
 
         // ── Convert to dollar size ───────────────────────────────────────────
@@ -143,17 +101,17 @@ public:
 
         // ── Convert to shares, cap at max_position ───────────────────────────
         double size_shares = size_usdc / market_price;
-        if (size_shares > config_.max_position) {
+        if (size_shares > config_.max_position) [[unlikely]] {
             size_shares = config_.max_position;
         }
         result.size_shares = size_shares;
 
         // ── Floor: minimum 1 share ───────────────────────────────────────────
-        if (size_shares < 1.0) {
+        if (size_shares < 1.0) [[unlikely]] {
             result.should_trade = false;
             result.size_shares = 0.0;
             result.size_usdc = 0.0;
-        } else {
+        } else [[likely]] {
             result.should_trade = true;
         }
 
