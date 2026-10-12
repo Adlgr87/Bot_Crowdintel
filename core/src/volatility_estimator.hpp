@@ -40,9 +40,7 @@ public:
     };
 
     explicit VolatilityEstimator(const Config& cfg) noexcept
-        : cfg_(cfg),
-          sqrt_inv_fast_(cfg.lambda_fast * cfg.lambda_fast),
-          sqrt_inv_slow_(cfg.lambda_slow * cfg.lambda_slow) {}
+        : cfg_(cfg) {}
 
     VOL_ALWAYS_INLINE
     void on_log_return(double log_ret, double dt_sec) noexcept {
@@ -139,8 +137,6 @@ private:
     double var_slow_ = 0.0;
     double last_dt_sec_ = 0.0;
     double no_trade_timer_sec_ = 0.0;
-    double sqrt_inv_fast_;
-    double sqrt_inv_slow_;
 
     static constexpr double SECS_PER_YEAR = 365.0 * 24.0 * 3600.0;
     static constexpr double SECS_PER_YEAR_INV = 1.0 / SECS_PER_YEAR;
