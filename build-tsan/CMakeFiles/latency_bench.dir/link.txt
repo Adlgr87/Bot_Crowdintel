@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wno-error=unused-private-field -O3 -DNDEBUG -fsanitize=thread -Xlinker --dependency-file=CMakeFiles/latency_bench.dir/link.d CMakeFiles/latency_bench.dir/home/adlg/work/Bot_Crowdintel/tests/benchmarks/latency_bench.cpp.o -o bin/latency_bench  /tmp/secp256k1/build/lib/libsecp256k1.a

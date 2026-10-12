@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/l2_backtester.dir/link.d CMakeFiles/l2_backtester.dir/home/adlg/work/Bot_Crowdintel/tests/replay/l2_backtester.cpp.o -o bin/l2_backtester  /tmp/secp256k1/.libs/libsecp256k1.a

@@ -79,17 +79,23 @@ bool cold_bootstrap_reconcile(const char* api_key,
         
         CURLcode rc = curl_easy_perform(curl);
         
-        if (rc == CURLE_OK) {
-            // Check if response indicates state consistency
-            // PERF: Simple JSON validation, no allocation
-            if (strstr(resp.data, "\"status\":\"ok\"") || resp.size > 0) {
-                // State reconciled — release WindowShield
-                window_shield_state = 0;  // NORMAL state
+        // CRITICAL FIX ID-C01: Must check HTTP status code AND validate state
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        
+        if (rc == CURLE_OK && http_code == 200) {
+            // State reconciled — release WindowShield
+            // Fail-closed: only release if HTTP 200 AND status field is "ok"
+            if (strstr(resp.data, "\"status\":\"ok\"") || 
+                strstr(resp.data, '"status":"ok"')) {
+                window_shield_state.store(0, std::memory_order_release);
                 curl_slist_free_all(headers);
                 curl_easy_cleanup(curl);
                 return true;
             }
         }
+        // Fail-closed: any non-200 or invalid body keeps WindowShield BLOQUEADO
+        backoff.sleep();
         
         // Exponential backoff on failure
         backoff.sleep();

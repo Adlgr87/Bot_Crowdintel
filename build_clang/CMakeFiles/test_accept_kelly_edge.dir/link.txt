@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_accept_kelly_edge.dir/link.d CMakeFiles/test_accept_kelly_edge.dir/home/adlg/work/Bot_Crowdintel/tests/acceptance/test_accept_kelly_edge.cpp.o -o bin/test_accept_kelly_edge  /tmp/secp256k1/.libs/libsecp256k1.a

@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_dsh_pipeline.dir/link.d CMakeFiles/test_dsh_pipeline.dir/home/adlg/work/Bot_Crowdintel/tests/integration/test_dsh_pipeline.cpp.o -o bin/test_dsh_pipeline  /tmp/secp256k1/.libs/libsecp256k1.a

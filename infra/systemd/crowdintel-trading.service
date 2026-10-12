@@ -1,0 +1,22 @@
+[Unit]
+Description=Bot_Crowdintel Trading Bot (CPU-Isolated)
+After=network-online.target
+
+[Service]
+Type=simple
+User=trading
+Group=trading
+# PERF: taskset -c 2,3 isolates bot to dedicated cores (no scheduler contention)
+ExecStart=/usr/bin/taskset -c 2,3 /usr/local/bin/crowdintel_bot --config /etc/crowdintel/config.json
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=99
+CPUAffinity=2,3
+
+# PERF: Disable NUMA balancing (can cause 5-10µs latency spikes)
+Environment=NUMA_BALANCING=0
+
+[Install]
+WantedBy=multi-user.target

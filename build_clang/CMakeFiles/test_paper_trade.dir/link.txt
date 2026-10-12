@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_paper_trade.dir/link.d CMakeFiles/test_paper_trade.dir/home/adlg/work/Bot_Crowdintel/tests/integration/test_paper_trade.cpp.o -o bin/test_paper_trade  /tmp/secp256k1/.libs/libsecp256k1.a

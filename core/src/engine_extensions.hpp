@@ -48,7 +48,9 @@
 //
 // Integration approach: the hot path checks these pointers first; if nullptr,
 // it skips the new logic and falls through to legacy behavior.
-struct ExtendedEngineLayers {
+// CRITICAL FIX ID-C03: alignas(64) prevents false sharing between
+// trading thread (writes pointer updates) and strategy thread (reads)
+struct alignas(64) ExtendedEngineLayers {
     // ---- Existing layers (copied from EngineLayers for convenience) ----
     SPSC_RingBuffer<JournalEvent>* journal_q = nullptr;
     PositionTracker* tracker = nullptr;

@@ -336,7 +336,7 @@ public:
                 std::max(0.0, cfg_.max_exposure_usd - exposure_now_usd()));
             available_budget = std::min(
                 available_budget,
-                std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_));
+                std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_.load(std::memory_order_acquire)));
         }
         usd = std::min(usd, available_budget);
         // Volatile regime shrinks passive size (P3): the cold sampler scales
@@ -392,7 +392,7 @@ public:
         if (order_notional > cfg_.max_order_usd + 1e-9 ||
             (side == K_SIDE_BUY &&
              (exposure_now_usd() + order_notional > cfg_.max_exposure_usd ||
-              daily_buy_volume_ + order_notional > cfg_.max_daily_loss_usd)))
+              daily_buy_volume_.load(std::memory_order_acquire) + order_notional > cfg_.max_daily_loss_usd)))
             return TickResult::RISK_REJECTED;
         // RiskManager authorization is the ALWAYS-ON line consulted before
         // any signature is produced.  A kill latch or a cap breach denies
@@ -464,7 +464,9 @@ public:
                 // NOTE: daily_buy_volume_ accumulates gross BUY notional
                 // (not just the maker side) and is capped at
                 // BOT_MAX_DAILY_LOSS_USD with a UTC midnight reset.
-                daily_buy_volume_ += accepted_notional;
+                // CRITICAL FIX ID-C02: atomic update to prevent torn read/data race
+                // with reporting thread. Uses fetch_add for lock-free thread safety.
+                daily_buy_volume_.fetch_add(accepted_notional, std::memory_order_acq_rel);
             } else {
                 // Legacy mode: reserve as if fully filled; never permit two
                 // sells against the same confirmed inventory.
@@ -796,15 +798,17 @@ private:
     // worst_case_loss_usd_.  Only BUY orders (which consume USD) count
     // toward this daily gross-volume cap.  The counter resets at UTC
     // midnight so the cap window aligns with the calendar day.
-    double daily_buy_volume() const noexcept { return daily_buy_volume_; }
+    double daily_buy_volume() const noexcept { 
+        return daily_buy_volume_.load(std::memory_order_acquire); 
+    }
 
     // Resets the daily buy-volume counter when the UTC calendar day rolls
     // over.  Called once per tick, before budgeting.  O(1), no allocation.
     void check_daily_reset() noexcept {
         const uint64_t day = utc_day_number();
-        if (daily_buy_volume_day_ != day) {
-            daily_buy_volume_ = 0.0;
-            daily_buy_volume_day_ = day;
+        if (daily_buy_volume_day_.load(std::memory_order_acquire) != day) {
+            daily_buy_volume_.store(0.0, std::memory_order_release);
+            daily_buy_volume_day_.store(day, std::memory_order_release);
         }
     }
 
@@ -904,8 +908,8 @@ private:
     uint64_t dedupe_epoch_ = 0;
     uint64_t confirmed_inventory_ = 0;
     double committed_exposure_usd_ = 0.0;
-    double daily_buy_volume_ = 0.0;
-    uint64_t daily_buy_volume_day_ = 0;
+    std::atomic<double> daily_buy_volume_{0.0};
+    std::atomic<uint64_t> daily_buy_volume_day_{0};
     uint64_t submitted_ = 0;
     uint64_t queued_ = 0;
     uint64_t submit_failed_ = 0;

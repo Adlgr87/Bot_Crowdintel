@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/crowdintel_bot.dir/link.d CMakeFiles/crowdintel_bot.dir/src/main_hot_path.cpp.o -o bin/crowdintel_bot  /tmp/secp256k1/.libs/libsecp256k1.a

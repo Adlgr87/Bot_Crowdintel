@@ -1,0 +1,2 @@
+"CMAKE_CXX_COMPILER_AR-NOTFOUND" qc libfoo.a CMakeFiles/foo.dir/foo.cpp.o
+"CMAKE_CXX_COMPILER_RANLIB-NOTFOUND" libfoo.a

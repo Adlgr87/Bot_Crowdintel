@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_signer.dir/link.d CMakeFiles/test_signer.dir/crypto/test_signer.cpp.o -o bin/test_signer  /tmp/secp256k1/.libs/libsecp256k1.a

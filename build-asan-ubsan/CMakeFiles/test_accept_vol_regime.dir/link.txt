@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -fsanitize=address,undefined -Wl,--dependency-file=CMakeFiles/test_accept_vol_regime.dir/link.d CMakeFiles/test_accept_vol_regime.dir/home/adlg/work/Bot_Crowdintel/tests/acceptance/test_accept_vol_regime.cpp.o -o bin/test_accept_vol_regime  /tmp/secp256k1/build/lib/libsecp256k1.a

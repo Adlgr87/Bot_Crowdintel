@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_twap_bb.dir/link.d CMakeFiles/test_twap_bb.dir/home/adlg/work/Bot_Crowdintel/tests/unit/test_twap_bb.cpp.o -o bin/test_twap_bb  /tmp/secp256k1/.libs/libsecp256k1.a

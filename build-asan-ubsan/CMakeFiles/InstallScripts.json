@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/adlg/work/Bot_Crowdintel/build-asan-ubsan/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

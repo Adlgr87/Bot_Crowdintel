@@ -1,0 +1,1 @@
+/usr/bin/clang++ -Wconversion -Wshadow -Wextra -Wpedantic -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/test_circuit_breaker.dir/link.d CMakeFiles/test_circuit_breaker.dir/home/adlg/work/Bot_Crowdintel/tests/unit/test_circuit_breaker.cpp.o -o bin/test_circuit_breaker  /tmp/secp256k1/.libs/libsecp256k1.a
