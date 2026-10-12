@@ -1,0 +1,10 @@
+{
+    "name": "network_keepalive",
+    "agent": "Performance+DevOps",
+    "task": "Rewrite network module with Socket Keep-Alive and TCP_NODELAY for zero-copy hot-path",
+    "acceptance_criteria": "All socket operations must be noexcept, zero heap allocation in hot-path. Must include keepalive params: idle=60s, interval=10s, probes=3.",
+    "script": "scripts/network_keepalive.sh",
+    "strict_comments": true,
+    "no_std_cout": true,
+    "no_heap_alloc": true
+}

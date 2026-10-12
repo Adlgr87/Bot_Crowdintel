@@ -1,0 +1,10 @@
+{
+    "name": "cpu_isolation",
+    "agent": "Performance",
+    "task": "Generate idempotent Ansible/Bash script for CPU isolation (isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3) with taskset on systemd service",
+    "acceptance_criteria": "Script must be idempotent, include GRUB config validation, and taskset integration with systemd service. Must demonstrate socket creation overhead < 1µs in Docker test.",
+    "script": "scripts/cpu_isolation.sh",
+    "strict_comments": true,
+    "no_std_cout": true,
+    "no_heap_alloc": true
+}
