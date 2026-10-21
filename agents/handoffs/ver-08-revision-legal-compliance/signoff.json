@@ -1,0 +1,20 @@
+{
+  "card_id": "VER-08",
+  "role": "AUD-SEC",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_PASS",
+  "evidence_paths": [
+    "agents/handoffs/ver-08-revision-legal-compliance/implementation.md",
+    "tests/unit/test_compliance_guard.cpp"
+  ],
+  "timestamp": "2026-01-22T18:30:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true,
+  "status": "IMPLEMENTED",
+  "implementation_verified": true,
+  "tests_passed": 25,
+  "tests_total": 25,
+  "fail_closed": true,
+  "blocking_for_canary": false
+}

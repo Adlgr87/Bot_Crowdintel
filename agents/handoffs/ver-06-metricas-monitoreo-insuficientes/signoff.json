@@ -1,0 +1,13 @@
+{
+  "card_id": "VER-06",
+  "role": "AUD-OPS",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/ver-06-metricas-monitoreo-insuficientes/artifacts/metrics_gap.md"
+  ],
+  "timestamp": "2026-01-22T17:30:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

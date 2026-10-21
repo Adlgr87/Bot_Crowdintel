@@ -1,0 +1,13 @@
+{
+  "card_id": "VER-02",
+  "role": "AUD-STAT",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/ver-02-causalidad-binance-polymarket/artifacts/causality_gap.md"
+  ],
+  "timestamp": "2026-01-22T16:30:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"python": "3.x", "statsmodels": "0.14+"},
+  "reproducible": true
+}

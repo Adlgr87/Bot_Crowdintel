@@ -30,6 +30,7 @@ struct JournalEvent {
         ORDER_ACCEPTED = 14,
         ORDER_FAILED = 15,
         DAY_RESET = 16,
+        COMPLIANCE_REJECT = 17,   // VER-08: fail-closed compliance rejection
     };
 
     Type type = Type::ORDER_FAILED;

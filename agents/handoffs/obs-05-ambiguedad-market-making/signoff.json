@@ -1,0 +1,13 @@
+{
+  "card_id": "OBS-05",
+  "role": "AUD-ARCH+AUD-DOCS",
+  "agent": "subagent_axiom",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-05-ambiguedad-market-making/artifacts/scope_analysis.md"
+  ],
+  "timestamp": "2026-01-22T15:30:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

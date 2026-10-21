@@ -1,0 +1,13 @@
+{
+  "card_id": "VER-04",
+  "role": "AUD-SEC",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/ver-04-cobertura-NEMESIS-P1-P6/artifacts/coverage_matrix.md"
+  ],
+  "timestamp": "2026-01-22T17:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

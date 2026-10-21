@@ -12,9 +12,11 @@
 #include <memory>
 #include <pthread.h>
 #include <string>
+#include <fcntl.h>       // open(), O_NOFOLLOW
 #include <sys/mman.h>
+#include <sys/stat.h>     // fstat(), S_ISREG
 #include <thread>
-#include <unistd.h>
+#include <unistd.h>       // close()
 
 #include "../crypto/eip712_signer.hpp"
 #include "../crypto/secure_zero.hpp"
@@ -193,6 +195,20 @@ int main() {
     if (const char* error = cfg.load(!mock, mock)) {
         std::fprintf(stderr, "FATAL: %s\n", error);
         return 1;
+    }
+
+    // CRIT-1 FIX: Wire up ComplianceGuard from MarketConfig.
+    // Previously, ComplianceConfig was never constructed — the ExecutionEngine
+    // constructor defaulted compliance to nullptr, silently skipping ALL
+    // compliance checks. This is the VER-08 fix.
+    ComplianceConfig compliance_cfg;
+    if (cfg.compliance_enabled) {
+        JurisdictionConfig jur;
+        jur.enabled = (cfg.operator_jurisdiction[0] != '\0');
+        jur.allowed.insert(cfg.operator_jurisdiction);
+        RestrictedMarketsConfig rm = ComplianceGuard::parse_restricted(
+            cfg.restricted_condition_ids);
+        compliance_cfg.guard = ComplianceGuard(jur, rm);
     }
 
     // Parse the private key exactly once, initialize the only signer, then
@@ -454,16 +470,35 @@ int main() {
         kill_switch_thread = std::thread([&] {
             pin_to_cpu(cfg.cold_cpu);
             while (workers_running.load(std::memory_order_acquire)) {
-                errno = 0;
-                const int present = ::access(cfg.kill_switch_file, F_OK);
-                if (present == 0 || errno != ENOENT) {
-                    trading_enabled.store(false, std::memory_order_release);
-                    g_running.store(false, std::memory_order_release);
-                    std::fprintf(stderr,
-                        present == 0 ? "KILL SWITCH active: %s\n"
-                                     : "KILL SWITCH check failed closed: %s\n",
-                        cfg.kill_switch_file);
-                    break;
+                // TOCTOU FIX: Use O_NOFOLLOW open() + fstat instead of access().
+                // access() is vulnerable to symlink attacks (attacker swaps
+                // /tmp/crowdintel.kill with a symlink to /etc/passwd, causing
+                // EACCES → spurious kill-switch activation, or creates a symlink
+                // to make existence check fail when the real file exists).
+                // O_NOFOLLOW rejects symlinks; fstat confirms it's a regular file.
+                int fd = ::open(cfg.kill_switch_file, O_NOFOLLOW | O_RDONLY);
+                if (fd >= 0) {
+                    struct stat st;
+                    if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+                        ::close(fd);
+                        trading_enabled.store(false, std::memory_order_release);
+                        g_running.store(false, std::memory_order_release);
+                        std::fprintf(stderr,
+                            "KILL SWITCH active: %s\n",
+                            cfg.kill_switch_file);
+                        break;
+                    }
+                    ::close(fd);
+                } else {
+                    // ENOENT means file doesn't exist (safe); other errors fail-closed
+                    if (errno != ENOENT) {
+                        trading_enabled.store(false, std::memory_order_release);
+                        g_running.store(false, std::memory_order_release);
+                        std::fprintf(stderr,
+                            "KILL SWITCH check failed closed: %s\n",
+                            cfg.kill_switch_file);
+                        break;
+                    }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -513,14 +548,14 @@ int main() {
     if (mock) {
         ExecutionEngine<MockCLOBClient> engine(
             cfg, *book, *signals, signer, pool, mock_client, &trading_enabled,
-            &layers);
+            &layers, &compliance_cfg);
         run_engine(engine, cfg, counts, RESULT_COUNT);
     }
 #if defined(CROWDINTEL_LIVE)
     else {
         ExecutionEngine<OrderGateway<LightweightCLOBClient>> engine(
             cfg, *book, *signals, signer, pool, *gateway, &trading_enabled,
-            &layers);
+            &layers, &compliance_cfg);
         run_engine(engine, cfg, counts, RESULT_COUNT);
     }
 #endif

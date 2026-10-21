@@ -1,0 +1,95 @@
+{
+  "project": "Bot_Crowdintel_BareMetal",
+  "commit": "c157c23",
+  "date": "2026-01-22",
+  "auditor": "AUD-STAT",
+  "dsh_components": {
+    "bayesian_engine": {
+      "file": "core/include/bayesian_engine.hpp",
+      "lines": 123,
+      "type": "Beta-Binomial posterior",
+      "has_backtest": false,
+      "hardcoded_params": ["bayes_prior_strength=24.0", "bayes_signal_threshold=0.03"],
+      "status": "NO_VVS_BACKTEST"
+    },
+    "twap_brownian_bridge": {
+      "file": "core/src/twap_brownian_bridge.hpp",
+      "lines": 337,
+      "type": "P(TWAP_final > K) = Φ(d)",
+      "has_backtest": false,
+      "hardcoded_params": ["ewma_lambda=0.94", "vol_min=0.15", "vol_max=2.00", "twap_window=60s"],
+      "status": "NO_VVS_BACKTEST"
+    },
+    "volatility_estimator": {
+      "file": "core/src/volatility_estimator.hpp",
+      "lines": 143,
+      "type": "Multi-scale EWMA σ",
+      "has_backtest": false,
+      "hardcoded_params": ["lambda_fast=0.94", "lambda_slow=0.98", "shock_threshold=2.0"],
+      "status": "NO_VVS_BACKTEST"
+    },
+    "ofi_linear_filter": {
+      "file": "core/src/ofi_linear_filter.hpp",
+      "lines": "est ~200",
+      "type": "OFI + z-score (Cont et al. 2014)",
+      "has_backtest": false,
+      "status": "NO_VVS_BACKTEST"
+    },
+    "kelly_sizer": {
+      "file": "core/src/kelly_sizer.hpp",
+      "lines": 124,
+      "type": "Quarter-Kelly",
+      "has_backtest": false,
+      "hardcoded_params": ["kelly_fraction=0.25", "max_bankroll_pct=0.05", "min_edge=0.005"],
+      "status": "NO_VVS_BACKTEST"
+    },
+    "ladder_builder": {
+      "file": "core/src/ladder_builder.hpp",
+      "lines": 122,
+      "type": "Discrete bid/ask quote",
+      "has_backtest": false,
+      "status": "NO_VVS_BACKTEST"
+    },
+    "time_strategy": {
+      "file": "core/src/time_strategy.hpp",
+      "lines": 59,
+      "type": "UTC hour-based config",
+      "has_backtest": false,
+      "status": "NO_VVS_BACKTEST"
+    },
+    "fee_calculator": {
+      "file": "core/src/fee_calculator.hpp",
+      "lines": 62,
+      "type": "Static fee math",
+      "has_backtest": false,
+      "hardcoded_params": ["TAKER_FEE_RATE=0.072"],
+      "status": "NO_VVS_BACKTEST"
+    }
+  },
+  "ml_training_inventory": {
+    "backtest.py": "backtest pipeline for CfC neural net ONLY, not DSH",
+    "train_cfc.py": "training script for CfC",
+    "config.yaml": "CfC hyperparameters",
+    "export_weights.py": "exports CfC weights .bin",
+    "kat_vectors.json": "CfC test vectors",
+    "has_dsh_backtest": false
+  },
+  "test_inventory": {
+    "unit_tests": 18,
+    "integration_tests": 4,
+    "acceptance_tests": 8,
+    "benchmark_tests": 2,
+    "total_check_assertions": 789,
+    "has_dsh_oos_test": false,
+    "has_calibration_test": false,
+    "has_brier_score_test": false,
+    "has_ece_test": false
+  },
+  "findings": [
+    "No out-of-sample backtest pipeline exists for DSH strategy",
+    "ml_training/backtest.py is exclusively for legacy CfC neural network",
+    "All DSH hyperparameters are hardcoded without historical calibration",
+    "No reliability diagram, no Brier score, no ECE measurement",
+    "Canary checklist H3 requires 'CfC calibration ECE < 2%' but engine is now DSH, not CfC"
+  ]
+}

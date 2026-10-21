@@ -58,13 +58,20 @@ struct MarketConfig {
     double taker_fee_rate = 0.07;       // conservative maximum current category
     double max_order_usd = 100.0;
     double max_exposure_usd = 250.0;
-    double max_daily_loss_usd = 50.0;
+    double max_daily_loss_usd = 50.0;        // PnL-based daily loss kill (RiskManager::evaluate)
+    double max_daily_buy_volume_usd = 50.0;  // OBS-03: gross BUY volume cap (separate from loss)
     uint64_t initial_position_shares = 0;
     double initial_position_avg_price = 0.50;  // VWAP of supplied inventory
     uint64_t min_size_shares = 5000000;
     uint64_t presign_ttl_ms = 3000;
     uint64_t signal_ttl_ms = 2000;
     uint64_t max_book_age_ms = 3000;
+
+    // ── Compliance (VER-08) ─────────────────────────────────────────────────────
+    bool compliance_enabled = true;            // fail-closed compliance gate
+    char operator_jurisdiction[8] = "US";      // ISO 3166-1 alpha-2
+    char restricted_condition_ids[512]{};      // comma-separated "0x…" condition IDs
+    char restricted_market_hashes[512]{};      // comma-separated numeric hashes
 
     // ── Brakes (P2) ─────────────────────────────────────────────────────────
     double stop_loss_pct = 0.15;      // mark drop vs VWAP entry; 0 disables
@@ -410,8 +417,9 @@ struct MarketConfig {
                           "00000000-0000-0000-0000-000000000000");
         }
 
-        const char* tok = env("BOT_TOKEN_ID",
-            "71321045679252212594626395510336467040167069592778062791519851593659551227755");
+        // CRIT FIX: BOT_TOKEN_ID is required — no hardcoded fallback.
+        const char* tok = std::getenv("BOT_TOKEN_ID");
+        if (!tok || !*tok) return "BOT_TOKEN_ID env var is required";
         const size_t token_len = std::strlen(tok);
         if (token_len >= sizeof(token_id_dec) ||
             (token_len > 1 && tok[0] == '0') ||
@@ -434,6 +442,30 @@ struct MarketConfig {
                 hedge_nonzero |= byte != 0;
             if (!hedge_nonzero) return "BOT_HEDGE_TOKEN_ID cannot be zero";
         }
+
+        // ── Compliance config (VER-08) ─────────────────────────────────────────
+        if (!copy_env(operator_jurisdiction, "BOT_OPERATOR_JURISDICTION",
+                       operator_jurisdiction))
+            return "configuration string exceeds its bounded capacity";
+        if (!copy_env(restricted_condition_ids, "BOT_RESTRICTED_CONDITION_IDS",
+                       restricted_condition_ids))
+            return "configuration string exceeds its bounded capacity";
+        if (!copy_env(restricted_market_hashes, "BOT_RESTRICTED_MARKET_HASHES",
+                       restricted_market_hashes))
+            return "configuration string exceeds its bounded capacity";
+        if (!safe_config_text(operator_jurisdiction))
+            return "BOT_OPERATOR_JURISDICTION cannot contain control characters";
+        if (!safe_config_text(restricted_condition_ids))
+            return "BOT_RESTRICTED_CONDITION_IDS cannot contain control characters";
+        if (!safe_config_text(restricted_market_hashes))
+            return "BOT_RESTRICTED_MARKET_HASHES cannot contain control characters";
+        if (compliance_enabled && strlen(operator_jurisdiction) == 0)
+            return "BOT_OPERATOR_JURISDICTION is required when BOT_COMPLIANCE_ENABLED=true";
+
+        // OBS-03: max_daily_buy_volume_usd must be positive
+        if (max_daily_buy_volume_usd <= 0)
+            return "BOT_MAX_DAILY_BUY_VOLUME_USD must be positive";
+
         return nullptr;
     }
 

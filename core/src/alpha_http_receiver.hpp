@@ -439,11 +439,34 @@ private:
                              status == 422 ? "Unprocessable Entity" :
                              status == 431 ? "Request Header Fields Too Large" : "Bad Request";
         char response[512];
+        // FIX: Cap content_length to buffer size to prevent OOB read (NEMESIS-HIGH-6)
+        const size_t msg_len = std::strlen(message);
+        // FIX: JSON-escape message to prevent JSON injection (NEMESIS-MEDIUM-7)
+        std::string escaped;
+        escaped.reserve(msg_len + 8);
+        for (size_t i = 0; i < msg_len; ++i) {
+            char c = message[i];
+            switch (c) {
+                case '"':  escaped += "\\\""; break;
+                case '\\': escaped += "\\\\"; break;
+                case '\n': escaped += "\\n"; break;
+                case '\r': escaped += "\\r"; break;
+                case '\t': escaped += "\\t"; break;
+                default:   escaped += c; break;
+            }
+        }
+        const char* msg_out = escaped.empty() ? message : escaped.c_str();
+        const size_t msg_out_len = escaped.empty() ? msg_len : escaped.size();
         const int n = std::snprintf(response, sizeof(response),
             "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n"
             "Connection: close\r\nContent-Length: %zu\r\n\r\n{\"message\":\"%s\"}",
-            status, reason, std::strlen(message) + 14, message);
-        if (n > 0) (void)::send(fd, response, static_cast<size_t>(n), MSG_NOSIGNAL);
+            status, reason, msg_out_len + 14, msg_out);
+        if (n > 0) {
+            // Cap at buffer size to prevent OOB read
+            const size_t to_send = static_cast<size_t>(
+                std::min(n, static_cast<int>(sizeof(response) - 1)));
+            (void)::send(fd, response, to_send, MSG_NOSIGNAL);
+        }
     }
 
     const MarketConfig& cfg_;

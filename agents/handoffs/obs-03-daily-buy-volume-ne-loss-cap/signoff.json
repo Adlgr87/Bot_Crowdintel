@@ -1,0 +1,18 @@
+{
+  "card_id": "OBS-03",
+  "role": "AUD-RISK",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_PASS_AFTER_FIX",
+  "evidence_paths": [
+    "agents/handoffs/obs-03-daily-buy-volume-ne-loss-cap/verification.md",
+    "agents/handoffs/obs-03-daily-buy-volume-ne-loss-cap/implementation.md"
+  ],
+  "timestamp": "2026-01-22T18:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true,
+  "status": "IMPLEMENTED",
+  "implementation_verified": true,
+  "blocking_for_canary": false,
+  "correction_to_recon": true
+}

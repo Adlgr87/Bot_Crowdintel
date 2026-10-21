@@ -1,0 +1,13 @@
+{
+  "card_id": "VER-07",
+  "role": "AUD-DOCS+AUD-RISK",
+  "agent": "subagent_axiom",
+  "verdict": "VERIFIED_PASS_WITH_OBSERVATIONS",
+  "evidence_paths": [
+    "agents/handoffs/ver-07-persistencia-daily-buy-volume-ambigua/artifacts/persistence_analysis.md"
+  ],
+  "timestamp": "2026-01-22T18:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

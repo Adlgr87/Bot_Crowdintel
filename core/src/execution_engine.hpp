@@ -51,6 +51,7 @@ enum class TickResult : uint8_t {
     STALE_PRICE_ABORT,   // slippage-vs-mid guard rejected a stale/toxic order
     VOLATILITY_PAUSED,   // volatility regime suppressed passive flow
     BAYES_SIGNAL,        // a bayesian posterior fired an order this tick
+    COMPLIANCE_REJECTED,  // VER-08: compliance guard blocked the order (fail-closed)
     COUNT
 };
 
@@ -78,10 +79,13 @@ inline const char* tick_result_name(TickResult result) {
         case TickResult::STALE_PRICE_ABORT: return "stale_price_abort";
         case TickResult::VOLATILITY_PAUSED: return "volatility_paused";
         case TickResult::BAYES_SIGNAL: return "bayes_signal";
+        case TickResult::COMPLIANCE_REJECTED: return "compliance_rejected";
         case TickResult::COUNT: break;
     }
     return "unknown";
 }
+
+#include "compliance_guard.hpp"
 
 // Forward declarations of the P2–P4 layers (defined in their own headers).
 class RiskManager;
@@ -98,6 +102,10 @@ struct TrackerRestate {
     uint64_t hedge_shares = 0;
     uint64_t hedge_avg = 0;
     uint64_t drift_exceeded = 0;  // non-zero: latch the kill switch
+    // VER-08: PnL reconciliation fields (reconciled against REST /positions)
+    int64_t realized_pnl_cents = 0;   // exchange-reported realized PnL (x1e2 USD)
+    uint64_t mark_price_yes_e6 = 0;     // REST-supplied mark-to-market (x1e6 USD)
+    uint8_t pnl_drift_exceeded = 0;     // non-zero: PnL drift exceeds threshold
 };
 static_assert(std::is_trivially_copyable_v<TrackerRestate>);
 
@@ -140,6 +148,12 @@ struct EngineLayers {
     OrderBookL2* hedge_book = nullptr;                   // complement book (P2)
 };
 
+// VER-08: ComplianceGuard configuration from MarketConfig.  Built once at
+// startup; the guard itself is lock-free and wait-free in the hot path.
+struct ComplianceConfig {
+    ComplianceGuard guard;
+};
+
 template <typename Client>
 class ExecutionEngine {
 public:
@@ -150,7 +164,8 @@ public:
                     PresignedOrderPool& pool,
                     Client& client,
                     std::atomic<bool>* trading_enabled = nullptr,
-                    const EngineLayers* layers = nullptr)
+                    const EngineLayers* layers = nullptr,
+                    const ComplianceConfig* compliance = nullptr)
         : cfg_(cfg), book_(book), signals_(signals), signer_(signer),
           pool_(pool), client_(client), trading_enabled_(trading_enabled),
           confirmed_inventory_(cfg.initial_position_shares) {
@@ -165,6 +180,12 @@ public:
             bayes_ = layers->bayes;
             sources_ = layers->sources;
             hedge_book_ = layers->hedge_book;
+        }
+        // VER-08: ComplianceGuard is wired from the cold-path config.  When
+        // compliance is not provided (nullptr), the guard is NOT active — callers
+        // must explicitly opt in so fail-closed behavior is intentional.
+        if (compliance) {
+            compliance_guard_ = &compliance->guard;
         }
         // The account queue and tracker are inseparable: accepting facts
         // without state to apply them to would silently lose fills.
@@ -246,6 +267,19 @@ public:
     TickResult execute_signal_pipeline(const AlphaSignal& signal,
                                        bool from_bayes) {
         if (risk_ && risk_->killed()) return TickResult::RISK_REJECTED;
+
+        // VER-08: ComplianceGuard — fail-closed jurisdiction + restricted-market
+        // check.  Runs BEFORE any sizing or signing work so a denied order exits
+        // the hot path at ~40ns cost.  Only active when explicitly configured.
+        if (compliance_guard_ && cfg_.compliance_enabled) {
+            const auto result = compliance_guard_->check(
+                cfg_.market_condition_id, cfg_.market_hash,
+                cfg_.operator_jurisdiction);
+            if (!result.allowed) {
+                journal(JournalEvent::Type::COMPLIANCE_REJECT, 0, 0, 0, 0);
+                return TickResult::COMPLIANCE_REJECTED;
+            }
+        }
 
         if (!std::isfinite(signal.p_win) || !std::isfinite(signal.confidence) ||
             !std::isfinite(signal.q_value) ||
@@ -334,9 +368,11 @@ public:
             available_budget = std::min(
                 available_budget,
                 std::max(0.0, cfg_.max_exposure_usd - exposure_now_usd()));
+            // OBS-03: Use max_daily_buy_volume_usd for volume cap (NOT loss cap).
+            // RiskManager::evaluate() separately checks daily PnL via day_pnl.
             available_budget = std::min(
                 available_budget,
-                std::max(0.0, cfg_.max_daily_loss_usd - daily_buy_volume_.load(std::memory_order_acquire)));
+                std::max(0.0, cfg_.max_daily_buy_volume_usd - daily_buy_volume_.load(std::memory_order_acquire)));
         }
         usd = std::min(usd, available_budget);
         // Volatile regime shrinks passive size (P3): the cold sampler scales
@@ -392,7 +428,7 @@ public:
         if (order_notional > cfg_.max_order_usd + 1e-9 ||
             (side == K_SIDE_BUY &&
              (exposure_now_usd() + order_notional > cfg_.max_exposure_usd ||
-              daily_buy_volume_.load(std::memory_order_acquire) + order_notional > cfg_.max_daily_loss_usd)))
+              daily_buy_volume_.load(std::memory_order_acquire) + order_notional > cfg_.max_daily_buy_volume_usd)))
             return TickResult::RISK_REJECTED;
         // RiskManager authorization is the ALWAYS-ON line consulted before
         // any signature is produced.  A kill latch or a cap breach denies
@@ -455,17 +491,27 @@ public:
         journal(JournalEvent::Type::ORDER_ACCEPTED, 0, side, price_raw,
                 effective_shares);
 
+        // FIX-2: daily_buy_volume_ MUST be updated regardless of tracker
+        // attachment. Previously this was inside if(!tracker_) — a no-op in
+        // production where tracker_ is always attached, making the volume cap
+        // completely ineffective.
+        if (side == K_SIDE_BUY) {
+            daily_buy_volume_ += order_notional;
+        }
+
         if (!tracker_) {
             // BUG FIX (A3): use the fee-adjusted order_notional (includes fee)
             // so the daily buy-volume counter is consistent with the cap check.
             const double accepted_notional = order_notional;
             if (side == K_SIDE_BUY) {
                 committed_exposure_usd_ += accepted_notional;
-                // NOTE: daily_buy_volume_ accumulates gross BUY notional
-                // (not just the maker side) and is capped at
-                // BOT_MAX_DAILY_LOSS_USD with a UTC midnight reset.
-                // CRITICAL FIX ID-C02: atomic update to prevent torn read/data race
-                // with reporting thread. Uses fetch_add for lock-free thread safety.
+                // NOTE: daily_buy_volume_ (updated below outside if(!tracker_))
+                // accumulates gross BUY notional and is capped at
+                // BOT_MAX_DAILY_BUY_VOLUME_USD with a UTC midnight reset.
+                // FIX-2: increment MUST be outside if(!tracker_) — previously
+                // inside the if-block, making the volume cap a no-op in production.
+                // FIX-1: fetch_add on atomic<double> fixes the compile error
+                // (was .load() on plain double before).
                 daily_buy_volume_.fetch_add(accepted_notional, std::memory_order_acq_rel);
             } else {
                 // Legacy mode: reserve as if fully filled; never permit two
@@ -606,6 +652,16 @@ private:
                         trading_enabled_->store(false,
                             std::memory_order_release);
                 }
+                // VER-08: PnL reconciliation against REST
+                if (restate.pnl_drift_exceeded && risk_) {
+                    risk_->latch_kill();
+                    if (trading_enabled_)
+                        trading_enabled_->store(false,
+                            std::memory_order_release);
+                    journal(JournalEvent::Type::KILL_SWITCH,
+                            restate.realized_pnl_cents,
+                            0, 0, 0);
+                }
                 result = TickResult::ACCOUNT_APPLIED;
             }
         }
@@ -697,6 +753,19 @@ private:
         if (shares < cfg_.min_size_shares) return TickResult::NO_SIGNAL;
 
         uint64_t maker_amount = 0, taker_amount = 0, effective_shares = 0;
+
+        // HIGH-3 FIX: Compliance check on protective orders — they previously
+        // bypassed the compliance gate entirely, going straight to signing.
+        if (compliance_guard_ && cfg_.compliance_enabled) {
+            const auto result = compliance_guard_->check(
+                cfg_.market_condition_id, cfg_.market_hash,
+                cfg_.operator_jurisdiction);
+            if (!result.allowed) {
+                journal(JournalEvent::Type::COMPLIANCE_REJECT, 0, 0, price_raw,
+                        0);
+                return TickResult::COMPLIANCE_REJECTED;
+            }
+        }
         if (!compute_order_amounts(side, price_raw, shares, tick,
                                    /*market_order=*/true, maker_amount,
                                    taker_amount, effective_shares) ||
@@ -900,6 +969,7 @@ private:
     uint64_t bayes_trigger_gen_ = UINT64_MAX;
     uint64_t bayes_synth_seq_ = 0;
     OrderBookL2* hedge_book_ = nullptr;
+    const ComplianceGuard* compliance_guard_ = nullptr;  // VER-08: fail-closed gate
     FastRandom rng_;
     // Two rotating Bloom epochs guarantee no false negatives inside the
     // configured TTL. False positives only reject work, which is fail-safe.

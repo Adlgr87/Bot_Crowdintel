@@ -33,9 +33,9 @@ WebSocket L2 (Polymarket)          WebSocket User Channel (private)
 | Layer | Files | Thread | Responsibility |
 |-------|-------|--------|----------------|
 | P1 Eyes | `account_events.hpp`, `position_tracker.hpp` | Cold (WSS user) | Private channel accounting, reconciliation, kill-switch on drift |
-| P2 Brakes | `risk_manager.hpp`, `kill_switch.hpp` | Hot | Exposure caps, stop-loss VWAP, day-loss kill, hedge coordination |
+| P2 Brakes | `risk_manager.hpp`, `RiskManager::latch_kill() (inline)` | Hot | Exposure caps, stop-loss VWAP, day-loss kill, hedge coordination |
 | P3 Adverse Sel. | `volatility_gate.hpp` | Hot | Slippage gate, dynamic pre-sign ladder TTL, >5%/100ms shock cooldown |
-| P4 Brain | `bayesian_engine.hpp`, `evidence.hpp`, `evidence_ingress.hpp` | Cold + Hot | Beta-Binomial posterior, NDJSON evidence ingestion, ~41 ns update |
+| P4 Brain | `bayesian_engine.hpp`, `evidence.hpp`, `evidence_ingress.hpp` | Cold + Hot | Beta-Binomial posterior, NDJSON evidence ingestion, ~10-20 ns update (per code comments) |
 
 ## New Module Integration Points
 
@@ -49,8 +49,8 @@ The new modules (PHASE-1–6) insert into the existing flow as follows:
 | `WindowShield` | Hot (new layer between stale-check and sizing) | Hot | < 200ns p50 |
 | `SpikeDetector` | Hot (after SPSC drain, before order) | Hot | < 1μs p50 |
 | `KellySizer` | Hot (replaces KellyEngine::kelly_buy/sell) | Hot | < 500ns |
-| `TWAPTracker` | Hot (incremental, per tick) | Hot | < 1μs p50 |
-| `LadderSkew` | Hot (before order construction) | Hot | < 3μs p50 |
+| `TwapBrownianBridge` | Hot (incremental, per tick) | Hot | < 1μs p50 |
+| `LadderBuilder (LadderSkew is archived)` | Hot (before order construction) | Hot | < 3μs p50 |
 
 ## Data Structures
 
@@ -68,8 +68,8 @@ The new modules (PHASE-1–6) insert into the existing flow as follows:
 
 | Component | p50 | Notes |
 |-----------|-----|-------|
-| `run_tick()` bare hot-path | ~754ns | Measured in `latency_bench.cpp` |
-| Full layered tick (P1–P4 active) | ~754ns | Budget: < 50μs p99 |
+| `run_tick()` bare hot-path | ~862ns p50 (measured) | Measured in `latency_bench.cpp` |
+| Full layered tick (P1–P4 active) | ~862ns p50 (measured) | Budget: < 50μs p99 |
 | EIP-712 sign | ~100ns | secp256k1 with NEON/SSE |
 | SPSC push/pop | ~50ns | cache-line aligned |
 
@@ -87,3 +87,12 @@ The new modules (PHASE-1–6) insert into the existing flow as follows:
 | **TOTAL new overhead** | < 12μs p50 | Leaves 38μs headroom to 50μs |
 
 **Fallback**: If CfC exceeds 5μs → degrade to cached linear model.
+
+
+---
+
+## ⚠️ Architecture Mismatch Notice (Added by AXIOM-Audit)
+
+The P1-P6 "New Module Integration Points" section (PHASE-1–6) describes modules that are **NOT wired into the production `crowdintel_bot` binary**. Production compiles only from `main_hot_path.cpp` which includes `execution_engine.hpp` (legacy `EngineLayers`). The DSH modules (ExtendedEngineLayers with KellySizer, TwapBrownianBridge, WindowShield, etc.) are **only present in test binaries** (`test_dsh_pipeline.cpp`, `test_pipeline.cpp`).
+
+This gap is tracked in: AUDIT_REPORT.md (Architecture Mismatch A3), GATE-FINAL.md (CR-4)
