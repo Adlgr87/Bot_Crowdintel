@@ -6,7 +6,7 @@
    - Required: 500+ trades executed, 0 slippage violations
    - Required: PnL track error < 0.1% vs. Polymarket API settlement
 2. **Latency budget verified**: p99 hot-path ≤ 45μs (10μs headroom)
-3. **Model accuracy**: CfC calibration ECE < 2% on 7-day backtest
+3. **Model accuracy**: DSH calibration ECE < 2% on 7-day backtest
 4. **Circuit breakers**: WindowShield, SpikeDetector, RiskManager all exercised
 
 ## Canary Stages
@@ -23,7 +23,7 @@
 | Metric | Threshold | Action |
 |--------|-----------|--------|
 | Hot-path p99 > 50μs | 3 consecutive windows | Throttle to legacy mode (kill ExtendedEngineLayers) |
-| WindowShield HALTED | 5 consecutive windows | Auto-disable CfC, fall back to BayesianEngine |
+| WindowShield HALTED | 5 consecutive windows | Rollback to legacy KellyEngine |
 | SpikeDetector | price deviation > 0.5% in < 1s | Freeze trading for 10s (anti-sniping circuit) |
 | Daily loss | -0.5% NAV | Hard kill-switch (requires manual reset) |
 | Gas spike | Polygon gas > 1500 gwei | Pause submission (resume at <800 gwei) |
@@ -35,10 +35,10 @@
 histogram_quantile(0.50, rate(crowdintel_hotpath_ns_bucket[5m]))  # p50
 histogram_quantile(0.99, rate(crowdintel_hotpath_ns_bucket[5m]))  # p99
 
-# CfC model health
-rate(crowdintel_cfc_inference_count[5m])
-rate(crowdintel_cfc_nan_guard_triggered[5m]) > 0  # alert
-rate(crowdintel_cfc_model_drift[5m])              # calibration drift
+# DSH model health
+rate(crowdintel_dsh_signal_count[5m])
+rate(crowdintel_nan_guard_triggered[5m]) > 0  # alert
+rate(crowdintel_dsh_calibration_drift[5m])         # calibration drift
 
 # WindowShield state
 crowdintel_shield_state  # 0=IDLE 1=COUNTDOWN 2=SETTLEMENT 3=HALTED 4=CLOSE_ONLY

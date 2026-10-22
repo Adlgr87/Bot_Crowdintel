@@ -1,0 +1,13 @@
+{
+  "card_id": "OBS-06",
+  "role": "AUD-NET",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-06-latency-micro-vs-real/artifacts/latency_gap.md"
+  ],
+  "timestamp": "2026-01-22T16:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

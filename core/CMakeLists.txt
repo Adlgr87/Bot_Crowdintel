@@ -203,6 +203,21 @@ add_executable(test_kelly ../tests/unit/test_kelly.cpp)
 crowdintel_target(test_kelly)
 set_target_properties(test_kelly PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# VER-08: ComplianceGuard tests
+add_executable(test_compliance_guard ../tests/unit/test_compliance_guard.cpp)
+target_include_directories(test_compliance_guard PRIVATE include)
+set_target_properties(test_compliance_guard PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OBS-02: KellySizer ofi_adjust clamp + CalibrationGuard tests
+add_executable(test_kelly_clamp ../tests/unit/test_kelly_clamp.cpp)
+crowdintel_target(test_kelly_clamp)
+set_target_properties(test_kelly_clamp PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ADR-0004: Adversarial NaN/Inf/fuzz tests for KellySizer
+add_executable(test_kelly_adversarial ../tests/unit/test_kelly_adversarial.cpp)
+crowdintel_target(test_kelly_adversarial)
+set_target_properties(test_kelly_adversarial PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -331,6 +346,9 @@ add_test(NAME layer_units COMMAND $<TARGET_FILE:test_layers>)
 add_test(NAME ofi_units COMMAND $<TARGET_FILE:test_ofi>)
 add_test(NAME fee_units COMMAND $<TARGET_FILE:test_fees>)
 add_test(NAME kelly_units COMMAND $<TARGET_FILE:test_kelly>)
+add_test(NAME kelly_clamp_units COMMAND $<TARGET_FILE:test_kelly_clamp>)
+add_test(NAME compliance_guard_units COMMAND $<TARGET_FILE:test_compliance_guard>)
+add_test(NAME kelly_adversarial COMMAND $<TARGET_FILE:test_kelly_adversarial>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>

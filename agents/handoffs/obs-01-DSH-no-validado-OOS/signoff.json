@@ -1,0 +1,14 @@
+{
+  "card_id": "OBS-01",
+  "role": "AUD-STAT",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-01-DSH-no-validado-OOS/artifacts/code_inventory.json",
+    "agents/handoffs/obs-01-DSH-no-validado-OOS/artifacts/component_audit.md"
+  ],
+  "timestamp": "2026-01-22T10:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2", "cmake": "3.20+", "python": "3.x", "secp256k1": "6e2c8bc4"},
+  "reproducible": true
+}

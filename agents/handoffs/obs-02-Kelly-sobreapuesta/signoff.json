@@ -1,0 +1,20 @@
+{
+  "card_id": "OBS-02",
+  "role": "AUD-RISK+AUD-STAT",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_PASS_AFTER_FIX",
+  "evidence_paths": [
+    "agents/handoffs/obs-02-Kelly-sobreapuesta/verification.md",
+    "agents/handoffs/obs-02-Kelly-sobreapuesta/implementation.md",
+    "tests/unit/test_kelly_clamp.cpp"
+  ],
+  "timestamp": "2026-01-22T17:30:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true,
+  "status": "IMPLEMENTED",
+  "implementation_verified": true,
+  "tests_passed": 19,
+  "regression_tests_passed": 28,
+  "blocking_for_canary": false
+}

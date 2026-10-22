@@ -1,0 +1,13 @@
+{
+  "card_id": "OBS-04",
+  "role": "AUD-ARCH",
+  "agent": "subagent_axiom",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-04-complejidad-alta/artifacts/dependency_matrix.md"
+  ],
+  "timestamp": "2026-01-22T15:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

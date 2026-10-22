@@ -1,0 +1,13 @@
+{
+  "card_id": "OBS-07",
+  "role": "AUD-NET",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-07-feed-binance-simbologico/artifacts/feed_test_analysis.md"
+  ],
+  "timestamp": "2026-01-22T13:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2"},
+  "reproducible": true
+}

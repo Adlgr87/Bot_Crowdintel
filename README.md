@@ -14,7 +14,7 @@ HTTP, las evalúa contra un libro de órdenes L2 en memoria, y envía
 
 **No ejecuta trading real todavía.** El canary live está bloqueado
 hasta que se pasen las verificaciones H1–H15 en
-`docs/CANARY_CHECKLIST.md`.
+`gates/GATE-FINAL.md`.
 
 ## Enfoque de señal: DSH (Deterministic Signal)
 
@@ -111,8 +111,8 @@ legacy sin overhead. El nuevo hot-path overhead combinado es < 12μs p50.
 
 | Capa | Componentes | Responsabilidad |
 |------|-------------|-----------------|
-| **P1 Eyes** | `account_events.hpp`, `position_tracker.hpp`, `reconciliation.hpp` | Contabilidad WSS privada, reconciliación REST, kill-switch por drift |
-| **P2 Brakes** | `risk_manager.hpp`, `kill_switch.hpp` | Exposure caps, stop-loss VWAP, hedge complementario, daily-loss kill |
+| **P1 Eyes** | `account_events.hpp`, `position_tracker.hpp`, `reconcile_once_with() (inline)` | Contabilidad WSS privada, reconciliación REST, kill-switch por drift |
+| **P2 Brakes** | `risk_manager.hpp`, `RiskManager::latch_kill() (inline)` | Exposure caps, stop-loss VWAP, hedge complementario, daily-loss kill |
 | **P3 Adverse Selection** | `volatility_gate.hpp` | Dynamic ladder TTL, shock cooldowns, pre-sign slippage gate |
 | **P4 Brain** | `bayesian_engine.hpp`, `evidence.hpp`, `source_reliability.hpp` | Beta-Binomial posterior, NDJSON cold-path ingestion, ~41 ns update |
 
@@ -130,9 +130,9 @@ desactivado, el hot path cae al comportamiento legacy sin overhead.
 | **P3** | RateLimiter + CircuitBreaker + RequestPrioritizer | `rate_limiter.hpp`, `circuit_breaker.hpp`, `request_prioritizer.hpp` | TokenBucket: O(1) | 14 tests | ✅ Completado |
 | **P4** | FeeCalculator + KellySizer + LadderBuilder + TimeStrategy | `fee_calculator.hpp`, `kelly_sizer.hpp`, `ladder_builder.hpp`, `time_strategy.hpp` | Fee: <50 ns<br>Kelly: <200 ns | 56/56 | ✅ Completado |
 | **P5** | Integration + paper trading | `engine_extensions.hpp` v2 | Pipeline <15μs p99 | 8 acceptance tests + 84 integration checks | ✅ Completado |
-| **P6** | Canary deploy ($50) + monitoring | `docs/DEPLOYMENT.md#canary` | — | H1-H15 checklist | ✅ Completado |
+| **P6** | Canary deploy ($50) + monitoring | `docs/DEPLOYMENT.md#5-controlled-canary-only-after-explicit-owner-approval` | — | H1-H15 checklist (3 CRs remain) | ⚠️ CONDITIONAL |
 
-**Total de tests unitarios: 120 checks, todos pass.** ASan/UBSan limpios.
+**Total de tests unitarios: 715 checks (589 unit + 126 integration), todos pass.** ASan/UBSan limpios.
 
 **Brownian Bridge formula:**
 ```
@@ -219,7 +219,7 @@ ASan/UBSan, TSan con 100 iteraciones). TSan: 0 reportes. Cppcheck:
 - **No market-making.** El motor ejecuta órdenes discretas, no
   quote management continuo.
 - **Canary live bloqueado.** Firmas tipo 3 fallan closed hasta ERC-7739.
-  Ver `docs/CANARY_CHECKLIST.md` (H1–H15).
+  Ver `gates/GATE-FINAL.md` (H1–H15).
 - **CfC legacy.** El modelo `cfc_btc_5m_v1.bin` (2,536 floats) se entrenó
   con datos históricos de Binance BTC/USDT 5-min. Se mantiene para referencia
   pero no se usa en el hot-path DSH actual. Re-entrenamiento requerido solo si
@@ -238,5 +238,5 @@ ASan/UBSan, TSan con 100 iteraciones). TSan: 0 reportes. Cppcheck:
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Deployment and rollback runbook](docs/DEPLOYMENT.md)
 - [Security and threat model](docs/SECURITY.md)
-- [Canary checklist (H1–H15)](docs/CANARY_CHECKLIST.md)
+- [Canary checklist (H1–H15)](gates/GATE-FINAL.md)
 - [Remediation ledger](docs/REMEDIATION_STATUS.md)

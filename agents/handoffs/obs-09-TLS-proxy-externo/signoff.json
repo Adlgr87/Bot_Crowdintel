@@ -1,0 +1,13 @@
+{
+  "card_id": "OBS-09",
+  "role": "AUD-SEC+AUD-NET",
+  "agent": "subagent_nemesis",
+  "verdict": "VERIFIED_FAIL",
+  "evidence_paths": [
+    "agents/handoffs/obs-09-TLS-proxy-externo/artifacts/threat_model_draft.md"
+  ],
+  "timestamp": "2026-01-22T14:00:00Z",
+  "commit_hash": "c157c23",
+  "toolchain": {"gcc": "16.2", "libcurl": "8.x", "openssl": "3.x"},
+  "reproducible": true
+}
