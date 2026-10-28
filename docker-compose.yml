@@ -1,0 +1,123 @@
+version: "3.8"
+
+services:
+  # ─── Core Trading Bot ────────────────────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.prod
+      args:
+        UBUNTU_IMAGE: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    container_name: crowdintel_bot
+    restart: unless-stopped
+    environment:
+      - BOT_MODE=paper
+      - BOT_MAX_BANKROLL_USDC=50
+      - BOT_MAX_DAILY_LOSS_USDC=10
+      - BOT_MIN_EDGE=0.005
+      - BOT_KELLY_FRACTION=0.25
+      - CROWDINTEL_NETWORK=OFF
+      - CROWDINTEL_FORCE_MOCK=1
+    ports:
+      - "8080:8080"  # Health check endpoint
+    volumes:
+      - bot_data:/app/data
+      - /tmp/crowdintel_kill:/tmp/crowdintel_kill:ro
+      - ./infra/monitoring:/etc/monitoring
+    depends_on:
+      - redis
+      - postgres
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - core
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/log
+
+  # ─── Redis (State Store) ──────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine@sha256:07f630b311f9c820b6bb5e26b1d60b2743b0e9051b7066b3470b5af59d0d36de
+    container_name: crowdintel_redis
+    restart: unless-stopped
+    command:
+      - "--appendonly yes"
+      - "--appendfilename dump.rdb"
+    volumes:
+      - redis_data:/data
+    networks:
+      - core
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── PostgreSQL (Ledger) ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine@sha256:53f8b89af2f4a25e7b2c7f0c466d5d2c44c0f2c5f8d7a9b8c1a0f9e8d7c6b5a4
+    container_name: crowdintel_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=crowdintel
+      - POSTGRES_PASSWORD=crowdintel
+      - POSTGRES_DB=crowdintel
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/ledger/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - core
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: crowdintel_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - monitoring
+
+  # ─── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana-enterprise:11.0.0
+    container_name: crowdintel_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+volumes:
+  bot_data:
+  redis_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  core:
+    driver: bridge
+  monitoring:
+    driver: bridge

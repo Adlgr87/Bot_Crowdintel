@@ -1,0 +1,115 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "CrowdIntel Canary Dashboard",
+    "tags": ["crowdintel", "trading", "canary"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "5s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Hot Path Latency (μs)",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(crowdintel_tick_duration_seconds_bucket[1m])) by (le)) * 1e6",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(crowdintel_tick_duration_seconds_bucket[1m])) by (le)) * 1e6",
+            "legendFormat": "p99"
+          },
+          {
+            "expr": "histogram_quantile(0.999, sum(rate(crowdintel_tick_duration_seconds_bucket[1m])) by (le)) * 1e6",
+            "legendFormat": "p99.9"
+          }
+        ],
+        "thresholds": [
+          { "value": 15, "color": "green" },
+          { "value": 50, "color": "red" }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Daily PnL (%)",
+        "type": "stat",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "crowdintel_daily_pnl_pct",
+            "legendFormat": "PnL"
+          }
+        ],
+        "thresholds": [
+          { "value": -5, "color": "red" },
+          { "value": 0, "color": "yellow" },
+          { "value": 1, "color": "green" }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "TWAP Bias (bps)",
+        "type": "gauge",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "crowdintel_bias_bps",
+            "legendFormat": "Bias"
+          }
+        ],
+        "min": -30,
+        "max": 30,
+        "thresholds": [
+          { "value": -25, "color": "red" },
+          { "value": 0, "color": "yellow" },
+          { "value": 25, "color": "green" }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "crowdintel_cb_open_seconds",
+            "legendFormat": "Duration open"
+          }
+        ],
+        "mappings": {
+          "options": {
+            "0": { "text": "CLOSED" },
+            "1": { "text": "OPEN" },
+            "2": { "text": "HALTED" }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Fee Model Comparison",
+        "type": "graph",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "rate(crowdintel_old_fee_rejected_total[1m])",
+            "legendFormat": "Old model rejected"
+          },
+          {
+            "expr": "rate(crowdintel_v2_fee_rejected_total[1m])",
+            "legendFormat": "V2 model rejected"
+          }
+        ]
+      }
+    ]
+  },
+  "datasource": {
+    "name": "Prometheus",
+    "type": "prometheus",
+    "url": "http://prometheus:9090",
+    "access": "proxy"
+  },
+  "folder": "CrowdIntel"
+}
