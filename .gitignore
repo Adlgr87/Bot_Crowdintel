@@ -1,32 +1,22 @@
-# Dependencias / build
-core/build*/
-build/
+# Build artifacts
+build*/
+build_verify/
+build-tsan/
+build_asan/
+
+# Logs
+*.log
+massif.out*
+MutaLambda/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
 .mypy_cache/
 
-# Binarios y artefactos de prueba locales
-test_keccak
-test_keccak_bin
-test_keccak_debug
-test_keccak_verify
-test_keccak.cpp
-test_keccak_debug.cpp
-test_keccak_verify.cpp
-*.a
-*.o
-*.so
-
-# Secretos locales (nunca commitear)
-.env
-.env.*
-*.key
-*_secret*
-credentials/
-
-# SO / IDE
+# IDE/SO
 .DS_Store
 Thumbs.db
 .vscode/
@@ -34,8 +24,20 @@ Thumbs.db
 *.swp
 *.swo
 
-# Logs
-*.log
-massif.out*
-MutaLambda/
-build/verify
+# Secrets
+.env
+.env.*
+*.key
+*_secret*
+credentials/
+
+# Test binaries
+test_keccak
+test_keccak_bin
+test_keccak_debug
+test_keccak_verify
+test_keccak.cpp
+test_keccak_debug.cpp
+*.a
+*.o
+*.so
