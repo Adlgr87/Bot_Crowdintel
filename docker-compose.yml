@@ -11,11 +11,18 @@ services:
     container_name: crowdintel_bot
     restart: unless-stopped
     environment:
-      - BOT_MODE=paper
+      # "paper" would be a lie: there is no paper engine yet (RunMode is mock|live),
+      # so paper currently maps to mock. Say what actually runs.
+      - BOT_MODE=mock
       - BOT_MAX_BANKROLL_USDC=50
       - BOT_MAX_DAILY_LOSS_USDC=10
       - BOT_MIN_EDGE=0.005
       - BOT_KELLY_FRACTION=0.25
+      # read_only:true means /var/lib is unwritable; the state must live on the
+      # /app/data volume or Fase 2 persistence silently does nothing.
+      - BOT_STATE_FILE=/app/data/daily_state.bin
+      # Prometheus in another container must be able to reach the endpoint.
+      - BOT_METRICS_BIND=0.0.0.0
       - CROWDINTEL_NETWORK=OFF
       - CROWDINTEL_FORCE_MOCK=1
     ports:

@@ -40,6 +40,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        --shell /usr/sbin/nologin crowdintel
 
 WORKDIR /app
+# The daily risk state (Fase 2) must land on a WRITABLE path. The container runs
+# with read_only:true, so /var/lib is not an option; /app/data is the volume.
+RUN mkdir -p /app/data && chown -R 10001:10001 /app/data
 COPY --from=builder --chown=crowdintel:crowdintel \
      /tmp/build/bin/crowdintel_bot /app/crowdintel_bot
 USER 10001:10001

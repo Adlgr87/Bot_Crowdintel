@@ -229,6 +229,10 @@ struct MarketConfig {
     int cold_cpu = -1;
     long max_ticks = 0;
     uint16_t metrics_port = 8080;  // BOT_METRICS_PORT; 0 disables the endpoint
+    // Loopback by default: metrics include exposure and PnL, which do not belong
+    // on a public interface. A container deployment must set 0.0.0.0 explicitly
+    // for Prometheus in another container to reach it.
+    char metrics_bind[64] = "127.0.0.1";
     bool mock_mode = false;
     bool paper_mode_requested = false;  // BOT_MODE=paper (behaves as mock)
     bool live_armed = false;
@@ -572,6 +576,7 @@ struct MarketConfig {
         if (!copy_env(order_type, "BOT_ORDER_TYPE", order_type) ||
             !copy_env(clob_host, "CLOB_HOST", clob_host) ||
             !copy_env(gamma_host, "BOT_GAMMA_HOST", gamma_host) ||
+            !copy_env(metrics_bind, "BOT_METRICS_BIND", metrics_bind) ||
             !copy_env(ws_host, "WS_HOST", ws_host) ||
             !copy_env(ws_user_host, "BOT_WS_USER_HOST", ws_user_host) ||
             !copy_env(market_condition_id, "BOT_MARKET_CONDITION_ID", "") ||
@@ -596,6 +601,7 @@ struct MarketConfig {
             return "BOT_BAYES_RECAL_FILE cannot contain control characters";
         if (!safe_config_text(order_type) || !safe_config_text(clob_host) ||
             !safe_config_text(gamma_host) ||
+            !safe_config_text(metrics_bind) ||
             !safe_config_text(ws_host) || !safe_config_text(tls_pin) ||
             !safe_config_text(kill_switch_file) ||
             !safe_config_text(state_file) ||

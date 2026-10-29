@@ -10,7 +10,7 @@ scrape_configs:
   # Bot metrics endpoint
   - job_name: "crowdintel_bot"
     static_configs:
-      - targets: ["localhost:9090"]
+      - targets: ["bot:8080"]
     metrics_path: "/metrics"
 
   # PostgreSQL metrics

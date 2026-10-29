@@ -575,7 +575,7 @@ int main() {
     if (cfg.metrics_port != 0) {
         crowdintel::HealthServerConfig hcfg;
         hcfg.port = cfg.metrics_port;
-        hcfg.bind_address = "127.0.0.1";
+        hcfg.bind_address = cfg.metrics_bind;
         hcfg.status_callback = [&]() {
             crowdintel::BotStatusSnapshot snap{};
             snap.overall_status =
@@ -654,12 +654,12 @@ int main() {
         health = std::make_unique<crowdintel::HealthServer>(hcfg);
         if (health->start()) {
             std::fprintf(stdout,
-                "[metrics] /health /ready /metrics /status on 127.0.0.1:%u\n",
-                static_cast<unsigned>(cfg.metrics_port));
+                "[metrics] /health /ready /metrics /status on %s:%u\n",
+                cfg.metrics_bind, static_cast<unsigned>(cfg.metrics_port));
         } else {
             std::fprintf(stderr,
-                "WARN: metrics server could not bind 127.0.0.1:%u; continuing\n",
-                static_cast<unsigned>(cfg.metrics_port));
+                "WARN: metrics server could not bind %s:%u; continuing\n",
+                cfg.metrics_bind, static_cast<unsigned>(cfg.metrics_port));
             health.reset();
         }
     }

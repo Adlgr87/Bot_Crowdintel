@@ -1,22 +1,52 @@
 [Unit]
 Description=Bot_Crowdintel Trading Bot (CPU-Isolated)
+Documentation=file:/usr/share/doc/crowdintel/README.md
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=trading
 Group=trading
-# PERF: taskset -c 2,3 isolates bot to dedicated cores (no scheduler contention)
-ExecStart=/usr/bin/taskset -c 2,3 /usr/local/bin/crowdintel_bot --config /etc/crowdintel/config.json
-Restart=on-failure
-RestartSec=5
+
+# BOT_MODE is MANDATORY. Since Fase 0 the binary refuses to guess a trading
+# mode: an unset BOT_MODE aborts instead of defaulting to live. Every other
+# limit and secret comes from the same file so nothing is baked into the unit.
+# The leading '-' makes the file optional for a first boot; the binary then
+# aborts with a precise message rather than starting in an unknown mode.
+EnvironmentFile=-/etc/crowdintel/bot.env
+
+# systemd creates /var/lib/crowdintel owned by User= with StateDirectoryMode.
+# The daily risk state (Fase 2) lives here; without this directory the state
+# cannot be persisted and restart protection degrades to nothing with a single
+# warning.
+StateDirectory=crowdintel
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/crowdintel
+
+# PERF: taskset -c 2,3 isolates the bot to dedicated cores. No --config flag:
+# the binary reads the environment only (BOT_* variables), it has no argument
+# parser.
+ExecStart=/usr/bin/taskset -c 2,3 /usr/local/bin/crowdintel_bot
+
+# DELIBERATE: no automatic restart. A crash can leave orders in flight whose
+# venue state is unknown, so recovery is an operator decision after
+# reconciliation, not a loop. Restart=on-failure here would have retried into an
+# unknown account state.
+Restart=no
+
 LimitMEMLOCK=infinity
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=99
 CPUAffinity=2,3
-
-# PERF: Disable NUMA balancing (can cause 5-10µs latency spikes)
 Environment=NUMA_BALANCING=0
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/crowdintel
 
 [Install]
 WantedBy=multi-user.target
