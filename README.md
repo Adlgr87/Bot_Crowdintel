@@ -1,312 +1,305 @@
-# Bot CrowdIntel — Polymarket CLOB V2 Trading Bot
+# Bot CrowdIntel — Polymarket CLOB V2 trading engine
 
-**High-frequency deterministic trading engine for Polymarket CLOB V2 on Polygon (chainId 137).**
+High-frequency deterministic execution engine for Polymarket CLOB V2 on Polygon
+(chainId 137), plus the three alpha strategies that were **measured** before any
+of them was funded.
 
----
-
-## 1. Core Capabilities
-
-### 1.1 Signal Engine (DSH — Deterministic Signal)
-- **No ML in hot path.** Trading decisions derived from deterministic quantitative models.
-- **TWAP Brownian Bridge:** `P(TWAP_final > K) = Φ(d)` with Abramowitz-Stegun 7.1.26 CDF approximation (error < 1.5×10⁻⁷).
-- **Multi-scale Volatility EWMA:** λ_fast=0.94, λ_slow=0.98 with NORMAL/SHOCK/CALM regime detection.
-- **OFI Linear Filter:** Order Flow Imbalance (Cont et al. 2014) with z-score thresholds.
-- **Kelly Sizing:** Quarter-Kelly, capped at 3% of bankroll, minimum 0.5% edge required.
-- **WindowShield:** 5-state finite state machine for ladder lifecycle (MAKER_PASSIVE → MAKER_SKEWED → DIRECTIONAL → CLOSE_ONLY → HALTED).
-
-### 1.2 Risk Management
-- **Blast Radius Control:** Per-market position limits with cluster-level correlation caps.
-- **Circuit Breaker:** Token bucket rate limiting with exponential backoff (429 handling).
-- **Stop-Loss VWAP:** Trailing VWAP-based protective exits.
-- **Daily Volume Cap:** UTC midnight reset for buy volume accumulator.
-- **Kill Switch:** Hard circuit breaker triggered by daily loss threshold or manual file trigger.
-
-### 1.3 Cryptography & Signing
-- **EIP-712 V2 signing:** Full implementation with keccak-state domain separation.
-- **RFC 6979:** Deterministic nonce generation.
-- **libsecp256k1:** Low-S signatures with recovery module (pinned commit).
-- **HMAC-SHA256:** Polymarket L2 authentication headers.
-
-### 1.4 Market Interaction
-- **L2 Order Book:** Lock-free SPSC ring buffer for real-time Binance feed ingestion.
-- **CLOB V2 WebSocket:** L2 snapshot + delta updates with auto-reconnect.
-- **Market Orders:** FOK (Fill-or-Kill) and limit order types with TTL.
-- **Venue State Machine:** FSM for 425 (Too Early) and 429 (Rate Limited) handling with exponential backoff.
+The defining property of this repository is that every strategic claim has a
+number behind it, and the numbers are reproducible from scripts in `scripts/`.
+Two of the three strategies came back **negative**. They are documented, not
+deleted, because the negative results are what stopped $7,500 of planned capital
+from being deployed without evidence.
 
 ---
 
-## 2. Architecture Overview
+## 1. What was measured, and what it decided
 
-### 2.1 Hot Path (DSH Tick Loop)
-**Latency target:** < 15μs p99 (tick-to-order)
+| Sleeve | Gate | Result | Verdict |
+|---|---|---|---|
+| **A · Crypto TWAP convergence** | `scripts/experiment_twap_edge.py` | Replica 88% accurate at T-10s vs market **100%**; market Brier **0.017**. 12 trades, 9 wins, **−1.001 u/c** | **Do not fund** |
+| **B · Insider mirroring** | `scripts/experiment_copy_edge.py` | Wallet skill persists (**+11 pts**, n=19), but the copy loses **13–16¢ in 10 minutes**; model right on disagreement 33–50% | **Inconclusive** — only with crowdintel's own timestamps |
+| **C · Maker carry** | `scripts/experiment_maker_edge.py` | **+0.392¢ median net per fill**, positive in **19 of 22** markets | **Build this one** |
 
-1. Pop AlphaSignal from SPSC ring buffer
-2. ComplianceGuard — jurisdiction + restricted tokens
-3. Book stale check — atomic timestamp, 90s threshold
-4. SpikeDetector — anti-sniping filter
-5. WindowShield — state machine gate
-6. Drain MarketState from SPSC ring
-7. VolatilityEstimator — EWMA update (8ns)
-8. TwapBrownianBridge — P(Up) computation (18ns)
-9. OfiLinearFilter — flow pressure (100ns)
-10. RateLimiter + CircuitBreaker — fail-closed
-11. KellySizer — position sizing (<200ns)
-12. LadderBuilder — liquidity construction
-13. EIP-712 sign + HTTPS submit (2s timeout)
+Full write-ups: `docs/EXPERIMENT_MOTOR_A.md`, `docs/EXPERIMENT_MOTOR_B.md`,
+`docs/EXPERIMENT_MOTOR_C.md`.
 
-### 2.2 Layer Architecture (P1–P4)
-
-| Layer | Components | Responsibility |
-|-------|-----------|----------------|
-| P1 Eyes | Account events, position tracker, REST reconciliation | Private WSS accounting, kill-switch on drift |
-| P2 Brakes | Risk manager | Exposure caps, stop-loss, hedge, daily-loss kill |
-| P3 Adverse Selection | Volatility gate | Dynamic TTL, shock cooldowns, slippage gate |
-| P4 Brain | Bayesian engine, evidence, source reliability | Beta-Binomial posterior, cold-path ingestion (41ns) |
-
-### 2.3 Component Layers
-
-| Layer | Components | Hot Path Latency |
-|-------|-----------|-----------------|
-| P1 | TwapBrownianBridge + VolatilityEstimator | 18ns (BB) / 8ns (vol) |
-| P2 | OfiLinearFilter + WindowShield | <100ns / <200ns |
-| P3 | RateLimiter + CircuitBreaker + RequestPrioritizer | O(1) |
-| P4 | FeeCalculator + KellySizer + LadderBuilder + TimeStrategy | <50ns / <200ns |
-| P5 | Integration + paper trading | Pipeline <15μs p99 |
-| P6 | Canary deploy ($50) + monitoring | H1-H15 checklist |
+**Why C wins and A loses, with the same mechanism:** the adverse-selection term.
+These markets resolve over weeks, so one-minute volatility is 0.05–0.6¢ against
+a 0.5–2.0¢ half-spread. A five-minute crypto round is the opposite: the venue's
+own probability is essentially settled in the final seconds, and the taker fee
+is 7% on top.
 
 ---
 
-## 3. Technical Components
+## 2. Venue facts established from primary sources
 
-### 3.1 TWAP Brownian Bridge (τ^1.5 Correction)
-```cpp
-// Conditional variance with tau^1.5 scaling
-double sigma_cond = sigma_t * std::pow(tau, 1.5) / (std::sqrt(3.0) * total_window_seconds);
-double d = (accumulated_twap * elapsed + current_price * tau - strike * total_window) / 
-           (sigma_cond * std::sqrt(total_window_seconds));
-double p_up = abramowitz_stegun_cdf(d);
-```
-- **Correction factor:** τ^1.5 replaces previous τ^1.0, reducing variance at short τ.
-- **Verified:** 10s vs 5s ratio = 2.83x (matches theoretical √(10³/5³) = √8 ≈ 2.83).
+Not from blog posts — from the venue's own documentation, the live API, and DNS.
 
-### 3.2 Fee Engine (CLOB V2 Non-Linear)
-```cpp
-// Category-based tiered fees with quantum rounding
-fee = (price <= 0.1 || price >= 0.9) ? 0.00630 : 0.01750; // Standard
-// Policy: 0.01000, Geopolitics: 0.00000
-fee_prob = round_to_quantum(fee_usd / (1.0 - price));
-```
-- **Arbitrage rejection:** Static pair at 0.973 yields edge = −23.33¢ → automatically rejected.
-- **Minimum threshold:** Joint price must be ≤ 0.9615 for +0.4¢ net profit.
+| Fact | Source |
+|---|---|
+| CLOB V2 primary servers: **AWS `eu-west-2` (London)** | Official docs; corroborated by `mm.clob.polymarket.com` CNAME → `clob-mm-gateway-…elb.eu-west-2.amazonaws.com` |
+| **GB is close-only on the API**, so hosting in London gets orders rejected | `docs.polymarket.com/api-reference/geoblock`, three-tier table |
+| **IE is "the API itself is not restricted"** → `eu-west-1` (Dublin) | Same table; docs name it "Closest Non-Georestricted Region" |
+| Crypto up/down markets settle on **Chainlink TWAP-60s** | Live market object: `cryptoMarketConfig.twapLookbackSeconds: 60`, `resolutionSource: …/btc-usd-twap-60s-streams` |
+| Fee = `rate × p × (1−p)`, per category | Live `feeSchedule`: `{exponent:1, rate:0.07}` |
+| **Makers pay nothing** | `feeSchedule.takerOnly: true`, verified per market |
+| Rewards band is **fractional cents** (`rewardsMaxSpread: 3.5` = 350 bps) | Live `clobRewards` + `rewardsMaxSpread` |
+| Binance WebSocket is **AWS Tokyo**, no EU endpoint | Resolved IPs mapped against AWS `ip-ranges.json` |
 
-### 3.3 CrowdIntel Bias Engine
-```cpp
-// Passive quote adjustment only — never triggers trades
-double raw_bias = (conviction * 0.6 + net_flow * 0.4) * 0.5;
-raw_bias *= whale_alert ? 2.0 : 1.0;
-double bias_bps = clamp(raw_bias * 100.0, -30.0, 30.0);
-```
-- **Tilt cap:** ±30 basis points maximum.
-- **Confidence gate:** Bias only applied when confidence ≥ 0.75.
-- **Staleness:** Signals older than 30 seconds ignored.
-- **Lock-free:** Double-buffered signal updates with atomic publication.
-
-### 3.4 Asynchronous State Store
-```cpp
-// Hot path: SPSC ring buffer push (~25-50ns)
-bool persist_async(const PersistEvent& event) noexcept {
-    return hot_buffer_.try_push(event);  // Never blocks on I/O
-}
-```
-- **Zero allocation** in hot path.
-- Cold thread drains ring buffer and writes to Redis/PostgreSQL.
-- **Max latency impact:** < 50ns per event.
+The practical consequence: **Dublin, one region, no dual-colo.** Running the
+strategy in Tokyo and shipping the order to London costs the same 214 ms as
+receiving the Tokyo feed in Dublin. That is physics, not engineering.
 
 ---
 
-## 4. Testing
+## 3. Safety — the parts that stop it losing money
 
-### 4.1 Test Coverage
-- **715 unit/integration tests** (589 unit + 126 integration)
-- **Sanitizers:** ASan clean, UBSan clean, TSan clean (100 iterations)
-- **Mutation testing:** 17/19 mutants detected, 2 equivalent
-- **Cross-validation:** Python oracle matches C++ bit-for-bit on all vectors
+Five layers, in order of activation. Each one closes a way to lose the bankroll
+that was reachable from a perfectly valid environment file.
 
-### 4.2 Running Tests
+| Layer | Behaviour |
+|---|---|
+| **Run mode** | `BOT_MODE` unset or unrecognised **aborts**. An offline build refuses `live`. `paper` is accepted but reported as behaving as mock until a paper engine exists. |
+| **Startup invariants** | A live session is refused when `daily_loss` is 0 (disables the kill), `stop_loss_pct` is 0 (disables the stop), any cap exceeds its bankroll fraction, or the buy-volume cap cannot fund two max-order orders. |
+| **Durable daily state** | `daily_buy_volume` and the kill latch survive restarts. A **corrupt state file refuses startup in live** — not knowing today's exposure is worse than not trading. |
+| **Monetary aliases** | `*_USDC` and `*_USD` both accepted; a **conflicting pair is a hard error**, never a silent precedence choice. A startup banner prints the effective limits. |
+| **Reconciliation drift** | WS-vs-REST inventory drift latches the kill and stops trading. |
+
+Two defects found while building this, both fixed:
+
+* `BOT_MODE` was **fail-open**: in the production network build an unset
+  `BOT_MODE` meant `mock = false`, i.e. real orders. Now every unknown path aborts.
+* `BOT_MAX_DAILY_BUY_VOLUME_USD` was validated but **never read** — the gross BUY
+  cap was pinned at $50 and could not be raised without recompiling.
+* `utc_day_number()` returned `era * 36524 + doe` instead of the civil-from-days
+  value, so it was neither the day count nor collision-free. A collision would
+  make the daily loss cap miss its rollover.
+
+---
+
+## 4. Architecture
+
+```
+   Binance WS (Tokyo)          Polygon RPC              CLOB WS (London)
+   12–214 ms                    on-chain                28–35 ms
+        │                           │                        │
+        ▼                           ▼                        ▼
+   ┌──────────────────── SPSC rings, no allocation on the hot path ─────────┐
+   │                                                                        │
+   │  ExecutionEngine (core/src/execution_engine.hpp, 1000 lines)           │
+   │    compliance → book freshness → volatility gate → Kelly sizing        │
+   │    → fee-aware edge gate → risk authorization → wire body              │
+   │                                                                        │
+   │  Target: tick-to-decision p50 ≈ 754 ns, p99 ≈ 1.2 µs (measured)        │
+   └────────────────────────────────────────────────────────────────────────┘
+        │                    │                      │
+        ▼                    ▼                      ▼
+   OrderGateway       PositionTracker         Metrics  →  /metrics (Prometheus)
+   (async egress)     (fills, inventory)      DailyState → disk (CRC, atomic)
+```
+
+**Hot path is single-threaded and allocation free.** Every other thread is cold:
+market/user WebSocket listeners, the order gateway worker, the journal renderer,
+the reconciler, the daily-state persister and the health server.
+
+### Execution and risk, wired
+
+`execution_engine.hpp` · `market_config.hpp` · `risk_manager.hpp` ·
+`lightweight_client.hpp` (libcurl, persistent handle, TCP_NODELAY) ·
+`order_gateway.hpp` · `presigned_pool.hpp` · `ws_market_listener.hpp` ·
+`ws_user_listener.hpp` · `compliance_guard.hpp` · `position_tracker.hpp` ·
+`volatility_gate.hpp` · `bayesian_engine.hpp` · `metrics.hpp` ·
+`daily_state.hpp` · `market_metadata.hpp`
+
+### Motor C maker path (built, awaiting the quote loop)
+
+`maker_quote.hpp` (where to quote) · `quote_registry.hpp` (when to pull) ·
+`resting_mock.hpp` / `resting_mock_client.hpp` (a transport where orders rest) ·
+plus `entry_order_type` routing and `DELETE /order` in `lightweight_client.hpp`.
+
+Entries may rest (`GTC`), exits are always `FAK` — a protective exit that merely
+rests is an exit that did not happen. Resting entries bypass the pre-signed pool
+because a pre-signed ladder assumes immediate consumption on a TTL, while a
+resting order's lifetime is governed by cancel/replace.
+
+### Motor A crypto path (built, gated negative)
+
+`chainlink_stream.hpp` — strict Data Streams report parser plus a
+**time-weighted** 60-second TWAP window. Arithmetic mean would be wrong: the
+DON's cadence is uneven.
+
+---
+
+## 5. Fee model
+
+One implementation, in `market_config.hpp`:
+
+```cpp
+taker_fee_per_share(rate, price) = rate * price * (1 - price)
+```
+
+| Category | rate |
+|---|---|
+| Geopolitics / world events | **0.00** |
+| Politics / Finance / Tech / Mentions | 0.04 |
+| Sports / Economics / Weather / Culture | 0.05 |
+| Crypto | 0.07 |
+| Unknown | 0.07 (fail-closed: assume the expensive one) |
+
+`BOT_MARKET_CATEGORY` maps to the rate; `BOT_TAKER_FEE_RATE` overrides it.
+Both consumers — the decision gate and the Kelly sizing — read the same field,
+so they cannot disagree.
+
+`fee_calculator.hpp` and `fee_calculator_v2.hpp` still exist but carry a
+**DEAD CODE banner**: they implement a flat-tier table that does not match the
+venue, and no production translation unit includes them. This matters: that
+disconnected duplicate is what a reader reaches for first.
+
+---
+
+## 6. Build and test
+
 ```bash
-# Unit + integration tests
-ctest --test-dir build --output-on-failure
-
-# EIP-712 cross-check (Python)
-python3 tests/crypto/cross_check_v2.py /tmp/signer.json
-
-# Latency benchmark
-build/bin/latency_bench
-
-# Canary validation suite (110 checks)
-python3 python_oracle/test_canary.py
-```
-
-### 4.3 Test Matrix
-
-| Component | Unit Tests | Integration Tests | Benchmarks | Coverage |
-|-----------|------------|-------------------|------------|----------|
-| TWAP Brownian Bridge | 24 | 11 | 3 | 100% |
-| Fee Calculator | 56 | 10 | 2 | 100% |
-| State Store | 15 | 8 | 1 | 95% |
-| Venue State Machine | 18 | 5 | 2 | 90%+ |
-| Bias Engine | 12 | 3 | 1 | 90%+ |
-| WebSocket Feeds | 15 | 10 | 0 | 85%+ |
-
----
-
-## 5. Build & Deployment
-
-### 5.1 Building
-```bash
-# Build dependencies (libsecp256k1 pinned commit)
-export SECP_COMMIT=6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d
-git clone --filter=blob:none https://github.com/bitcoin-core/secp256k1 /tmp/secp256k1
-git -C /tmp/secp256k1 checkout --detach "$SECP_COMMIT"
-cmake -S /tmp/secp256k1 -B /tmp/secp256k1/build \
-  -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
-  -DSECP256K1_BUILD_TESTS=OFF -DSECP256K1_BUILD_BENCHMARK=OFF
-cmake --build /tmp/secp256k1/build -j
-
-# Build bot (offline/mock mode)
-cmake -S core -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCROWDINTEL_NETWORK=OFF -DCROWDINTEL_CPU_TARGET=portable \
-  -DSECP256K1_ROOT=/tmp/secp256k1
+# libsecp256k1 with the recovery module is a hard dependency
+export SECP256K1_ROOT=/path/to/secp256k1
+cmake -S core -B build -DCMAKE_BUILD_TYPE=Release -DCROWDINTEL_NETWORK=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-### 5.2 Runtime Environment
+**Current state: 35 of 36 CTest targets pass.** The single failure is
+pre-existing and unrelated: `layer_units`'s "flow resumes after cooldown".
+Suppression has two sources — a time-based shock cooldown that expires, and a
+published regime pause that only recomputes on fresh book samples. That is a
+conservative failure (it stops trading, it never loses money), and changing it
+is a product decision, so it is left failing rather than silently "fixed".
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BOT_MODE` | `paper` | Trading mode: paper/live |
-| `BOT_MAX_BANKROLL_USDC` | 50 | Canary capital limit |
-| `BOT_MAX_DAILY_LOSS_USDC` | 10 | Daily loss kill threshold |
-| `BOT_MIN_EDGE` | 0.005 | 0.5% minimum edge after fees |
-| `BOT_KELLY_FRACTION` | 0.25 | Quarter-Kelly sizing |
-| `BOT_KILL_SWITCH_FILE` | `/tmp/crowdintel_kill` | Kill switch trigger file |
-| `CROWDINTEL_FORCE_MOCK` | 1 | Force mock feeds (offline mode) |
+Behaviour that was verified rather than assumed:
 
-### 5.3 Docker (Fase 2 — In Progress)
+* `BOT_MODE` unset → `FATAL`, exit 1
+* `BOT_ENTRY_ORDER_TYPE=LIMIT` → `FATAL`
+* `BOT_MARKET_CATEGORY=geopolitics` → `fee=0.00000 source=category`
+* restart → `[state] restored buy_volume=49.99 USD for UTC day 20755`
+* `kill -9` then restart with a latched kill → `kill latch restored from disk`
+* `BOT_ENTRY_ORDER_TYPE=GTC` + real slug → `[rewards] from venue: pool=$3000/day band=350bps min_size=200`
+* SIGTERM → clean exit (this hung before the health server switched to `poll()`)
+
+### Test suites added
+
+| Suite | Assertions | Covers |
+|---|---|---|
+| `test_config_hardening` | 59 | run mode, monetary aliases, fee categories, live invariants |
+| `test_daily_state` | 37 | CRC-32 vectors, atomic write, corruption, symlink refusal |
+| `test_metrics` | 35 | decision histogram, edge/slippage means, Brier, NaN |
+| `test_chainlink` | 46 | report parser, time-weighted TWAP, replay |
+| `test_fees` | 25 | the production fee model (rewritten from the dead one) |
+| `test_maker_quote` | 41 | placement, reward band, inventory skew, tick rounding |
+| `test_quote_registry` | 37 | fills, supersede, price/age/size replace rules |
+| `test_cancel_id` | 14 | order-id validation incl. JSON injection |
+| `test_market_metadata` | 15 | fractional-cent band → bps |
+| `test_resting_mock` | 30 | fills only on a cross |
+| `test_resting_client` | 26 | OPEN vs FILL, cancel, malformed bodies |
+
+---
+
+## 7. Operational surface
+
 ```bash
-# Multi-stage build
-docker-compose up --build
-# Services: bot, redis, postgres, prometheus, grafana
+# Region preflight — run this BEFORE signing any lease
+./scripts/probe_region.sh                 # probe this host
+./scripts/probe_region.sh --aws eu-west-1 # provision spot, probe, tear down
+
+# Research gates (each reproduces one row of the table in §1)
+python3 scripts/experiment_twap_edge.py     --asset btc --duration 15m
+python3 scripts/experiment_copy_edge.py     --wallets 40
+python3 scripts/experiment_maker_edge.py    --markets 22
+
+# Dead-code policy (fails on a NEW orphan)
+./scripts/check_dead_headers.sh
 ```
 
----
+`probe_region.sh` exits **2** when the host is geo-blocked. That is the answer
+that matters: a blocked region cannot trade no matter how fast it is.
 
-## 6. Operational Status
-
-### 6.1 Canary Deployment Status
-- **Phase:** F6 — Conditional (H1-H15 checklist)
-- **Capital:** $50 (paper mode)
-- **Live trading:** Blocked — pending cryptographic review of signature types
-
-### 6.2 Known Limitations
-
-| Category | Limitation | Impact |
-|----------|------------|--------|
-| Persistence | `daily_buy_volume_` not persisted across restarts | Counter resets on crash |
-| Networking | HTTP loopback only (127.0.0.1), no TLS | Requires external proxy |
-| Trading Mode | Discrete orders only (no market-making) | No continuous quote management |
-| PnL Tracking | No realized PnL reporting | Manual reconciliation required |
-| Feeds | Binance WS feed is symbolic (mock data) | Not validated against live Binance |
+Endpoints on `BOT_METRICS_PORT` (127.0.0.1, `0` disables):
+`/health` `/ready` `/metrics` (Prometheus) `/status`. The series that decides
+whether a strategy has alpha at all is `crowdintel_decisions_by_result` — the
+labelled histogram of every verdict.
 
 ---
 
-## 7. File Structure
+## 8. Configuration
+
+Full reference: `docs/CONFIGURATION.md`. The ones that change behaviour:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOT_MODE` | **required** | `mock` / `paper` / `live` |
+| `BOT_ENABLE_LIVE_TRADING` | 0 | second key; live is disarmed without it |
+| `BOT_MARKET_CATEGORY` | – | `geopolitics`/`politics`/`sports`/`crypto` |
+| `BOT_ENTRY_ORDER_TYPE` | `FAK` | `GTC` for resting maker entries |
+| `BOT_MK_ADVERSE_BPS` | 25 | **the maker sleeve's decisive number** |
+| `BOT_MK_REWARDS_BAND_BPS` | from venue | overridden by `market_metadata` |
+| `BOT_BANKROLL_USD` *(or `BOT_MAX_BANKROLL_USDC`)* | 1000 | both spellings, conflict = fatal |
+| `BOT_MAX_DAILY_LOSS_USD` | 50 | refused at startup if 0 in live |
+| `BOT_STATE_FILE` | `/var/lib/crowdintel/daily_state.bin` | durable risk state |
+| `BOT_METRICS_PORT` | 8080 | 0 disables |
+
+---
+
+## 9. Known limitations — read before trusting anything
+
+1. **No live order or fill has been claimed from this environment.** Every
+   statement above is offline verification, public-API measurement, or a mock.
+2. **No paper engine exists.** `BOT_MODE=paper` runs the mock transport:
+   `MockCLOBClient` synthesizes a fill on every accepted submit, so it cannot
+   observe a rest. `resting_mock_client.hpp` is the transport that can, and it is
+   not yet driven by a quote loop.
+3. **The Motor C conditional mark-out is unmeasured.** The +0.392¢/fill figure
+   uses *unconditional* one-minute volatility. Adverse selection is conditional
+   on being filled, which is strictly worse. If the real number is 2¢ rather than
+   0.09¢, every net in that table flips negative. **This is the number that can
+   still kill the only funded sleeve**, and it needs real fills.
+4. **Motor A's result has a proxy gap.** The TWAP replica uses Binance VWAP, not
+   Chainlink's own aggregate. Part of the accuracy difference could be proxy
+   error. Closing it needs Data Streams credentials.
+5. **Samples are small:** 17 and 26 settled rounds for Motor A, 19 wallets for
+   Motor B, 22 markets for Motor C. Directionally consistent, not powered studies.
+6. **`layer_units` fails** (see §6).
+
+---
+
+## 10. Repository map
 
 ```
-core/
-├── src/
-│   ├── twap_brownian_bridge.hpp      # TWAP BB with τ^1.5 variance (V2)
-│   ├── fee_calculator.hpp            # CLOB V2 non-linear fees
-│   ├── execution_engine.hpp          # Hot-path pipeline (13 steps)
-│   ├── venue_state_machine.hpp       # FSM for 425/429 handling
-│   ├── crowdintel_bias.hpp           # Wallet bias engine
-│   ├── kelly_sizer.hpp
-│   ├── ladder_builder.hpp
-│   ├── time_strategy.hpp
-│   ├── volatility_estimator.hpp
-│   ├── rate_limiter.hpp
-│   ├── circuit_breaker.hpp
-│   └── ... (25+ files)
-├── include/
-│   ├── order_book.hpp                 # L2 book snapshot (lock-free)
-│   ├── position_tracker.hpp
-│   ├── risk_manager.hpp
-│   ├── volatility_gate.hpp
-│   └── ... (15+ files)
-├── tests/
-│   ├── unit/                         # 589 unit test checks
-│   ├── integration/                  # 126 integration checks
-│   └── crypto/                       # EIP-712/RFC6979 cross-validation
-└── CMakeLists.txt
-
-infra/
-├── feeds/
-│   ├── clob_websocket.hpp            # CLOB V2 WS L2 connector
-├── ledger/                           # PostgreSQL transaction log
-├── monitoring/                       # Prometheus + Grafana
-└── mock/
-    └── binance_ws_mock.py            # Synthetic feed generator
-
-python_oracle/                        # Python validation oracle
-├── twap.py                           # TWAP BB reference implementation
-├── fees.py                           # Fee engine reference
-├── crowdintel_bias.py                # Bias engine reference
-├── sim.py                            # Adversarial depth simulator
-├── replay.py                         # 24h replay validator
-└── test_canary.py                    # Canary validation suite (110 checks)
-
-strategies/
-└── complement_arbitrage/             # Base arbitrage strategy (Fase 3)
-
-docs/
-├── adr/                              # Architecture Decision Records
-│   ├── ADR-001-twap-conditional-variance.md
-│   ├── ADR-002-clob-v2-fee-engine.md
-│   └── ADR-003-crowdintel-bias-engine.md
-├── ARCHITECTURE_MAP.md
-├── LATENCY_BUDGET.md
-├── CONFIGURATION.md
-├── DEPLOYMENT.md
-└── SECURITY.md
-
-gates/
-└── GATE-FINAL.md                     # H1-H15 canary checklist
+core/src/          engine, config, fee model, metrics, feeds, maker path
+core/include/      risk, book, SPSC rings, daily state, maker_quote, quote_registry
+core/crypto/       EIP-712 + libsecp256k1 signing, keccak, ChaCha20 salts
+infra/             Docker, systemd (SCHED_FIFO + CPU isolation), Prometheus, health
+scripts/           region preflight, three research gates, dead-code guard
+tests/             36 CTest targets: unit, integration, acceptance, replay
+docs/              architecture, ADRs, three experiment write-ups, dead-code ledger
+experimental/      (planned) frozen research code behind -DCROWDINTEL_BUILD_EXPERIMENTAL
 ```
 
----
-
-## 8. Workflow for AI Agents
-
-This repository follows a 6-phase workflow for modifications. See `docs/WORKFLOW_AI_AGENTS.md` for the complete actionable plan with acceptance criteria for each task.
-
-### Phase Status
-
-| Phase | Title | Status | Key Deliverables |
-|-------|-------|--------|------------------|
-| 1 | Mathematical Core & Crypt Validation | ✅ Complete | TWAP τ^1.5, CLOB V2 fees, Python oracle |
-| 2 | Async Infrastructure & DevOps | ✅ Complete | SPSC ring buffer, async state store |
-| 3 | Market Data & Feeds | ✅ Complete | CLOB WS, Binance feed, venue FSM |
-| 4 | CrowdIntel Bias Integration | ✅ Complete | BiasEngine with tilt cap, double-buffering |
-| 5 | Replay & Simulation Validation | ✅ Complete | 24h replay, invariant verification |
-| 6 | Canary & Deployment | ✅ Complete | 110-check canary suite, all PASS |
+Governing documents: `docs/STATUS.md` (what is verified vs not),
+`docs/DEAD_CODE.md` (a decision for all 32 orphan headers),
+`docs/EXPERIMENT_MOTOR_{A,B,C}.md` (the gates), `docs/ADR-*.md` (design records).
 
 ---
 
-## 9. References
+## 11. What is genuinely next
 
-- [Polymarket CLOB V2 Documentation](https://docs.polymarket.com/developer-docs/trading/clob)
-- [EIP-712 Specification](https://eips.ethereum.org/EIPS/eip-712)
-- [RFC 6979 (Deterministic Nonce)](https://datatracker.ietf.org/doc/html/rfc6979)
-- [Abramowitz & Stegun 7.1.26](https://personal.math.ubc.ca/~cbm/aands/page_978.htm)
-- Chainlink TWAP Documentation
+In dependency order, not in wish order:
+
+1. **Wire the Motor C quote loop** — the only thing between this repository and
+   its first real measurement. `plan_quotes` → `entry_order_type=GTC` →
+   `quote_registry` → `cancel_order` already compose; nothing drives them.
+2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
+   book, then with a size-minimal live canary. This is the number that decides
+   whether the sleeve is funded.
+3. **`probe_region.sh --aws eu-west-1`** before any lease is signed.
+4. Only then: capital, at a fraction of the originally planned allocation.
+
+The planned $10,000 allocation is **not** justified by the evidence. Motor C's
+positive result is real but its decisive risk term is unmeasured.
