@@ -177,6 +177,50 @@ void reconcile_once_with(LightweightCLOBClient& client,
 
 }  // namespace
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fase 0.1 — run-mode resolution.
+//
+// FAIL-CLOSED.  The previous code was fail-OPEN: in a network build (which is
+// what production uses, because `CROWDINTEL_LIVE` is defined whenever
+// CROWDINTEL_HAVE_NETWORK is set), an UNSET BOT_MODE evaluated to
+// `mock = false`, i.e. real orders against a real venue with real money.
+//
+// New contract:
+//   * network build + BOT_MODE unset        -> FATAL (never guess)
+//   * network build + BOT_MODE unknown      -> FATAL
+//   * offline build + BOT_MODE=live         -> FATAL (cannot honour it)
+//   * offline build + anything else         -> MOCK
+//   * "paper" is accepted but currently behaves as MOCK; main() says so.
+// Nothing here can widen permission; every unknown path aborts.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class RunMode { MOCK, LIVE };
+
+static RunMode resolve_run_mode() {
+    const char* env = std::getenv("BOT_MODE");
+#if !defined(CROWDINTEL_LIVE)
+    if (env && *env && std::strcmp(env, "live") == 0) {
+        std::fprintf(stderr,
+            "FATAL: BOT_MODE=live requires a network build "
+            "(CROWDINTEL_NETWORK=ON without CROWDINTEL_FORCE_MOCK)\n");
+        std::exit(EXIT_FAILURE);
+    }
+    return RunMode::MOCK;  // offline build: mock, and no env can change that
+#else
+    if (!env || !*env) {
+        std::fprintf(stderr,
+            "FATAL: BOT_MODE is not set. Set BOT_MODE=mock|paper|live. "
+            "Refusing to guess a trading mode (fail-closed).\n");
+        std::exit(EXIT_FAILURE);
+    }
+    if (std::strcmp(env, "mock") == 0 || std::strcmp(env, "paper") == 0)
+        return RunMode::MOCK;
+    if (std::strcmp(env, "live") == 0) return RunMode::LIVE;
+    std::fprintf(stderr, "FATAL: invalid BOT_MODE='%s' (expected mock|paper|live)\n",
+                 env);
+    std::exit(EXIT_FAILURE);
+#endif
+}
+
 int main() {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -184,12 +228,7 @@ int main() {
     std::signal(SIGPIPE, SIG_IGN);  // OpenSSL can ultimately write(2) a dead peer
 #endif
 
-    const bool mock =
-#if !defined(CROWDINTEL_LIVE)
-        true;
-#else
-        std::getenv("BOT_MODE") && std::string(std::getenv("BOT_MODE")) == "mock";
-#endif
+    const bool mock = (resolve_run_mode() != RunMode::LIVE);
 
     MarketConfig cfg;
     if (const char* error = cfg.load(!mock, mock)) {
@@ -245,6 +284,14 @@ int main() {
         mock ? "mock" : "live", cfg.market_slug,
         static_cast<double>(cfg.tick_size) * 1e-6,
         cfg.signature_type, cfg.order_type);
+    // Fase 0.2 — effective limits on the first lines of every log.
+    cfg.print_limits(stdout);
+    if (cfg.paper_mode_requested) {
+        std::fprintf(stderr,
+            "NOTICE: BOT_MODE=paper has no distinct engine yet; this process "
+            "runs the MOCK transport (synthetic book, synthetic fills). "
+            "Do not draw fill-rate or Brier conclusions from it.\n");
+    }
 
     auto book = std::make_unique<OrderBookL2>();
     std::unique_ptr<OrderBookL2> hedge_book;

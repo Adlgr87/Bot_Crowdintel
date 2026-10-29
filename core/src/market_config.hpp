@@ -18,6 +18,77 @@
 #include "polymarket_order.hpp"
 #include "alpha_receiver.hpp"
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FeeCategory (Fase 1.1) — Polymarket charges
+//
+//     fee_per_contract = rate * p * (1 - p)
+//
+// where `rate` is a per-category constant.  The execution engine already
+// implements that parabola (ExecutionEngine::net_edge); the defect was that
+// `taker_fee_rate` was hard-coded to the MOST EXPENSIVE category for every
+// market.  A geopolitics market (real fee 0.00) was therefore priced as if it
+// paid crypto's 0.07, which silently rejected every trade whose true edge lay
+// between those two rates.
+//
+// FAIL-CLOSED RULE: an unknown category resolves to the most expensive rate.
+// That reproduces the historical behaviour exactly, so an unclassified market
+// can never overstate EV.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class FeeCategory : uint8_t {
+    Crypto = 0,       // 0.07 — highest published rate
+    Sports = 1,       // 0.05 — sports, economics, weather, culture, combos
+    Politics = 2,     // 0.04 — politics, finance, tech, mentions
+    Geopolitics = 3,  // 0.00 — fee-free by venue policy
+    Unknown = 255
+};
+
+// How the effective rate was obtained; kept for the startup audit line.
+enum class FeeRateSource : uint8_t {
+    Default = 0,   // no category, no override -> 0.07 (fail-closed)
+    Category = 1,  // BOT_MARKET_CATEGORY mapped through fee_rate_for()
+    Explicit = 2   // BOT_TAKER_FEE_RATE supplied by the operator
+};
+
+inline constexpr double fee_rate_for(FeeCategory category) noexcept {
+    switch (category) {
+        case FeeCategory::Geopolitics: return 0.00;
+        case FeeCategory::Politics:    return 0.04;
+        case FeeCategory::Sports:      return 0.05;
+        case FeeCategory::Crypto:      return 0.07;
+        case FeeCategory::Unknown:     break;
+    }
+    return 0.07;  // fail-closed: assume the most expensive category
+}
+
+inline constexpr const char* fee_category_name(FeeCategory category) noexcept {
+    switch (category) {
+        case FeeCategory::Crypto:      return "crypto";
+        case FeeCategory::Sports:      return "sports";
+        case FeeCategory::Politics:    return "politics";
+        case FeeCategory::Geopolitics: return "geopolitics";
+        case FeeCategory::Unknown:     break;
+    }
+    return "unknown";
+}
+
+inline constexpr const char* fee_rate_source_name(FeeRateSource source) noexcept {
+    switch (source) {
+        case FeeRateSource::Category: return "category";
+        case FeeRateSource::Explicit: return "explicit";
+        case FeeRateSource::Default:  break;
+    }
+    return "default";
+}
+
+inline FeeCategory parse_fee_category(const char* text) noexcept {
+    if (!text || !*text) return FeeCategory::Unknown;
+    if (std::strcmp(text, "crypto") == 0) return FeeCategory::Crypto;
+    if (std::strcmp(text, "sports") == 0) return FeeCategory::Sports;
+    if (std::strcmp(text, "politics") == 0) return FeeCategory::Politics;
+    if (std::strcmp(text, "geopolitics") == 0) return FeeCategory::Geopolitics;
+    return FeeCategory::Unknown;
+}
+
 struct MarketConfig {
     // Identity / credentials
     char private_key_hex[65]{};
@@ -55,7 +126,9 @@ struct MarketConfig {
     double min_edge = 0.02;
     double min_confidence = 0.85;
     double max_q_value = 0.05;
-    double taker_fee_rate = 0.07;       // conservative maximum current category
+    double taker_fee_rate = 0.07;       // category rate; see FeeCategory above
+    FeeCategory fee_category = FeeCategory::Unknown;          // Fase 1.1
+    FeeRateSource fee_rate_source = FeeRateSource::Default;   // Fase 1.1
     double max_order_usd = 100.0;
     double max_exposure_usd = 250.0;
     double max_daily_loss_usd = 50.0;        // PnL-based daily loss kill (RiskManager::evaluate)
@@ -108,6 +181,7 @@ struct MarketConfig {
     int cold_cpu = -1;
     long max_ticks = 0;
     bool mock_mode = false;
+    bool paper_mode_requested = false;  // BOT_MODE=paper (behaves as mock)
     bool live_armed = false;
     char tls_pin[128]{};
     char kill_switch_file[192] = "/tmp/crowdintel.kill";
@@ -149,6 +223,36 @@ struct MarketConfig {
         return true;
     }
 
+    // Fase 0.2 — accept the documented *_USDC spelling as an alias of the
+    // canonical *_USD name.  Two different values is a configuration error,
+    // never a precedence puzzle: silently honouring one of them is exactly how
+    // a 50-USDC canary ends up running with the 1000-USD default.
+    static bool env_d_alias(const char* canonical, const char* alias,
+                            double& out) {
+        const char* canonical_value = std::getenv(canonical);
+        const char* alias_value = std::getenv(alias);
+        const bool has_canonical = canonical_value && *canonical_value;
+        const bool has_alias = alias_value && *alias_value;
+        double canonical_parsed = out;
+        double alias_parsed = out;
+        if (has_canonical && !env_d(canonical, out, canonical_parsed))
+            return false;
+        if (has_alias && !env_d(alias, out, alias_parsed)) return false;
+        if (has_canonical && has_alias &&
+            std::fabs(canonical_parsed - alias_parsed) > 1e-9) {
+            std::fprintf(stderr,
+                "FATAL: %s and %s are both set and disagree (%g vs %g); "
+                "set only one of them\n",
+                canonical, alias, canonical_parsed, alias_parsed);
+            return false;
+        }
+        if (has_canonical)
+            out = canonical_parsed;
+        else if (has_alias)
+            out = alias_parsed;
+        return true;
+    }
+
     static bool env_l(const char* key, long fallback, long& out) {
         const char* value = std::getenv(key);
         if (!value || !*value) { out = fallback; return true; }
@@ -183,24 +287,16 @@ struct MarketConfig {
         if (!env_l("BOT_NEG_RISK", 0, neg_risk_l) ||
             !env_l("BOT_SIGNATURE_TYPE", 0, sig) ||
             !env_d("BOT_TICK_SIZE", 0.01, tick) ||
-            !env_d("BOT_BANKROLL_USD", bankroll_usd, bankroll_usd) ||
             !env_d("BOT_KELLY_FRACTION", kelly_fraction, kelly_fraction) ||
             !env_d("BOT_MIN_EDGE", min_edge, min_edge) ||
             !env_d("BOT_MIN_CONFIDENCE", min_confidence, min_confidence) ||
             !env_d("BOT_MAX_Q_VALUE", max_q_value, max_q_value) ||
-            !env_d("BOT_TAKER_FEE_RATE", taker_fee_rate, taker_fee_rate) ||
-            !env_d("BOT_MAX_ORDER_USD", max_order_usd, max_order_usd) ||
-            !env_d("BOT_MAX_EXPOSURE_USD", max_exposure_usd, max_exposure_usd) ||
-            !env_d("BOT_MAX_DAILY_LOSS_USD", max_daily_loss_usd,
-                   max_daily_loss_usd) ||
             !env_d("BOT_MIN_SIZE_SHARES", 5.0, min_size) ||
             !env_d("BOT_INITIAL_POSITION_SHARES", 0.0, initial_position) ||
             !env_d("BOT_INITIAL_POSITION_AVG_PRICE", 0.50, initial_avg) ||
             !env_d("BOT_STOP_LOSS_PCT", stop_loss_pct, stop_loss_pct) ||
             !env_d("BOT_HEDGE_TRIGGER_PCT", hedge_trigger_pct,
                    hedge_trigger_pct) ||
-            !env_d("BOT_MAX_PORTFOLIO_EXPOSURE_USD",
-                   max_portfolio_exposure_usd, max_portfolio_exposure_usd) ||
             !env_d("BOT_POOL_MAX_DEV_BPS", pool_max_dev_bps,
                    pool_max_dev_bps) ||
             !env_d("BOT_VOL_MAX_SPREAD_BPS", vol_max_spread_bps,
@@ -233,6 +329,62 @@ struct MarketConfig {
             !env_l("BOT_VOL_MAX_TICKS_PER_SEC", 200, vol_ticks_l) ||
             !env_l("BOT_BAYES_ENABLE", 1, bayes_on_l))
             return "invalid numeric configuration value";
+
+        // ── Fase 0.2: monetary limits accept the documented *_USDC alias ────
+        // Note BOT_MAX_DAILY_BUY_VOLUME_USD was never read from the
+        // environment at all: the gross BUY cap was pinned to the 50.0 default
+        // and could not be raised without recompiling, which alone makes a
+        // 10k-USD deployment impossible.
+        if (!env_d_alias("BOT_BANKROLL_USD", "BOT_MAX_BANKROLL_USDC",
+                         bankroll_usd) ||
+            !env_d_alias("BOT_MAX_ORDER_USD", "BOT_MAX_ORDER_USDC",
+                         max_order_usd) ||
+            !env_d_alias("BOT_MAX_EXPOSURE_USD", "BOT_MAX_EXPOSURE_USDC",
+                         max_exposure_usd) ||
+            !env_d_alias("BOT_MAX_PORTFOLIO_EXPOSURE_USD",
+                         "BOT_MAX_PORTFOLIO_EXPOSURE_USDC",
+                         max_portfolio_exposure_usd) ||
+            !env_d_alias("BOT_MAX_DAILY_LOSS_USD", "BOT_MAX_DAILY_LOSS_USDC",
+                         max_daily_loss_usd) ||
+            !env_d_alias("BOT_MAX_DAILY_BUY_VOLUME_USD",
+                         "BOT_MAX_DAILY_BUY_VOLUME_USDC",
+                         max_daily_buy_volume_usd))
+            return "invalid or conflicting monetary limit configuration";
+
+        // ── Fase 1.1: category-aware fee rate ──────────────────────────────
+        // Precedence is deliberate and auditable:
+        //   1. BOT_TAKER_FEE_RATE   — operator override, highest authority
+        //   2. BOT_MARKET_CATEGORY  — declared category, mapped to its rate
+        //   3. neither              — 0.07, the most expensive category
+        {
+            const char* category_env = std::getenv("BOT_MARKET_CATEGORY");
+            if (category_env && *category_env) {
+                fee_category = parse_fee_category(category_env);
+                if (fee_category == FeeCategory::Unknown)
+                    return "BOT_MARKET_CATEGORY must be crypto, sports, politics, or geopolitics";
+            }
+            const char* explicit_rate = std::getenv("BOT_TAKER_FEE_RATE");
+            if (explicit_rate && *explicit_rate) {
+                if (!env_d("BOT_TAKER_FEE_RATE", taker_fee_rate,
+                           taker_fee_rate))
+                    return "BOT_TAKER_FEE_RATE is not a finite number";
+                fee_rate_source = FeeRateSource::Explicit;
+                if (fee_category != FeeCategory::Unknown &&
+                    std::fabs(taker_fee_rate -
+                              fee_rate_for(fee_category)) > 1e-9) {
+                    std::fprintf(stderr,
+                        "WARN: BOT_TAKER_FEE_RATE=%.5f disagrees with the "
+                        "declared %s rate %.5f; the explicit rate wins\n",
+                        taker_fee_rate, fee_category_name(fee_category),
+                        fee_rate_for(fee_category));
+                }
+            } else if (fee_category != FeeCategory::Unknown) {
+                taker_fee_rate = fee_rate_for(fee_category);
+                fee_rate_source = FeeRateSource::Category;
+            } else {
+                fee_rate_source = FeeRateSource::Default;
+            }
+        }
 
         if ((neg_risk_l != 0 && neg_risk_l != 1) ||
             (armed_l != 0 && armed_l != 1))
@@ -313,9 +465,18 @@ struct MarketConfig {
         max_ticks = ticks_l;
         const char* mode = std::getenv("BOT_MODE");
         if (mode && *mode && std::strcmp(mode, "mock") != 0 &&
-            std::strcmp(mode, "live") != 0)
-            return "BOT_MODE must be mock or live";
-        mock_mode = force_mock || (mode && std::strcmp(mode, "mock") == 0);
+            std::strcmp(mode, "paper") != 0 && std::strcmp(mode, "live") != 0)
+            return "BOT_MODE must be mock, paper, or live";
+        // NOTE: there is no distinct paper engine yet. "paper" is accepted so
+        // orchestration is not forced to lie about its intent, but it behaves
+        // as "mock" (synthetic book and synthetic fills). main() prints an
+        // explicit notice; a real paper mode (live data, simulated fills) is
+        // required before any fill-rate experiment can be trusted.
+        paper_mode_requested = mode && *mode && std::strcmp(mode, "paper") == 0;
+        mock_mode = force_mock ||
+                    (mode && *mode &&
+                     (std::strcmp(mode, "mock") == 0 ||
+                      std::strcmp(mode, "paper") == 0));
         live_armed = armed_l == 1;
         gtd_ttl_seconds = static_cast<uint64_t>(gtd_l);
 
@@ -466,7 +627,59 @@ struct MarketConfig {
         if (max_daily_buy_volume_usd <= 0)
             return "BOT_MAX_DAILY_BUY_VOLUME_USD must be positive";
 
+        // Fase 0.3 — a LIVE session whose limits are internally incoherent is
+        // refused at startup.  Every rule below maps onto a concrete way to
+        // lose the whole bankroll, and every one of them is currently
+        // reachable through a perfectly "valid" environment file.
+        if (!mock_mode) {
+            if (const char* invariant = check_live_invariants())
+                return invariant;
+        }
+
         return nullptr;
+    }
+
+    // Fase 0.3 — live-startup invariants.  Returns nullptr when coherent.
+    const char* check_live_invariants() const {
+        if (!(bankroll_usd > 0.0))
+            return "bankroll must be > 0";
+        if (!(max_daily_loss_usd > 0.0))
+            return "BOT_MAX_DAILY_LOSS_USD must be > 0 (0 disables the daily kill)";
+        if (max_daily_loss_usd > 0.05 * bankroll_usd)
+            return "BOT_MAX_DAILY_LOSS_USD exceeds 5% of bankroll";
+        if (max_order_usd > 0.10 * bankroll_usd)
+            return "BOT_MAX_ORDER_USD exceeds 10% of bankroll";
+        if (max_exposure_usd > 0.25 * bankroll_usd)
+            return "BOT_MAX_EXPOSURE_USD exceeds 25% of bankroll";
+        if (max_portfolio_exposure_usd > 0.50 * bankroll_usd)
+            return "BOT_MAX_PORTFOLIO_EXPOSURE_USD exceeds 50% of bankroll";
+        if (max_daily_buy_volume_usd < 2.0 * max_order_usd)
+            return "BOT_MAX_DAILY_BUY_VOLUME_USD is below two max-size orders";
+        if (!(stop_loss_pct > 0.0))
+            return "BOT_STOP_LOSS_PCT must be > 0 in live (0 disables the stop)";
+        if (taker_fee_rate < 0.0 || taker_fee_rate > 0.07)
+            return "BOT_TAKER_FEE_RATE is outside the published category range [0, 0.07]";
+        if (kelly_fraction > 0.25)
+            return "BOT_KELLY_FRACTION above half-Kelly (0.25) is refused in live";
+        return nullptr;
+    }
+
+    // Fase 0.2 — echo the effective limits so a misconfigured process is
+    // visible on the first line of its log instead of being inferred later.
+    void print_limits(std::FILE* out) const {
+        std::fprintf(out,
+            "[limits] mode=%s armed=%d market=%s\n"
+            "[limits] bankroll=%.2f daily_loss=%.2f daily_buy_volume=%.2f\n"
+            "[limits] max_order=%.2f max_exposure=%.2f portfolio_exposure=%.2f\n"
+            "[limits] fee=%.5f source=%s category=%s min_edge=%.4f kelly=%.3f\n",
+            mock_mode ? (paper_mode_requested ? "paper(->mock)" : "mock")
+                      : "live",
+            live_armed ? 1 : 0, market_slug, bankroll_usd, max_daily_loss_usd,
+            max_daily_buy_volume_usd, max_order_usd, max_exposure_usd,
+            max_portfolio_exposure_usd, taker_fee_rate,
+            fee_rate_source_name(fee_rate_source),
+            fee_category_name(fee_category), min_edge, kelly_fraction);
+        std::fflush(out);
     }
 
     // Called once after the only EIP712Signer has derived the EOA address.
