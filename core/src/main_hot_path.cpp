@@ -718,6 +718,15 @@ int main() {
             out += "# HELP crowdintel_brier_samples Outcomes contributing to Brier\n"
                    "# TYPE crowdintel_brier_samples counter\n"
                    "crowdintel_brier_samples " + std::to_string(m.brier_samples) + "\n";
+            out += "# HELP crowdintel_maker_total Motor C decision outcomes\n"
+                   "# TYPE crowdintel_maker_total counter\n";
+            for (size_t i = 0; i < crowdintel::MAKER_EVENT_SLOTS; ++i) {
+                out += "crowdintel_maker_total{event=\"" +
+                       std::string(crowdintel::maker_event_name(
+                           static_cast<crowdintel::MakerEvent>(i))) +
+                       "\"} " + std::to_string(metrics.maker(
+                           static_cast<crowdintel::MakerEvent>(i))) + "\n";
+            }
             out += "# HELP crowdintel_taker_fee_rate Category fee rate in force\n"
                    "# TYPE crowdintel_taker_fee_rate gauge\n"
                    "crowdintel_taker_fee_rate " + std::to_string(cfg.taker_fee_rate) + "\n";

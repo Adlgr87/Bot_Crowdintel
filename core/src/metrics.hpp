@@ -34,6 +34,46 @@ namespace crowdintel {
 // TickResult::COUNT so this can never silently truncate.
 inline constexpr size_t METRICS_RESULT_SLOTS = 32;
 
+// Motor C: why the maker did or did not quote this tick. The taker path got this
+// in Fase 3 and it is what turned "the bot does nothing" into a labelled reason;
+// the sleeve that actually earns was left with SUBMITTED / NO_SIGNAL only.
+enum class MakerEvent : uint8_t {
+    Quoted = 0,        // both sides placed
+    Kept,              // resting quotes still valid
+    Withdrew,          // quotes pulled (unquotable book / kill)
+    NoBook,            // book stale, empty or crossed
+    BandTooNarrow,     // reward band cannot cover cushion + edge
+    SpreadBelowCost,   // the market is tighter than our cost
+    SizeTooSmall,      // below rewardsMinSize or min_size_shares
+    InventoryFull,     // skew stopped both sides
+    RiskRefused,       // RiskManager denied the BUY
+    VolumeCapReached,  // daily BUY volume would be exceeded
+    VenueRefused,      // the venue rejected the wire
+    SignFailed,        // signing or body construction failed
+    COUNT
+};
+inline constexpr size_t MAKER_EVENT_SLOTS =
+    static_cast<size_t>(MakerEvent::COUNT);
+
+inline const char* maker_event_name(MakerEvent e) noexcept {
+    switch (e) {
+        case MakerEvent::Quoted:          return "quoted";
+        case MakerEvent::Kept:            return "kept";
+        case MakerEvent::Withdrew:        return "withdrew";
+        case MakerEvent::NoBook:          return "no_book";
+        case MakerEvent::BandTooNarrow:   return "band_too_narrow";
+        case MakerEvent::SpreadBelowCost: return "spread_below_cost";
+        case MakerEvent::SizeTooSmall:    return "size_too_small";
+        case MakerEvent::InventoryFull:   return "inventory_full";
+        case MakerEvent::RiskRefused:     return "risk_refused";
+        case MakerEvent::VolumeCapReached:return "volume_cap";
+        case MakerEvent::VenueRefused:    return "venue_refused";
+        case MakerEvent::SignFailed:      return "sign_failed";
+        case MakerEvent::COUNT:           break;
+    }
+    return "unknown";
+}
+
 // Plain-old-data view used for rendering.  No atomics cross this boundary.
 struct MetricsSnapshot {
     uint64_t decisions;
@@ -64,6 +104,19 @@ public:
         else
             results_[METRICS_RESULT_SLOTS - 1].fetch_add(
                 1, std::memory_order_relaxed);  // fold overflow into the last slot
+    }
+
+    // Motor C: one relaxed increment per maker decision.
+    void on_maker(MakerEvent e) noexcept {
+        const size_t i = static_cast<size_t>(e);
+        if (i < MAKER_EVENT_SLOTS)
+            maker_[i].fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t maker(MakerEvent e) const noexcept {
+        const size_t i = static_cast<size_t>(e);
+        return i < MAKER_EVENT_SLOTS
+                   ? maker_[i].load(std::memory_order_relaxed)
+                   : 0;
     }
 
     void on_order_requested() noexcept {
@@ -139,6 +192,8 @@ public:
         brier_n_.store(0, std::memory_order_relaxed);
         for (size_t i = 0; i < METRICS_RESULT_SLOTS; ++i)
             results_[i].store(0, std::memory_order_relaxed);
+        for (size_t i = 0; i < MAKER_EVENT_SLOTS; ++i)
+            maker_[i].store(0, std::memory_order_relaxed);
     }
 
 private:
@@ -155,6 +210,7 @@ private:
         return static_cast<int64_t>(scaled);
     }
 
+    alignas(64) std::atomic<uint64_t> maker_[MAKER_EVENT_SLOTS]{};
     alignas(64) std::atomic<uint64_t> decisions_{0};
     alignas(64) std::atomic<uint64_t> results_[METRICS_RESULT_SLOTS]{};
     alignas(64) std::atomic<uint64_t> orders_requested_{0};

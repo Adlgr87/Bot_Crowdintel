@@ -145,8 +145,11 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
         if (!book.read_top(top, max_age_ns) || top.bid.size == 0 ||
             top.ask.size == 0 || top.bid.price >= top.ask.price) {
             ++stats.skipped;
-            if (metrics) metrics->on_decision(
-                static_cast<uint32_t>(TickResult::NO_BOOK));
+            if (metrics) {
+                metrics->on_decision(
+                    static_cast<uint32_t>(TickResult::NO_BOOK));
+                metrics->on_maker(MakerEvent::NoBook);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
@@ -176,14 +179,26 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
             return client.cancel_order(hex);
         };
 
+        // Why a placement failed, so the metric can name it instead of a bare
+        // "rejected" that tells an operator nothing.
+        enum class Fail : uint8_t { None, Amounts, TooSmall, Risk, Volume, Sign,
+                                    Body, Venue };
+        Fail last_fail = Fail::None;
+
         auto place = [&](uint8_t side, uint64_t price, uint64_t size) -> bool {
+            last_fail = Fail::None;
             uint64_t maker_amt = 0, taker_amt = 0, eff = 0;
             const uint8_t k_side = side == 0 ? K_SIDE_BUY : K_SIDE_SELL;
             if (!compute_order_amounts(k_side, price, size, cfg.tick_size,
                                        /*market_order=*/false, maker_amt,
-                                       taker_amt, eff))
+                                       taker_amt, eff)) {
+                last_fail = Fail::Amounts;
                 return false;
-            if (eff < cfg.min_size_shares) return false;
+            }
+            if (eff < cfg.min_size_shares) {
+                last_fail = Fail::TooSmall;
+                return false;
+            }
 
             // A BUY grows exposure: it must pass the same authorization the
             // taker path uses. A SELL reduces it and is never blocked here.
@@ -192,15 +207,19 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                     static_cast<double>(eff) * 1e-6 * static_cast<double>(price) *
                     1e-6;
                 const double exposure = notional;
-                if (!risk.authorize(k_side, notional, exposure, exposure))
+                if (!risk.authorize(k_side, notional, exposure, exposure)) {
+                    last_fail = Fail::Risk;
                     return false;
+                }
                 // Gross BUY volume cap, the same limit the taker path enforces.
                 // A maker that rotates inventory can otherwise blow through it
                 // without a single exposure breach.
                 if (daily_buy_volume &&
                     *daily_buy_volume + notional >
-                        cfg.max_daily_buy_volume_usd)
+                        cfg.max_daily_buy_volume_usd) {
+                    last_fail = Fail::Volume;
                     return false;
+                }
             }
 
             OrderV2 order{};
@@ -215,7 +234,10 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
             order.signature_type = cfg.signature_type;
 
             uint8_t signature[65];
-            if (!signer.sign_order(order, signature)) return false;
+            if (!signer.sign_order(order, signature)) {
+                last_fail = Fail::Sign;
+                return false;
+            }
             const uint64_t expiration =
                 cfg.wire_expiration(order.timestamp_ms / 1000ULL);
             WireBody body{};
@@ -235,6 +257,46 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
 
         const MakerRunSummary s =
             run_maker_decision(d, place, cancel_hex);
+
+        // One labelled outcome per tick: this is the series that answers
+        // "why isn't it quoting" without reading a log.
+        if (metrics) {
+            if (d.quotes.status != QuoteStatus::Placed) {
+                switch (d.quotes.status) {
+                    case QuoteStatus::BandTooNarrow:
+                        metrics->on_maker(MakerEvent::BandTooNarrow); break;
+                    case QuoteStatus::SpreadBelowCost:
+                        metrics->on_maker(MakerEvent::SpreadBelowCost); break;
+                    case QuoteStatus::SizeBelowRewardMinimum:
+                        metrics->on_maker(MakerEvent::SizeTooSmall); break;
+                    case QuoteStatus::InventoryFull:
+                        metrics->on_maker(MakerEvent::InventoryFull); break;
+                    default:
+                        metrics->on_maker(MakerEvent::NoBook); break;
+                }
+            } else if (s.errors != 0) {
+                switch (last_fail) {
+                    case Fail::Risk:
+                        metrics->on_maker(MakerEvent::RiskRefused); break;
+                    case Fail::Volume:
+                        metrics->on_maker(MakerEvent::VolumeCapReached); break;
+                    case Fail::Sign:
+                    case Fail::Body:
+                        metrics->on_maker(MakerEvent::SignFailed); break;
+                    case Fail::TooSmall:
+                    case Fail::Amounts:
+                        metrics->on_maker(MakerEvent::SizeTooSmall); break;
+                    default:
+                        metrics->on_maker(MakerEvent::VenueRefused); break;
+                }
+            } else if (s.placed_bid || s.placed_ask) {
+                metrics->on_maker(MakerEvent::Quoted);
+            } else if (s.cancelled_bid || s.cancelled_ask) {
+                metrics->on_maker(MakerEvent::Withdrew);
+            } else {
+                metrics->on_maker(MakerEvent::Kept);
+            }
+        }
         stats.places += (s.placed_bid ? 1 : 0) + (s.placed_ask ? 1 : 0);
         stats.cancels += (s.cancelled_bid ? 1 : 0) + (s.cancelled_ask ? 1 : 0);
         stats.rejected += s.errors;
