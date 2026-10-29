@@ -1,10 +1,6 @@
 # Headers unreachable from core/src/main_hot_path.cpp.
 # Regenerate: ./scripts/check_dead_headers.sh --update
 # Entries may only be REMOVED (by wiring or deleting the header).
-core/include/maker_quote.hpp
-core/include/quote_registry.hpp
-core/include/resting_mock_client.hpp
-core/include/resting_mock.hpp
 core/src/bench_engine.hpp
 core/src/binance_spike_detector.hpp
 core/src/binance_ws_client.hpp
@@ -18,8 +14,6 @@ core/src/fee_calculator.hpp
 core/src/fee_calculator_v2.hpp
 core/src/kelly_sizer.hpp
 core/src/ladder_builder.hpp
-core/src/maker_loop.hpp
-core/src/maker_runner.hpp
 core/src/market_context.hpp
 core/src/mmap_state.hpp
 core/src/multi_feed_manager.hpp

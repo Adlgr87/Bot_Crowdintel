@@ -37,6 +37,8 @@
 #include "execution_engine.hpp"
 #include "market_config.hpp"
 #include "market_metadata.hpp"
+#include "maker_engine.hpp"
+#include "../include/resting_mock_client.hpp"
 #include "metrics.hpp"
 #include "mock_client.hpp"
 #include "presigned_pool.hpp"
@@ -892,7 +894,24 @@ int main() {
     uint64_t counts[RESULT_COUNT]{};
     const auto start = std::chrono::steady_clock::now();
 
-    if (mock) {
+    if (mock && entry_rests_cfg) {
+        // Motor C: the resting transport, driven by the maker loop. This is the
+        // only path where a quote actually rests, so it is also the only place
+        // the sleeve's real risk (being filled when the price moves against you)
+        // can be observed at all.
+        crowdintel::RestingMockCLOBClient resting_client;
+        resting_client.attach_fill_queue(account_q.get());
+        const crowdintel::MakerRunStats ms = crowdintel::run_maker_engine(
+            resting_client, cfg, signer, *book, *account_q, risk, g_running,
+            &metrics);
+        std::fprintf(stdout,
+            "[maker] ticks=%ld places=%ld cancels=%ld rejected=%ld skipped=%ld "
+            "rests=%zu fills=%llu filled=%.2f\n",
+            ms.ticks, ms.places, ms.cancels, ms.rejected, ms.skipped,
+            resting_client.resting(),
+            static_cast<unsigned long long>(resting_client.paper_fills()),
+            static_cast<double>(resting_client.filled_shares()) * 1e-6);
+    } else if (mock) {
         ExecutionEngine<MockCLOBClient> engine(
             cfg, *book, *signals, signer, pool, mock_client, &trading_enabled,
             &layers, &compliance_cfg);

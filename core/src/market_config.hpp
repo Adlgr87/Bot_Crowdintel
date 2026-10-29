@@ -170,6 +170,11 @@ struct MarketConfig {
     uint32_t rewards_max_spread_bps = 0;   // venue band, in bps (3.5c == 350)
     uint64_t rewards_min_size_shares = 0;  // 1e6 scale; below this, no rewards
     uint64_t quote_size_shares = 0;        // 1e6 scale, per side
+    // Motor C quote loop refresh policy (Fase 5).
+    uint64_t max_quote_inventory_shares = 0;  // 1e6; 0 = unlimited
+    uint64_t quote_replace_ticks = 1;         // reprice after this much drift
+    uint64_t quote_max_age_ms = 30000;        // refresh a quote older than this
+    uint64_t quote_size_tolerance = 1000000;  // ignore sub-share size churn
     FeeCategory fee_category = FeeCategory::Unknown;          // Fase 1.1
     FeeRateSource fee_rate_source = FeeRateSource::Default;   // Fase 1.1
     double max_order_usd = 100.0;
@@ -329,6 +334,7 @@ struct MarketConfig {
         long armed_l = 0, gtd_l = 0;
         long adverse_l = 25, min_edge_bps_l = 10, rewards_band_l = 0;
         long rewards_min_l = 0, quote_size_l = 0;
+        long max_inv_l = 0, replace_ticks_l = 1, max_age_l = 30000;
         long reservation_ttl_l = 10000, reconcile_l = 30, pool_vol_ttl_l = 500;
         long vol_ticks_l = 200, bayes_on_l = 1;
         double tick = 0, min_size = 0, initial_position = 0;
@@ -346,6 +352,9 @@ struct MarketConfig {
             !env_l("BOT_MK_REWARDS_BAND_BPS", 0, rewards_band_l) ||
             !env_l("BOT_MK_REWARDS_MIN_SIZE", 0, rewards_min_l) ||
             !env_l("BOT_MK_QUOTE_SIZE", 0, quote_size_l) ||
+            !env_l("BOT_MK_MAX_INVENTORY", 0, max_inv_l) ||
+            !env_l("BOT_MK_REPLACE_TICKS", 1, replace_ticks_l) ||
+            !env_l("BOT_MK_MAX_AGE_MS", 30000, max_age_l) ||
             !env_d("BOT_MIN_SIZE_SHARES", 5.0, min_size) ||
             !env_d("BOT_INITIAL_POSITION_SHARES", 0.0, initial_position) ||
             !env_d("BOT_INITIAL_POSITION_AVG_PRICE", 0.50, initial_avg) ||
@@ -518,6 +527,12 @@ struct MarketConfig {
         pin_cpu = static_cast<int>(pin_l);
         cold_cpu = static_cast<int>(cold_l);
         max_ticks = ticks_l;
+        if (max_inv_l < 0 || replace_ticks_l < 0 || replace_ticks_l > 1000 ||
+            max_age_l < 100 || max_age_l > 86400000)
+            return "maker refresh policy is out of range";
+        max_quote_inventory_shares = static_cast<uint64_t>(max_inv_l);
+        quote_replace_ticks = static_cast<uint64_t>(replace_ticks_l);
+        quote_max_age_ms = static_cast<uint64_t>(max_age_l);
         if (adverse_l < 0 || adverse_l > 5000 || min_edge_bps_l < 0 ||
             min_edge_bps_l > 5000 || rewards_band_l < 0 ||
             rewards_band_l > 10000 || rewards_min_l < 0 || quote_size_l < 0)

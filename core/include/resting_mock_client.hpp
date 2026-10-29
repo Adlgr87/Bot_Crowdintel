@@ -56,13 +56,28 @@ public:
         const bool is_buy = scan_flag(json, "\"side\":\"BUY\"");
         const bool is_sell = scan_flag(json, "\"side\":\"SELL\"");
 
-        uint64_t maker_amount = 0, taker_amount = 0, price = 0;
+        uint64_t maker_amount = 0, taker_amount = 0;
         const bool have_amounts =
             scan_u64(json, "\"makerAmount\":", maker_amount) &&
             scan_u64(json, "\"takerAmount\":", taker_amount);
-        (void)scan_u64(json, "\"price\":", price);
 
-        if ((!is_buy && !is_sell) || !have_amounts || price == 0) {
+        // The V2 wire format carries NO price field: the price is implicit in
+        // the amount pair. Reading "price" found nothing, so every placement was
+        // rejected with price == 0 — the maker loop ran and placed nothing.
+        // A fixture that does supply an explicit price still wins.
+        uint64_t price = 0;
+        if (!scan_u64(json, "\"price\":", price)) {
+            if (have_amounts && taker_amount > 0 && maker_amount > 0) {
+                // BUY : maker = USDC cost,  taker = shares
+                // SELL: maker = shares,     taker = USDC cost
+                const uint64_t usdc = is_buy ? maker_amount : taker_amount;
+                const uint64_t shares = is_buy ? taker_amount : maker_amount;
+                price = shares ? (usdc * 1000000ULL) / shares : 0;
+            }
+        }
+
+        if ((!is_buy && !is_sell) || !have_amounts || price == 0 ||
+            price >= 1000000ULL) {
             std::snprintf(result.error, sizeof(result.error), "malformed_body");
             result.http_code = 400;
             emit(AccountEvent::Type::REJECT, 0, 0, 0, 0);
@@ -156,6 +171,10 @@ private:
     static bool scan_u64(const char* within, const char* key, uint64_t& out) {
         const char* p = scan_key(within, key);
         if (!p) return false;
+        // The V2 wire format serialises amounts as decimal STRINGS:
+        //   "makerAmount":"89400000"
+        // so the opening quote has to be skipped before the digits start.
+        if (*p == '"') ++p;
         uint64_t value = 0;
         size_t digits = 0;
         while (*p >= '0' && *p <= '9') {

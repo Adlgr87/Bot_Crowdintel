@@ -111,7 +111,23 @@ the reconciler, the daily-state persister and the health server.
 `volatility_gate.hpp` · `bayesian_engine.hpp` · `metrics.hpp` ·
 `daily_state.hpp` · `market_metadata.hpp`
 
-### Motor C maker path
+### Motor C maker path — running today in mock
+
+```bash
+BOT_MODE=mock BOT_ENTRY_ORDER_TYPE=GTC \
+BOT_MK_QUOTE_SIZE=200000000 BOT_MK_REWARDS_MIN_SIZE=200000000 \
+BOT_MK_REWARDS_BAND_BPS=350 BOT_MK_ADVERSE_BPS=25 \
+./build/bin/crowdintel_bot
+# -> [maker] ticks=1163 places=2 cancels=0 rejected=0 skipped=1 rests=2 fills=0
+```
+
+`maker_engine.hpp` is the Motor C tick path: drain venue events → kill guard →
+book → `MakerLoop::on_tick` → `run_maker_decision`. It is deliberately separate
+from `ExecutionEngine`: the maker sleeve has no AlphaSignal, no Kelly sizing and
+no entry signal, and adding a second personality to a 1000-line class would have
+been the wrong trade. It enforces the same brakes the taker path does — a latched
+kill withdraws both rests, and a BUY must pass `RiskManager::authorize` before a
+signature exists. A SELL is never blocked: it reduces inventory.
 
 `maker_loop.hpp` (the cycle) composes `maker_quote.hpp` (where to quote) and
 `quote_registry.hpp` (when to pull); `resting_mock.hpp` /
@@ -300,11 +316,10 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Connect `MakerLoop` to the live tick path.** The seam is proven end to end
-   against the resting transport: a cross fills through it, the venue event
-   reaches the loop, and the loop re-quotes the shrunken side after cancelling
-   the remainder. What remains is calling it from `main`'s loop with the real
-   client and the real book, instead of from a test harness.
+1. **Live adapter for the maker path.** The loop runs today against the resting
+   transport in mock. For live it needs an `OrderGateway` route that (a) sends
+   `entry_order_type=GTC` and (b) exposes per-order `DELETE /order`, since the
+   gateway currently fronts `cancel_all` only.
 2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
    book, then with a size-minimal live canary. This is the number that decides
    whether the sleeve is funded.
