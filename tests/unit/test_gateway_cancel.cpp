@@ -45,7 +45,7 @@ static void test_cancel_reaches_the_client() {
     FakeClient c;
     OrderGateway<FakeClient> gw(c);
     gw.start();
-    CHECK(gw.cancel(kId), "a valid id is enqueued");
+    CHECK(gw.cancel_order(kId), "a valid id is enqueued");
     for (int i = 0; i < 100 && c.cancels.load() == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     CHECK(c.cancels.load() == 1, "the worker called cancel_order exactly once");
@@ -59,12 +59,12 @@ static void test_invalid_ids_are_refused() {
     FakeClient c;
     OrderGateway<FakeClient> gw(c);
     gw.start();
-    CHECK(!gw.cancel(nullptr), "null is refused");
-    CHECK(!gw.cancel(""), "empty is refused");
-    CHECK(!gw.cancel("0x"), "bare prefix is refused");
-    CHECK(!gw.cancel("abcdef"), "missing 0x is refused");
-    CHECK(!gw.cancel("0xzz"), "non-hex is refused");
-    CHECK(!gw.cancel("0x12\",\"evil\":\"1"), "JSON injection is refused");
+    CHECK(!gw.cancel_order(nullptr), "null is refused");
+    CHECK(!gw.cancel_order(""), "empty is refused");
+    CHECK(!gw.cancel_order("0x"), "bare prefix is refused");
+    CHECK(!gw.cancel_order("abcdef"), "missing 0x is refused");
+    CHECK(!gw.cancel_order("0xzz"), "non-hex is refused");
+    CHECK(!gw.cancel_order("0x12\",\"evil\":\"1"), "JSON injection is refused");
     c.submits.load();
     CHECK(c.cancels.load() == 0, "no cancel ever reached the client");
     gw.stop(false);
@@ -78,7 +78,7 @@ static void test_cancel_survives_a_disabled_kill_switch() {
     FakeClient c;
     OrderGateway<FakeClient> gw(c, &trading_enabled);
     gw.start();
-    CHECK(gw.cancel(kId), "the cancel is still enqueued");
+    CHECK(gw.cancel_order(kId), "the cancel is still enqueued");
     for (int i = 0; i < 100 && c.cancels.load() == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     CHECK(c.cancels.load() == 1,
@@ -92,7 +92,7 @@ static void test_rejected_cancel_is_not_counted() {
     c.accept_cancel = false;
     OrderGateway<FakeClient> gw(c);
     gw.start();
-    (void)gw.cancel(kId);
+    (void)gw.cancel_order(kId);
     for (int i = 0; i < 60; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     CHECK(c.cancels.load() == 0, "the client refused");

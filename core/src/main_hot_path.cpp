@@ -919,7 +919,30 @@ int main() {
                                  restored_volume, today);
     }
 #if defined(CROWDINTEL_LIVE)
-    else {
+    else if (entry_rests_cfg) {
+        // Motor C on the real venue. The sleeve is executable here, but two of
+        // its risk controls are not built yet: the maker path has no
+        // PositionTracker (so inventory skew never activates) and no daily
+        // buy-volume cap. Shipping that silently would be the same failure this
+        // project keeps finding — correct components, missing wiring — so live
+        // maker requires an explicit acknowledgement naming the gap.
+        const char* ack = std::getenv("BOT_MK_LIVE_ACK");
+        if (!ack || std::strcmp(ack, "I_ACCEPT_NO_INVENTORY_SKEW") != 0) {
+            std::fprintf(stderr,
+                "FATAL: live maker quoting requires BOT_MK_LIVE_ACK="
+                "I_ACCEPT_NO_INVENTORY_SKEW\n"
+                "       Not built yet on this path: inventory skew (no "
+                "PositionTracker) and the daily buy-volume cap.\n"
+                "       Run mock for now, or finish those controls first.\n");
+            return 1;
+        }
+        const crowdintel::MakerRunStats ms = crowdintel::run_maker_engine(
+            *gateway, cfg, signer, *book, *account_q, risk, g_running, &metrics);
+        std::fprintf(stdout,
+            "[maker/live] ticks=%ld places=%ld cancels=%ld rejected=%ld "
+            "skipped=%ld\n", ms.ticks, ms.places, ms.cancels, ms.rejected,
+            ms.skipped);
+    } else {
         ExecutionEngine<OrderGateway<LightweightCLOBClient>> engine(
             cfg, *book, *signals, signer, pool, *gateway, &trading_enabled,
             &layers, &compliance_cfg);

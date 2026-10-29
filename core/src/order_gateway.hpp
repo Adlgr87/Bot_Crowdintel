@@ -39,7 +39,7 @@ public:
     // Returns false when the id is not a bounded hex string or the queue is
     // full. A silently dropped cancel is a quote left exposed, so the caller
     // must be able to see it.
-    bool cancel(const char* order_id) {
+    bool cancel_order(const char* order_id) {
         if (!valid_cancel_id(order_id)) return false;
         CancelRequest req{};
         const size_t len = std::strlen(order_id);
