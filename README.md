@@ -206,7 +206,7 @@ Behaviour that was verified rather than assumed:
 | `test_resting_mock` | 30 | fills only on a cross |
 | `test_resting_client` | 26 | OPEN vs FILL, cancel, malformed bodies |
 | `test_maker_loop` | 20 | place → keep → replace (cancel first) → withdraw |
-| `test_maker_runner` | 17 | decision executed against a client; cancel-before-place invariant |
+| `test_maker_runner` | 24 | decision executed against a client; a crossing fills, the loop re-quotes; cancel-before-place |
 
 ---
 
@@ -300,14 +300,11 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Finish the loop's live wiring.** `maker_runner.hpp` executes a decision
-   against a client and enforces cancel-before-place; `test_maker_runner` proves
-   placement, keep, replace and the blocked-cancel path end to end. **Open gap:**
-   driving a price cross through that harness does not yet produce a fill, so the
-   id mapping between the harness's placements and the events the loop reads back
-   is not right. The transport itself is proven (30/30 plus an isolated probe), so
-   this is plumbing, not design. The three assertions that used to cover it were
-   removed rather than left failing.
+1. **Connect `MakerLoop` to the live tick path.** The seam is proven end to end
+   against the resting transport: a cross fills through it, the venue event
+   reaches the loop, and the loop re-quotes the shrunken side after cancelling
+   the remainder. What remains is calling it from `main`'s loop with the real
+   client and the real book, instead of from a test harness.
 2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
    book, then with a size-minimal live canary. This is the number that decides
    whether the sleeve is funded.

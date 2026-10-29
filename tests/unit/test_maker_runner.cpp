@@ -125,26 +125,38 @@ static void test_full_session() {
     CHECK(h.client.paper_fills() == 0, "a replace does not fill anything");
 }
 
-static void test_crossing_reaches_the_transport() {
-    std::printf("crossing_reaches_the_transport\n");
-    // KNOWN GAP, stated rather than papered over. The transport itself fills on
-    // a cross (proven by test_resting_mock, 30/30, and by an isolated probe:
-    // submit -> observe_book(0.001/0.002) -> fills=1, filled=50e6). Driving that
-    // cross through this harness does not currently produce a fill, so the id
-    // mapping between Harness::place (mock submit ids) and the events the loop
-    // reads back is not yet right. The three assertions that used to live here
-    // were removed instead of being left failing or silently relaxed.
-    //
-    // What IS verified end to end below: placement rests, an unchanged book is
-    // kept, a drifted target cancels before placing, and a failed cancel blocks
-    // the placement.
+static void test_crossing_fills_and_requotes() {
+    std::printf("crossing_fills_and_requotes\n");
+    // Earlier this failed because the harness drained the whole rest in a while
+    // loop (4 x 50e6), so paper_fills was 4 and no remainder was left for the
+    // loop to react to. The mapping was never wrong; the assertions were. One
+    // cross, one fill.
     MakerLoop loop(qcfg(), rcfg());
     Harness h;
     (void)run(loop, h, book(NS));
-    CHECK(h.client.resting() == 2, "both sides reach the transport and rest");
-    CHECK(h.client.paper_fills() == 0,
-          "sending a quote does not fill it (the taker mock's behaviour)");
+    CHECK(h.client.resting() == 2, "both sides rest");
     CHECK(loop.resting() == 2, "the loop learned both rests from OPEN events");
+
+    const LiveQuote* bid_rest = loop.registry().find(QUOTE_SIDE_BID);
+    CHECK(bid_rest != nullptr, "the loop knows the resting bid");
+    if (!bid_rest) return;
+    const uint64_t rest_price = bid_rest->price;
+
+    // A seller reaches our bid: this is the adverse event, and it must arrive
+    // through the transport as a fill of exactly the size that crossed.
+    const bool filled = h.client.observe_book(rest_price - 5000, 100000000ULL,
+                                              rest_price, 50000000ULL);
+    CHECK(filled, "one cross produces one fill");
+    CHECK(h.client.paper_fills() == 1, "exactly one fill, not a drained rest");
+    CHECK(h.client.filled_shares() == 50000000ULL, "for the crossed size");
+    CHECK(h.client.resting() == 2, "the remainder still rests on that side");
+
+    // Feed the venue event back and confirm the loop reacts to a partial fill.
+    h.pump(loop);
+    const MakerDecision d = loop.on_tick(book(2 * NS));
+    CHECK(d.place_bid, "the shrunken bid side is re-quoted");
+    CHECK(d.cancel_bid_id != 0, "cancelling the remainder first");
+    CHECK(d.bid_price != 0, "at a price");
 }
 
 static void test_cancel_failure_blocks_placement() {
@@ -182,7 +194,7 @@ static void test_order_of_operations() {
 int main() {
     std::printf("=== test_maker_runner (Motor C end to end) ===\n");
     test_full_session();
-    test_crossing_reaches_the_transport();
+    test_crossing_fills_and_requotes();
     test_cancel_failure_blocks_placement();
     test_order_of_operations();
     std::printf("\n--- Results: %d/%d passed, %d failed ---\n",
