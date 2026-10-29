@@ -357,7 +357,8 @@ public:
 
         // Size against the fee-adjusted execution price.  This is conservative:
         // fees reduce both the gate and the Kelly fraction.
-        const double fee_per_share = cfg_.taker_fee_rate * price * (1.0 - price);
+        const double fee_per_share =
+            taker_fee_per_share(cfg_.taker_fee_rate, price);
         const double sizing_price = side == K_SIDE_BUY
             ? std::min(0.999999, price + fee_per_share)
             : std::max(0.000001, price - fee_per_share);
@@ -905,7 +906,7 @@ private:
     }
 
     double net_edge(uint8_t side, double p_win, double price) const noexcept {
-        const double fee = cfg_.taker_fee_rate * price * (1.0 - price);
+        const double fee = taker_fee_per_share(cfg_.taker_fee_rate, price);
         return side == K_SIDE_BUY ? p_win - price - fee
                                   : price - p_win - fee;
     }

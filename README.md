@@ -231,7 +231,6 @@ core/
 │   ├── execution_engine.hpp          # Hot-path pipeline (13 steps)
 │   ├── venue_state_machine.hpp       # FSM for 425/429 handling
 │   ├── crowdintel_bias.hpp           # Wallet bias engine
-│   ├── async_state_store.hpp         # SPSC-backed async persistence
 │   ├── kelly_sizer.hpp
 │   ├── ladder_builder.hpp
 │   ├── time_strategy.hpp
@@ -254,7 +253,6 @@ core/
 infra/
 ├── feeds/
 │   ├── clob_websocket.hpp            # CLOB V2 WS L2 connector
-│   └── binance_feed.hpp              # Binance spot feed
 ├── ledger/                           # PostgreSQL transaction log
 ├── monitoring/                       # Prometheus + Grafana
 └── mock/

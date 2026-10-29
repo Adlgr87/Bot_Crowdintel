@@ -89,6 +89,35 @@ inline FeeCategory parse_fee_category(const char* text) noexcept {
     return FeeCategory::Unknown;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// taker_fee_per_share — THE production fee model, in one place.
+//
+// Polymarket charges `rate * p * (1 - p)` USDC per contract.  This was inlined
+// twice inside ExecutionEngine (the decision gate and the Kelly sizing) and a
+// THIRD copy lived in fee_calculator.hpp / fee_calculator_v2.hpp as a flat-tier
+// table that does not match the venue and that no production translation unit
+// ever included.  That third copy is what a reader (or an agent) reaches for
+// first, so it is the most expensive dead code in the tree.
+//
+// Everything now funnels through this function: the engine calls it, and
+// tests/unit/test_fees.cpp validates it directly instead of validating a
+// disconnected duplicate.
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr double taker_fee_per_share(double fee_rate,
+                                            double price) noexcept {
+    const double p = price < 0.0 ? 0.0 : (price > 1.0 ? 1.0 : price);
+    return fee_rate * p * (1.0 - p);
+}
+
+// Signed edge after fees, in probability units.  Same convention as the venue:
+// BUY profits when the model beats the ask, SELL when the model is below the bid.
+inline constexpr double net_edge_after_fees(double p_win, double price,
+                                            double fee_rate,
+                                            bool is_buy) noexcept {
+    const double fee = taker_fee_per_share(fee_rate, price);
+    return is_buy ? p_win - price - fee : price - p_win - fee;
+}
+
 struct MarketConfig {
     // Identity / credentials
     char private_key_hex[65]{};

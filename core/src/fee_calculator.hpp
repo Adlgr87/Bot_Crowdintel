@@ -1,3 +1,24 @@
+// ############################################################################
+// ##  ⚠  DEAD CODE — DO NOT EXTEND, DO NOT TRUST ITS NUMBERS  ⚠              ##
+// ############################################################################
+// This module is NOT reachable from the production binary (core/src/
+// main_hot_path.cpp) and its fee model does not match the venue:
+//
+//     here:         flat tiers  ($0.0175 mid / $0.0063 tails / $0.01 policy)
+//     production:   rate * p * (1 - p)   with a per-category rate
+//                   (geopolitics 0.00, politics 0.04, sports 0.05, crypto 0.07)
+//
+// The two disagree by up to 2.4x, so any decision derived from this file is
+// wrong. Source of truth:
+//
+//     core/src/market_config.hpp        -> taker_fee_per_share()
+//                                       -> net_edge_after_fees()
+//     core/src/execution_engine.hpp     -> the decision gate + Kelly sizing
+//     tests/unit/test_fees.cpp          -> the model's regression suite
+//
+// Status: frozen. Listed in docs/dead_headers_baseline.txt and enforced by
+// scripts/check_dead_headers.sh. Delete or wire it; do not edit it.
+// ############################################################################
 // ─────────────────────────────────────────────────────────────────────────────
 // fee_calculator.hpp — Polymarket CLOB V2 Non-Linear Fee Engine
 //

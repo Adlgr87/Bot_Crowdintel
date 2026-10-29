@@ -1009,6 +1009,21 @@ static void test_config_fail_closed() {
               "overlapping TLS pins support safe rotation");
     }
     unsetenv("BOT_TLS_PIN");
+
+    // TEST ISOLATION: this subtest deliberately poisons the environment with
+    // invalid values (BOT_MAX_ORDER_USD=not-a-number, a bare key, ...). Leaving
+    // any of them behind makes every later subtest fail MarketConfig::load()
+    // for the wrong reason, which is exactly what happened: the four
+    // "overlapping TLS pins" / "credential ... loads exactly" failures were all
+    // this leak, not four independent defects.
+    for (const char* leaked : {"BOT_MAX_ORDER_USD", "BOT_MIN_SIZE_SHARES",
+                               "BOT_INITIAL_POSITION_SHARES", "BOT_TICK_SIZE",
+                               "BOT_NEG_RISK", "BOT_ENABLE_LIVE_TRADING",
+                               "BOT_MODE", "BOT_MARKET_SLUG", "BOT_PRIVATE_KEY_HEX",
+                               "BOT_ALPHA_BEARER_TOKEN", "CLOB_HOST", "CLOB_API_KEY",
+                               "CLOB_SECRET", "CLOB_PASSPHRASE"}) {
+        unsetenv(leaked);
+    }
 }
 
 static void test_secret_file_loading() {
@@ -1104,6 +1119,12 @@ static void test_secret_file_loading() {
 
 int main() {
     std::printf("== CROWDINTEL core unit tests ==\n");
+    // MarketConfig::load() requires BOT_TOKEN_ID: the hardcoded fallback was
+    // removed as a CRIT fix. Several subtests below call load() and were
+    // written before that requirement, so they were failing with
+    // "BOT_TOKEN_ID env var is required" instead of exercising what they claim
+    // to test. One valid token id covers the whole file.
+    setenv("BOT_TOKEN_ID", "12345", 1);
     test_config_fail_closed();
     test_secret_file_loading();
     test_alpha_http_receiver();

@@ -1,0 +1,30 @@
+# Headers unreachable from core/src/main_hot_path.cpp.
+# Regenerate: ./scripts/check_dead_headers.sh --update
+# Entries may only be REMOVED (by wiring or deleting the header).
+core/src/bench_engine.hpp
+core/src/binance_spike_detector.hpp
+core/src/binance_ws_client.hpp
+core/src/cfc_network.hpp
+core/src/cfc_network_test.hpp
+core/src/circuit_breaker.hpp
+core/src/crowdintel_bias.hpp
+core/src/engine_extensions.hpp
+core/src/fee_calculator.hpp
+core/src/fee_calculator_v2.hpp
+core/src/kelly_sizer.hpp
+core/src/ladder_builder.hpp
+core/src/market_context.hpp
+core/src/mmap_state.hpp
+core/src/multi_feed_manager.hpp
+core/src/network/socket_config.hpp
+core/src/ofi_linear_filter.hpp
+core/src/pyth_client.hpp
+core/src/rate_limiter.hpp
+core/src/request_prioritizer.hpp
+core/src/time_strategy.hpp
+core/src/twap_brownian_bridge.hpp
+core/src/twap_tracker.hpp
+core/src/venue_state_machine.hpp
+core/src/volatility_estimator.hpp
+core/src/window_shield.hpp
+infra/feeds/clob_websocket.hpp
