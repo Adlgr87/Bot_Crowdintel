@@ -317,13 +317,14 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Finish the maker's risk controls before it trades live.** The path now runs
-   on `OrderGateway<LightweightCLOBClient>` and refuses to start unless
-   `BOT_MK_LIVE_ACK=I_ACCEPT_NO_INVENTORY_SKEW` is set, because two controls are
-   still missing on that path: inventory skew (no `PositionTracker`, so
-   `inventory_shares` is always 0) and the daily buy-volume cap. Both are the
-   next task; the acknowledgement exists so the gap cannot be crossed by
-   accident.
+1. **Two narrower maker risks remain.** Inventory skew and the daily BUY-volume
+   cap now exist on the maker path (the tracker consumes every account event —
+   without that it would never learn about a fill — and the volume accumulator
+   persists through `daily_state` like the taker path). The `BOT_MK_LIVE_ACK`
+   gate stays because two things are still absent: inventory **reservations**
+   before the wire (the taker path reserves so a second order cannot duplicate
+   exposure while a fill is in flight) and reconciliation of resting orders
+   across a restart.
 2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
    book, then with a size-minimal live canary. This is the number that decides
    whether the sleeve is funded.

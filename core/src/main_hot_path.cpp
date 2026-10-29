@@ -311,6 +311,45 @@ static RunMode resolve_run_mode() {
 #endif
 }
 
+// Motor C needs the daily-volume cap persisted exactly like the taker path, so
+// the maker gets the same shape: a cold persister thread plus a final flush.
+template <typename Client>
+crowdintel::MakerRunStats run_maker_persisting(
+    Client& client, const MarketConfig& cfg, const EIP712Signer& signer,
+    OrderBookL2& book, SPSC_RingBuffer<AccountEvent>& account_q,
+    RiskManager& risk, PositionTracker& tracker, std::atomic<bool>& running,
+    crowdintel::Metrics* metrics, double restored_volume, uint64_t today) {
+    double daily_vol = restored_volume;
+    std::atomic<bool> persist_run{true};
+    std::thread persister([&] {
+        pin_to_cpu(cfg.cold_cpu);
+        crowdintel::DailyStateRecord rec{};
+        rec.utc_day = today;
+        rec.daily_buy_volume_usd = daily_vol;
+        double last = -1.0;
+        while (persist_run.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            if (daily_vol == last) continue;
+            rec.daily_buy_volume_usd = daily_vol;
+            rec.kill_latched = risk.killed() ? 1 : 0;
+            rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+            if (crowdintel::save_daily_state(cfg.state_file, rec))
+                last = daily_vol;
+        }
+        rec.daily_buy_volume_usd = daily_vol;
+        rec.kill_latched = risk.killed() ? 1 : 0;
+        rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+        (void)crowdintel::save_daily_state(cfg.state_file, rec);
+    });
+
+    const crowdintel::MakerRunStats st = crowdintel::run_maker_engine(
+        client, cfg, signer, book, account_q, risk, running, metrics, &tracker,
+        &daily_vol);
+    persist_run.store(false, std::memory_order_release);
+    if (persister.joinable()) persister.join();
+    return st;
+}
+
 int main() {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -901,9 +940,9 @@ int main() {
         // can be observed at all.
         crowdintel::RestingMockCLOBClient resting_client;
         resting_client.attach_fill_queue(account_q.get());
-        const crowdintel::MakerRunStats ms = crowdintel::run_maker_engine(
-            resting_client, cfg, signer, *book, *account_q, risk, g_running,
-            &metrics);
+        const crowdintel::MakerRunStats ms = run_maker_persisting(
+            resting_client, cfg, signer, *book, *account_q, risk, tracker,
+            g_running, &metrics, restored_volume, today);
         std::fprintf(stdout,
             "[maker] ticks=%ld places=%ld cancels=%ld rejected=%ld skipped=%ld "
             "rests=%zu fills=%llu filled=%.2f\n",
@@ -926,18 +965,26 @@ int main() {
         // buy-volume cap. Shipping that silently would be the same failure this
         // project keeps finding — correct components, missing wiring — so live
         // maker requires an explicit acknowledgement naming the gap.
+        // Inventory skew and the daily buy-volume cap now exist on this path.
+        // What is STILL missing is narrower but real: the maker does not create
+        // inventory reservations (the taker path reserves before the wire, so a
+        // second order cannot duplicate exposure while a fill is in flight), and
+        // resting orders are not reconciled across a restart. With one rest per
+        // side the window is small, but it is not zero.
         const char* ack = std::getenv("BOT_MK_LIVE_ACK");
         if (!ack || std::strcmp(ack, "I_ACCEPT_NO_INVENTORY_SKEW") != 0) {
             std::fprintf(stderr,
                 "FATAL: live maker quoting requires BOT_MK_LIVE_ACK="
                 "I_ACCEPT_NO_INVENTORY_SKEW\n"
-                "       Not built yet on this path: inventory skew (no "
-                "PositionTracker) and the daily buy-volume cap.\n"
-                "       Run mock for now, or finish those controls first.\n");
+                "       Still missing on this path: inventory RESERVATIONS "
+                "before the wire, and reconcile of resting orders across a "
+                "restart.\n"
+                "       Inventory skew and the daily volume cap are in place.\n");
             return 1;
         }
-        const crowdintel::MakerRunStats ms = crowdintel::run_maker_engine(
-            *gateway, cfg, signer, *book, *account_q, risk, g_running, &metrics);
+        const crowdintel::MakerRunStats ms = run_maker_persisting(
+            *gateway, cfg, signer, *book, *account_q, risk, tracker, g_running,
+            &metrics, restored_volume, today);
         std::fprintf(stdout,
             "[maker/live] ticks=%ld places=%ld cancels=%ld rejected=%ld "
             "skipped=%ld\n", ms.ticks, ms.places, ms.cancels, ms.rejected,

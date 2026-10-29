@@ -30,6 +30,7 @@
 #include "../crypto/fast_random.hpp"
 #include "../include/account_events.hpp"
 #include "../include/order_book.hpp"
+#include "../include/position_tracker.hpp"
 #include "../include/risk_manager.hpp"
 #include "../include/time_utils.hpp"
 #include "execution_engine.hpp"
@@ -79,6 +80,8 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                                SPSC_RingBuffer<AccountEvent>& account_q,
                                RiskManager& risk, std::atomic<bool>& running,
                                crowdintel::Metrics* metrics,
+                               PositionTracker* tracker,
+                               double* daily_buy_volume,
                                MakerLoop* loop_out = nullptr) {
     MakerLoop loop(quote_config_from(cfg), replace_policy_from(cfg));
     FastRandom rng;  // OS-seeded ChaCha20; salts must not be guessable
@@ -91,6 +94,11 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
         //       and the resting size.
         AccountEvent ev{};
         while (account_q.try_pop(ev)) {
+            // The tracker must consume every fact FIRST: the maker path drains
+            // account_q itself, so if the tracker were skipped here it would
+            // never learn about a fill and inventory skew would read zero
+            // forever. That was the gap this change closes.
+            if (tracker) tracker->apply(ev);
             const uint8_t qside = ev.side == K_SIDE_BUY ? QUOTE_SIDE_BID
                                                         : QUOTE_SIDE_ASK;
             switch (ev.type) {
@@ -152,7 +160,10 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
         in.ask_size = top.ask.size;
         in.fair_value = (top.bid.price + top.ask.price) / 2u;
         in.tick_size = cfg.tick_size;
-        in.inventory_shares = 0;  // no tracker on this path yet
+        // Real inventory: net YES held, signed positive = long. Without this the
+        // skew never activates and the loop keeps bidding while accumulating.
+        in.inventory_shares =
+            tracker ? static_cast<int64_t>(tracker->net_yes()) : 0;
         in.now_ns = crowdintel::mono_ns();
 
         const MakerDecision d = loop.on_tick(in);
@@ -183,6 +194,13 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                 const double exposure = notional;
                 if (!risk.authorize(k_side, notional, exposure, exposure))
                     return false;
+                // Gross BUY volume cap, the same limit the taker path enforces.
+                // A maker that rotates inventory can otherwise blow through it
+                // without a single exposure breach.
+                if (daily_buy_volume &&
+                    *daily_buy_volume + notional >
+                        cfg.max_daily_buy_volume_usd)
+                    return false;
             }
 
             OrderV2 order{};
@@ -207,6 +225,11 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                                  expiration))
                 return false;
             const auto result = client.submit(body);
+            if (result.ok && k_side == K_SIDE_BUY && daily_buy_volume) {
+                *daily_buy_volume +=
+                    static_cast<double>(eff) * 1e-6 *
+                    static_cast<double>(price) * 1e-6;
+            }
             return result.ok;
         };
 
