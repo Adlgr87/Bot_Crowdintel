@@ -435,10 +435,10 @@ int main() {
 #endif
 
     std::fprintf(stdout,
-        "CrowdIntel 2.1 mode=%s market=%s tick=%.4f sig=%u order=%s\n",
+        "CrowdIntel 2.1 mode=%s market=%s tick=%.4f sig=%u exit=%s entry=%s\n",
         mock ? "mock" : "live", cfg.market_slug,
         static_cast<double>(cfg.tick_size) * 1e-6,
-        cfg.signature_type, cfg.order_type);
+        cfg.signature_type, cfg.order_type, cfg.entry_order_type);
     // Fase 0.2 — effective limits on the first lines of every log.
     cfg.print_limits(stdout);
     if (cfg.paper_mode_requested) {

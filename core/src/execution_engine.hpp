@@ -403,8 +403,14 @@ public:
         if (requested_shares < cfg_.min_size_shares)
             return TickResult::TOO_SMALL;
 
-        const bool market_order = std::strcmp(cfg_.order_type, "FAK") == 0 ||
-                                  std::strcmp(cfg_.order_type, "FOK") == 0;
+        // Motor C (Fase 5): entries may REST instead of take.  `order_type`
+        // governs exits and stays FAK so a protective exit is always certain to
+        // close; `entry_order_type` governs entries.  A resting entry pays the
+        // maker fee (zero on this venue: feeSchedule.takerOnly == true), which
+        // is the entire economic reason the maker sleeve exists.
+        const bool entry_rests = std::strcmp(cfg_.entry_order_type, "GTC") == 0 ||
+                                 std::strcmp(cfg_.entry_order_type, "GTD") == 0;
+        const bool market_order = !entry_rests;
         uint64_t maker_amount = 0, taker_amount = 0, effective_shares = 0;
         if (!compute_order_amounts(side, price_raw, requested_shares, tick,
                                    market_order, maker_amount, taker_amount,
@@ -450,10 +456,19 @@ public:
         uint64_t pool_size = 0, pool_maker = 0, pool_taker = 0;
         // Dynamic ladder TTL (P3): volatile regimes tighten the freshness
         // window (BOT_POOL_VOL_TTL_MS); volatile=off keeps the static TTL.
-        bool presigned = pool_.acquire_at_most(
-            side, price_raw, tick, effective_shares, body,
-            pool_size, pool_maker, pool_taker,
-            volatility_ ? volatility_->effective_ttl_ms() : 0);
+        // A pre-signed ladder is built for orders that are consumed immediately
+        // and expire on a TTL.  A resting GTC/GTD order lives on the book until
+        // it is filled or cancelled, so its lifetime is governed by
+        // cancel/replace rather than by a pre-signed freshness window.  Using
+        // the pool here would hand the venue a signature whose size and TTL
+        // assumptions no longer hold, so resting entries sign inline.
+        bool presigned = false;
+        if (!entry_rests) {
+            presigned = pool_.acquire_at_most(
+                side, price_raw, tick, effective_shares, body,
+                pool_size, pool_maker, pool_taker,
+                volatility_ ? volatility_->effective_ttl_ms() : 0);
+        }
         if (presigned) {
             effective_shares = pool_size;
             maker_amount = pool_maker;
@@ -467,8 +482,8 @@ public:
             const uint64_t expiration = cfg_.wire_expiration(order.timestamp_ms / 1000ULL);
             if (!build_wire_body(order, signature, cfg_.token_id_dec,
                                  cfg_.maker_hex, cfg_.signer_hex,
-                                 cfg_.owner_api_key, cfg_.order_type, body,
-                                 expiration))
+                                 cfg_.owner_api_key, cfg_.entry_order_type,
+                                 body, expiration))
                 return TickResult::BODY_FAILED;
         }
 

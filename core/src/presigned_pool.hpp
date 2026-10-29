@@ -54,8 +54,13 @@ public:
         Buffer& dst = buffers_[next];
         dst.count = 0;
         const uint64_t now = now_ms();
-        const bool market_order = std::strcmp(cfg_.order_type, "FAK") == 0 ||
-                                  std::strcmp(cfg_.order_type, "FOK") == 0;
+        // The pool builds ENTRY orders, so it must follow the entry type. In
+        // practice a resting entry (GTC/GTD) bypasses the pool entirely — see
+        // the note in execute_signal_pipeline — but deriving this from the
+        // wrong field would leave a silent trap if that ever changed.
+        const bool market_order =
+            std::strcmp(cfg_.entry_order_type, "FAK") == 0 ||
+            std::strcmp(cfg_.entry_order_type, "FOK") == 0;
         const uint64_t expiration = cfg_.wire_expiration(now / 1000ULL);
 
         for (uint8_t side = K_SIDE_BUY; side <= K_SIDE_SELL; ++side) {
@@ -91,7 +96,8 @@ public:
                 if (n >= SLOT_COUNT) break;
                 if (!build_wire_body(order, signature, cfg_.token_id_dec,
                                      cfg_.maker_hex, cfg_.signer_hex,
-                                     cfg_.owner_api_key, cfg_.order_type,
+                                     cfg_.owner_api_key,
+                                     cfg_.entry_order_type,
                                      dst.bodies[n], expiration))
                     continue;
                 Meta& meta = dst.meta[n];
