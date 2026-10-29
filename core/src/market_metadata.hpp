@@ -45,6 +45,11 @@ struct MarketRewards {
     uint32_t max_spread_bps = 0;   // rewardsMaxSpread in cents -> basis points
     uint64_t min_size_shares = 0;  // rewardsMinSize, 1e6 fixed point
     bool has_program = false;      // at least one positive daily rate
+    // Market mechanics, not rewards. These decide whether an order is even
+    // accepted: quoting off-tick on a 0.001 market with a 0.01 default makes the
+    // venue reject everything, and a hand-typed fee category can be wrong.
+    uint64_t tick_size_units = 0;  // orderPriceMinTickSize, 1e6 fixed point
+    double taker_fee_rate = -1.0;  // feeSchedule.rate, negative = absent
 };
 
 enum class RewardParse : uint8_t {
@@ -134,6 +139,38 @@ inline bool mm_read_u64(const char* begin, const char* end, const char* key,
     return true;
 }
 
+// Returns the span of `"key":{...}` including the braces. A flat search for
+// "rate" would be a guess; the fee lives inside feeSchedule and must be read
+// from there.
+inline bool mm_find_object(const char* begin, const char* end, const char* key,
+                           size_t key_len, const char*& obj_begin,
+                           const char*& obj_end) noexcept {
+    const char* v = nullptr;
+    const char* ve = nullptr;
+    if (!mm_find(begin, end, key, key_len, v, ve)) return false;
+    const char* open = nullptr;
+    for (const char* p = v; p < ve; ++p) {
+        if (*p == '{') {
+            open = p;
+            break;
+        }
+    }
+    if (!open) return false;
+    int depth = 0;
+    for (const char* p = open; p < end; ++p) {
+        if (*p == '{') ++depth;
+        else if (*p == '}') {
+            --depth;
+            if (depth == 0) {
+                obj_begin = open + 1;
+                obj_end = p;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // ── Parser ──────────────────────────────────────────────────────────────────
 // Accepts either a single market object or an array of them (Gamma returns an
 // array for /markets?slug=…); the first object that carries reward fields wins.
@@ -195,6 +232,25 @@ inline RewardParse parse_market_rewards(const char* json, size_t len,
     parsed.daily_rate_usdc = total_rate;
     parsed.has_program = total_rate > 0 && parsed.max_spread_bps > 0 &&
                          parsed.min_size_shares > 0;
+
+    // orderPriceMinTickSize: 0.001 on the up/down markets, 0.01 elsewhere.
+    double tick = 0.0;
+    if (mm_read_double(begin, end, "orderPriceMinTickSize", 21, tick) &&
+        tick > 0.0 && tick < 1.0) {
+        const double units = tick * 1000000.0;
+        const uint64_t u = static_cast<uint64_t>(units + 0.5);
+        if (u > 0 && 1000000ULL % u == 0) parsed.tick_size_units = u;
+    }
+
+    // feeSchedule.rate, read from inside the nested object only.
+    const char* fs_begin = nullptr;
+    const char* fs_end = nullptr;
+    if (mm_find_object(begin, end, "feeSchedule", 11, fs_begin, fs_end)) {
+        double rate = -1.0;
+        if (mm_read_double(fs_begin, fs_end, "rate", 4, rate) && rate >= 0.0 &&
+            rate <= 1.0)
+            parsed.taker_fee_rate = rate;
+    }
 
     out = parsed;
     return RewardParse::Ok;

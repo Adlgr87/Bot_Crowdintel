@@ -34,7 +34,9 @@ static const char* kLiveMarket =
     R"("conditionId":"0x7586a96520578acaaaa4ea84a2582f197f84255da1f3392a7aa300386c187b37",)"
     R"("assetAddress":"0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",)"
     R"("rewardsAmount":0,"rewardsDailyRate":3000,)"
-    R"("startDate":"2026-10-27","endDate":"2500-12-31"}]}])";
+    R"("startDate":"2026-10-27","endDate":"2500-12-31"}],)"
+    R"("orderPriceMinTickSize":0.001,)"
+    R"("feeSchedule":{"exponent":1,"rate":0.07,"takerOnly":true,"rebateRate":0.2}}])";
 
 static void test_live_shape() {
     std::printf("live_shape\n");
@@ -48,6 +50,12 @@ static void test_live_shape() {
           "rewardsMinSize 200 shares becomes 2e8 in 1e6 fixed point");
     CHECK(r.daily_rate_usdc == 3000, "rewardsDailyRate summed into the pool");
     CHECK(r.has_program, "an active program is reported");
+    CHECK(r.tick_size_units == 1000ULL,
+          "orderPriceMinTickSize 0.001 becomes 1000 units of 1e6");
+    CHECK(r.taker_fee_rate == 0.07, "feeSchedule.rate read from the nested object");
+    // The distractor that a flat search would have picked up.
+    CHECK(r.taker_fee_rate != 3000.0,
+          "rewardsDailyRate is NOT mistaken for the fee rate");
 }
 
 static void test_fractional_band() {
@@ -94,6 +102,37 @@ static void test_no_program() {
           "multiple reward entries sum");
 }
 
+static void test_market_mechanics() {
+    std::printf("market_mechanics\n");
+    MarketRewards r{};
+    const char* m =
+        R"({"rewardsMaxSpread":4.5,"rewardsMinSize":50,)"
+        R"("orderPriceMinTickSize":0.01,)"
+        R"("feeSchedule":{"rate":0.04,"takerOnly":true}})";
+    CHECK(parse_market_rewards(m, std::strlen(m), r) == RewardParse::Ok,
+          "a market with standard tick parses");
+    CHECK(r.tick_size_units == 10000ULL, "0.01 becomes 10000 units");
+    CHECK(r.taker_fee_rate == 0.04, "a different fee rate is read verbatim");
+
+    // A tick that does not divide the 1e6 domain must be refused, not rounded
+    // into an invalid one.
+    MarketRewards r2{};
+    const char* bad =
+        R"({"rewardsMaxSpread":4.5,"rewardsMinSize":50,)"
+        R"("orderPriceMinTickSize":0.0003})";
+    CHECK(parse_market_rewards(bad, std::strlen(bad), r2) == RewardParse::Ok,
+          "a market with an unusable tick still parses");
+    CHECK(r2.tick_size_units == 0ULL, "an unusable tick is reported as absent");
+
+    // No feeSchedule at all: the caller keeps its configured rate.
+    MarketRewards r3{};
+    const char* no_fee = R"({"rewardsMaxSpread":4.5,"rewardsMinSize":50})";
+    CHECK(parse_market_rewards(no_fee, std::strlen(no_fee), r3) ==
+              RewardParse::Ok,
+          "a market without a fee schedule parses");
+    CHECK(r3.taker_fee_rate < 0.0, "an absent fee is negative, never 0.0");
+}
+
 static void test_rejections() {
     std::printf("rejections\n");
     MarketRewards r{};
@@ -126,6 +165,7 @@ int main() {
     test_live_shape();
     test_fractional_band();
     test_no_program();
+    test_market_mechanics();
     test_rejections();
     std::printf("\n--- Results: %d/%d passed, %d failed ---\n",
                 g_tests - g_failures, g_tests, g_failures);

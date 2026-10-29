@@ -218,7 +218,7 @@ Behaviour that was verified rather than assumed:
 | `test_maker_quote` | 41 | placement, reward band, inventory skew, tick rounding |
 | `test_quote_registry` | 37 | fills, supersede, price/age/size replace rules |
 | `test_cancel_id` | 14 | order-id validation incl. JSON injection |
-| `test_market_metadata` | 15 | fractional-cent band → bps |
+| `test_market_metadata` | 25 | fractional-cent band → bps, tick, feeSchedule.rate |
 | `test_resting_mock` | 30 | fills only on a cross |
 | `test_resting_client` | 26 | OPEN vs FILL, cancel, malformed bodies |
 | `test_maker_loop` | 20 | place → keep → replace (cancel first) → withdraw |

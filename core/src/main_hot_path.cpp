@@ -499,14 +499,37 @@ int main() {
     const bool entry_rests_cfg = std::strcmp(cfg.entry_order_type, "GTC") == 0 ||
                                  std::strcmp(cfg.entry_order_type, "GTD") == 0;
 #if defined(CROWDINTEL_HAVE_NETWORK) && !defined(CROWDINTEL_FORCE_MOCK)
-    if (entry_rests_cfg && cfg.market_slug[0] &&
+    // Fetched for ANY real market, not only for the maker: tick size and the
+    // fee rate decide whether a taker order is accepted too. Rewards are only
+    // APPLIED when entries rest, since a taker never earns them.
+    if (cfg.market_slug[0] &&
         std::strcmp(cfg.market_slug, "mock-market") != 0) {
         crowdintel::MarketRewards rewards{};
         const crowdintel::RewardParse rp = crowdintel::fetch_market_rewards(
             cfg.gamma_host, cfg.market_slug, rewards);
         if (rp == crowdintel::RewardParse::Ok) {
-            cfg.rewards_max_spread_bps = rewards.max_spread_bps;
-            cfg.rewards_min_size_shares = rewards.min_size_shares;
+            if (entry_rests_cfg) {
+                cfg.rewards_max_spread_bps = rewards.max_spread_bps;
+                cfg.rewards_min_size_shares = rewards.min_size_shares;
+            }
+            // Market mechanics apply to every path.
+            if (rewards.tick_size_units != 0 &&
+                rewards.tick_size_units != cfg.tick_size) {
+                std::fprintf(stdout,
+                    "[market] tick %.6f from the venue (was %.6f)\n",
+                    static_cast<double>(rewards.tick_size_units) * 1e-6,
+                    static_cast<double>(cfg.tick_size) * 1e-6);
+                cfg.tick_size = rewards.tick_size_units;
+            }
+            if (rewards.taker_fee_rate >= 0.0 &&
+                std::fabs(rewards.taker_fee_rate - cfg.taker_fee_rate) > 1e-9) {
+                std::fprintf(stdout,
+                    "[market] fee %.5f from feeSchedule (was %.5f, source=%s)\n",
+                    rewards.taker_fee_rate, cfg.taker_fee_rate,
+                    fee_rate_source_name(cfg.fee_rate_source));
+                cfg.taker_fee_rate = rewards.taker_fee_rate;
+                cfg.fee_rate_source = FeeRateSource::Category;
+            }
             std::fprintf(stdout,
                 "[rewards] from venue: pool=$%llu/day band=%ubps min_size=%.0f "
                 "program=%d\n",
