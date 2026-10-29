@@ -24,6 +24,16 @@
 #include <thread>
 #include <vector>
 
+#include <poll.h>
+
+// POSIX sockets.  This header was orphaned before Fase 3 wired it into the
+// binary, so it never needed to be self-contained; it does now.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 namespace crowdintel {
 
 // ── Health Status ──────────────────────────────────────────────────────────────
@@ -60,6 +70,9 @@ struct HealthServerConfig {
     std::string bind_address = "0.0.0.0";
     std::chrono::seconds timeout{5};
     std::function<BotStatusSnapshot()> status_callback;
+    // Fase 3: the caller appends its own Prometheus exposition lines.  Keeping
+    // this generic avoids coupling the server to any concrete metrics type.
+    std::function<std::string()> extra_metrics;
 };
 
 // ── Health Server ──────────────────────────────────────────────────────────────
@@ -174,8 +187,24 @@ private:
     }
 
     // ─── Server Loop ───────────────────────────────────────────────────────────
+    // A blocking accept() never returns when stop() closes the descriptor from
+    // another thread, so SIGTERM used to hang the whole process once this
+    // server was wired in.  A bounded poll() makes shutdown deterministic and
+    // costs nothing: the endpoint is cold path.
     void run() {
         while (running_.load(std::memory_order_acquire)) {
+            struct pollfd pfd{};
+            pfd.fd = listen_fd_;
+            pfd.events = POLLIN;
+
+            const int ready = ::poll(&pfd, 1, 100 /* ms */);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (ready == 0) continue;            // timeout: re-check running_
+            if ((pfd.revents & POLLIN) == 0) break;
+
             struct sockaddr_in client_addr{};
             socklen_t addr_len = sizeof(client_addr);
 
@@ -184,15 +213,27 @@ private:
                                    &addr_len);
 
             if (client_fd < 0) {
-                if (errno == EINTR || errno == EAGAIN) {
+                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                     continue;
                 }
                 break;
             }
 
+            // A client that connects and never sends must not pin this thread
+            // forever: that would both stall shutdown and let one probe take
+            // the whole monitoring surface down.
+            apply_client_timeouts(client_fd);
             handle_request(client_fd);
             close_fd(client_fd);
         }
+    }
+
+    void apply_client_timeouts(int fd) {
+        struct timeval tv{};
+        tv.tv_sec = static_cast<time_t>(config_.timeout.count());
+        tv.tv_usec = 0;
+        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
 
     // ─── Request Handler ───────────────────────────────────────────────────────
@@ -212,7 +253,7 @@ private:
         // Simple HTTP parsing
         size_t first_line_end = request.find("\r\n");
         if (first_line_end == std::string::npos) {
-            send_response(client_fd, 400, "Bad Request", {});
+            send_response(client_fd, 400, "Bad Request", std::string{});
             return;
         }
 
@@ -220,7 +261,7 @@ private:
         std::vector<std::string> parts = split(first_line, ' ');
 
         if (parts.size() < 2) {
-            send_response(client_fd, 400, "Bad Request", {});
+            send_response(client_fd, 400, "Bad Request", std::string{});
             return;
         }
 
@@ -228,7 +269,7 @@ private:
         std::string path = parts[1];
 
         if (method != "GET" && method != "HEAD") {
-            send_response(client_fd, 405, "Method Not Allowed", {});
+            send_response(client_fd, 405, "Method Not Allowed", std::string{});
             return;
         }
 
@@ -242,7 +283,7 @@ private:
         } else if (path == "/status") {
             handle_status(client_fd);
         } else {
-            send_response(client_fd, 404, "Not Found", {});
+            send_response(client_fd, 404, "Not Found", std::string{});
         }
     }
 
@@ -303,6 +344,17 @@ private:
             "# HELP crowdintel_rejects_total Total rejects\n"
             "# TYPE crowdintel_rejects_total counter\n"
             "crowdintel_rejects_total " + std::to_string(status.total_rejects) + "\n";
+
+        // Fase 3: caller-supplied series (decision-reason histogram, edge,
+        // slippage, Brier).  A throwing callback must never take the health
+        // endpoint down, so it is contained here.
+        if (config_.extra_metrics) {
+            try {
+                metrics += config_.extra_metrics();
+            } catch (...) {
+                metrics += "# crowdintel_extra_metrics_error 1\n";
+            }
+        }
 
         send_response(client_fd, 200, "OK", metrics);
     }

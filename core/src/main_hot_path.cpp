@@ -35,8 +35,10 @@
 #include "evidence_ingress.hpp"
 #include "execution_engine.hpp"
 #include "market_config.hpp"
+#include "metrics.hpp"
 #include "mock_client.hpp"
 #include "presigned_pool.hpp"
+#include "../../infra/monitoring/health_server.hpp"
 
 #if defined(CROWDINTEL_HAVE_NETWORK) && !defined(CROWDINTEL_FORCE_MOCK)
 #include "alpha_http_receiver.hpp"
@@ -112,12 +114,16 @@ void mock_feed(SPSC_RingBuffer<AlphaSignal>& queue, OrderBookL2& book,
 
 template <typename Engine>
 long run_engine(Engine& engine, const MarketConfig& cfg,
-                uint64_t* counts, size_t count_size) {
+                uint64_t* counts, size_t count_size,
+                crowdintel::Metrics* metrics) {
     long productive = 0;
     while (g_running.load(std::memory_order_acquire)) {
         const TickResult result = engine.run_tick();
         const size_t index = static_cast<size_t>(result);
         if (index < count_size) ++counts[index];
+        // Fase 3: one relaxed fetch_add per tick.  This is the only hot-path
+        // cost of the whole metrics layer.
+        if (metrics) metrics->on_decision(static_cast<uint32_t>(index));
         if (result == TickResult::NO_SIGNAL) idle_wait();
         else ++productive;
         if (cfg.max_ticks > 0 && productive >= cfg.max_ticks) break;
@@ -362,6 +368,107 @@ int main() {
     std::atomic<bool> workers_running{true};
     std::atomic<bool> trading_enabled{true};
 
+    // ── Fase 3: business metrics + Prometheus/health endpoint ──────────────
+    // The counters answer the only question that matters before sizing up:
+    // WHY the engine is not trading.  The endpoint is cold-path only.
+    static_assert(static_cast<size_t>(TickResult::COUNT) <=
+                      crowdintel::METRICS_RESULT_SLOTS,
+                  "TickResult grew past the metrics histogram; widen "
+                  "METRICS_RESULT_SLOTS");
+    crowdintel::Metrics metrics;
+    std::unique_ptr<crowdintel::HealthServer> health;
+    if (cfg.metrics_port != 0) {
+        crowdintel::HealthServerConfig hcfg;
+        hcfg.port = cfg.metrics_port;
+        hcfg.bind_address = "127.0.0.1";
+        hcfg.status_callback = [&]() {
+            crowdintel::BotStatusSnapshot snap{};
+            snap.overall_status =
+                g_running.load(std::memory_order_acquire) ? crowdintel::HealthStatus::HEALTHY
+                                                         : crowdintel::HealthStatus::UNHEALTHY;
+            snap.kill_switch_active = risk.killed();
+            snap.venue_connected =
+                mock ? true : trading_enabled.load(std::memory_order_acquire);
+            snap.feeds_active = true;
+            // Exposure comes from the authoritative position tracker.
+            snap.committed_exposure_usd =
+                static_cast<double>(tracker.exposure_worst_cost()) * 1e-6;
+            const crowdintel::MetricsSnapshot m = metrics.snapshot();
+            snap.total_orders = m.orders_requested;
+            snap.total_fills = m.fills;
+            // Rejections are verdicts that actively refused a signal.  An idle
+            // "no_signal" tick is not a rejection; counting it made this field
+            // read as 36k "rejects" on a perfectly healthy idle loop.
+            uint64_t not_rejects = 0;
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::NO_SIGNAL)];
+            not_rejects += m.reject_reason[static_cast<size_t>(TickResult::QUEUED)];
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::SUBMITTED)];
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::ACCOUNT_APPLIED)];
+            snap.total_rejects =
+                m.decisions > not_rejects ? m.decisions - not_rejects : 0;
+            // latency_* and daily_pnl_pct still need per-stage timestamps and
+            // a settlement feed; they stay zero rather than being invented.
+            return snap;
+        };
+        // Decision-reason histogram, edge, slippage and Brier.  This is the
+        // series that decides whether a strategy has alpha at all.
+        hcfg.extra_metrics = [&]() {
+            const crowdintel::MetricsSnapshot m = metrics.snapshot();
+            std::string out;
+            out.reserve(4096);
+            out += "# HELP crowdintel_decisions_total Engine ticks evaluated\n"
+                   "# TYPE crowdintel_decisions_total counter\n"
+                   "crowdintel_decisions_total " + std::to_string(m.decisions) + "\n";
+            out += "# HELP crowdintel_orders_requested_total Orders enqueued\n"
+                   "# TYPE crowdintel_orders_requested_total counter\n"
+                   "crowdintel_orders_requested_total " +
+                   std::to_string(m.orders_requested) + "\n";
+            out += "# HELP crowdintel_fills_total Fills observed\n"
+                   "# TYPE crowdintel_fills_total counter\n"
+                   "crowdintel_fills_total " + std::to_string(m.fills) + "\n";
+            out += "# HELP crowdintel_decisions_by_result Decision verdict histogram\n"
+                   "# TYPE crowdintel_decisions_by_result counter\n";
+            for (size_t i = 0; i < static_cast<size_t>(TickResult::COUNT); ++i) {
+                out += "crowdintel_decisions_by_result{result=\"" +
+                       std::string(tick_result_name(static_cast<TickResult>(i))) +
+                       "\"} " + std::to_string(m.reject_reason[i]) + "\n";
+            }
+            out += "# HELP crowdintel_edge_mean Net edge at submit (probability)\n"
+                   "# TYPE crowdintel_edge_mean gauge\n"
+                   "crowdintel_edge_mean " + std::to_string(m.edge_mean) + "\n";
+            out += "# HELP crowdintel_edge_samples Orders contributing to edge_mean\n"
+                   "# TYPE crowdintel_edge_samples counter\n"
+                   "crowdintel_edge_samples " + std::to_string(m.edge_samples) + "\n";
+            out += "# HELP crowdintel_slippage_bps_mean Mean adverse fill slippage\n"
+                   "# TYPE crowdintel_slippage_bps_mean gauge\n"
+                   "crowdintel_slippage_bps_mean " + std::to_string(m.slip_mean_bps) + "\n";
+            out += "# HELP crowdintel_brier_score Calibration error (lower is better)\n"
+                   "# TYPE crowdintel_brier_score gauge\n"
+                   "crowdintel_brier_score " + std::to_string(m.brier) + "\n";
+            out += "# HELP crowdintel_brier_samples Outcomes contributing to Brier\n"
+                   "# TYPE crowdintel_brier_samples counter\n"
+                   "crowdintel_brier_samples " + std::to_string(m.brier_samples) + "\n";
+            out += "# HELP crowdintel_taker_fee_rate Category fee rate in force\n"
+                   "# TYPE crowdintel_taker_fee_rate gauge\n"
+                   "crowdintel_taker_fee_rate " + std::to_string(cfg.taker_fee_rate) + "\n";
+            return out;
+        };
+        health = std::make_unique<crowdintel::HealthServer>(hcfg);
+        if (health->start()) {
+            std::fprintf(stdout,
+                "[metrics] /health /ready /metrics /status on 127.0.0.1:%u\n",
+                static_cast<unsigned>(cfg.metrics_port));
+        } else {
+            std::fprintf(stderr,
+                "WARN: metrics server could not bind 127.0.0.1:%u; continuing\n",
+                static_cast<unsigned>(cfg.metrics_port));
+            health.reset();
+        }
+    }
+
     // Cold journal consumer: the only renderer of hot-path audit events.
     std::thread journal_thread([&] {
         pin_to_cpu(cfg.cold_cpu);
@@ -596,18 +703,20 @@ int main() {
         ExecutionEngine<MockCLOBClient> engine(
             cfg, *book, *signals, signer, pool, mock_client, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT);
+        run_engine(engine, cfg, counts, RESULT_COUNT, &metrics);
     }
 #if defined(CROWDINTEL_LIVE)
     else {
         ExecutionEngine<OrderGateway<LightweightCLOBClient>> engine(
             cfg, *book, *signals, signer, pool, *gateway, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT);
+        run_engine(engine, cfg, counts, RESULT_COUNT, &metrics);
     }
 #endif
 
     workers_running.store(false, std::memory_order_release);
+    // Stop the endpoint before the objects its callbacks capture go away.
+    if (health) health->stop();
 #if defined(CROWDINTEL_LIVE)
     if (alpha_receiver) alpha_receiver->stop();
     if (user_listener) user_listener->stop();

@@ -180,6 +180,7 @@ struct MarketConfig {
     int pin_cpu = -1;
     int cold_cpu = -1;
     long max_ticks = 0;
+    uint16_t metrics_port = 8080;  // BOT_METRICS_PORT; 0 disables the endpoint
     bool mock_mode = false;
     bool paper_mode_requested = false;  // BOT_MODE=paper (behaves as mock)
     bool live_armed = false;
@@ -512,6 +513,13 @@ struct MarketConfig {
             alpha_port_l < 1 || alpha_port_l > 65535)
             return "BOT_ALPHA_PORT is invalid";
         alpha_port = static_cast<uint16_t>(alpha_port_l);
+        // Fase 3: 0 disables the /metrics + /health endpoint entirely.
+        long metrics_port_l = static_cast<long>(metrics_port);
+        if (!env_l("BOT_METRICS_PORT", static_cast<long>(metrics_port),
+                   metrics_port_l) ||
+            metrics_port_l < 0 || metrics_port_l > 65535)
+            return "BOT_METRICS_PORT must be 0 (disabled) or a valid TCP port";
+        metrics_port = static_cast<uint16_t>(metrics_port_l);
         market_hash = alpha_hash_bytes(market_slug, std::strlen(market_slug));
 
         if (std::strcmp(order_type, "GTC") != 0 &&
