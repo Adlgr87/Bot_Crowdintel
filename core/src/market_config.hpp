@@ -139,6 +139,10 @@ struct MarketConfig {
     bool neg_risk = false;
     uint8_t signature_type = 0;
     char order_type[8] = "FAK";
+    // Motor C — resting maker entries. `order_type` governs exits (always FAK
+    // for certainty of closure); this governs entries. GTC means the order rests
+    // and is a maker, which on this venue pays zero fee (feeSchedule.takerOnly).
+    char entry_order_type[8] = "FAK";
     uint64_t gtd_ttl_seconds = 0;
     char clob_host[128] = "https://clob.polymarket.com";
     char ws_host[192] = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -156,6 +160,14 @@ struct MarketConfig {
     double min_confidence = 0.85;
     double max_q_value = 0.05;
     double taker_fee_rate = 0.07;       // category rate; see FeeCategory above
+    // Motor C maker economics (docs/EXPERIMENT_MOTOR_C.md). Makers pay nothing
+    // on this venue, so the whole sleeve's risk reduces to one tunable number.
+    double maker_fee_rate = 0.0;
+    uint32_t adverse_sel_bps = 25;         // cushion against adverse fills
+    uint32_t min_edge_bps = 10;            // profit floor on top of the cushion
+    uint32_t rewards_max_spread_bps = 0;   // venue band, in bps (3.5c == 350)
+    uint64_t rewards_min_size_shares = 0;  // 1e6 scale; below this, no rewards
+    uint64_t quote_size_shares = 0;        // 1e6 scale, per side
     FeeCategory fee_category = FeeCategory::Unknown;          // Fase 1.1
     FeeRateSource fee_rate_source = FeeRateSource::Default;   // Fase 1.1
     double max_order_usd = 100.0;
@@ -313,6 +325,8 @@ struct MarketConfig {
         long neg_risk_l = 0, sig = 0, presign_l = 0, signal_l = 0;
         long book_age_l = 0, pin_l = -1, cold_l = -1, ticks_l = 0;
         long armed_l = 0, gtd_l = 0;
+        long adverse_l = 25, min_edge_bps_l = 10, rewards_band_l = 0;
+        long rewards_min_l = 0, quote_size_l = 0;
         long reservation_ttl_l = 10000, reconcile_l = 30, pool_vol_ttl_l = 500;
         long vol_ticks_l = 200, bayes_on_l = 1;
         double tick = 0, min_size = 0, initial_position = 0;
@@ -324,6 +338,12 @@ struct MarketConfig {
             !env_d("BOT_MIN_EDGE", min_edge, min_edge) ||
             !env_d("BOT_MIN_CONFIDENCE", min_confidence, min_confidence) ||
             !env_d("BOT_MAX_Q_VALUE", max_q_value, max_q_value) ||
+            !env_d("BOT_MK_MAKER_FEE_RATE", maker_fee_rate, maker_fee_rate) ||
+            !env_l("BOT_MK_ADVERSE_BPS", 25, adverse_l) ||
+            !env_l("BOT_MK_MIN_EDGE_BPS", 10, min_edge_bps_l) ||
+            !env_l("BOT_MK_REWARDS_BAND_BPS", 0, rewards_band_l) ||
+            !env_l("BOT_MK_REWARDS_MIN_SIZE", 0, rewards_min_l) ||
+            !env_l("BOT_MK_QUOTE_SIZE", 0, quote_size_l) ||
             !env_d("BOT_MIN_SIZE_SHARES", 5.0, min_size) ||
             !env_d("BOT_INITIAL_POSITION_SHARES", 0.0, initial_position) ||
             !env_d("BOT_INITIAL_POSITION_AVG_PRICE", 0.50, initial_avg) ||
@@ -496,6 +516,25 @@ struct MarketConfig {
         pin_cpu = static_cast<int>(pin_l);
         cold_cpu = static_cast<int>(cold_l);
         max_ticks = ticks_l;
+        if (adverse_l < 0 || adverse_l > 5000 || min_edge_bps_l < 0 ||
+            min_edge_bps_l > 5000 || rewards_band_l < 0 ||
+            rewards_band_l > 10000 || rewards_min_l < 0 || quote_size_l < 0)
+            return "maker (Motor C) configuration is out of range";
+        if (maker_fee_rate < 0.0 || maker_fee_rate > 1.0)
+            return "BOT_MK_MAKER_FEE_RATE must be within [0, 1]";
+        adverse_sel_bps = static_cast<uint32_t>(adverse_l);
+        min_edge_bps = static_cast<uint32_t>(min_edge_bps_l);
+        rewards_max_spread_bps = static_cast<uint32_t>(rewards_band_l);
+        rewards_min_size_shares = static_cast<uint64_t>(rewards_min_l);
+        quote_size_shares = static_cast<uint64_t>(quote_size_l);
+        if (!copy_env(entry_order_type, "BOT_ENTRY_ORDER_TYPE", order_type))
+            return "configuration string exceeds its bounded capacity";
+        if (std::strcmp(entry_order_type, "GTC") != 0 &&
+            std::strcmp(entry_order_type, "GTD") != 0 &&
+            std::strcmp(entry_order_type, "FOK") != 0 &&
+            std::strcmp(entry_order_type, "FAK") != 0)
+            return "BOT_ENTRY_ORDER_TYPE must be GTC, GTD, FOK, or FAK";
+
         const char* mode = std::getenv("BOT_MODE");
         if (mode && *mode && std::strcmp(mode, "mock") != 0 &&
             std::strcmp(mode, "paper") != 0 && std::strcmp(mode, "live") != 0)
