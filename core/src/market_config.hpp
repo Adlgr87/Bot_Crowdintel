@@ -186,6 +186,9 @@ struct MarketConfig {
     bool live_armed = false;
     char tls_pin[128]{};
     char kill_switch_file[192] = "/tmp/crowdintel.kill";
+    // Fase 2 — durable daily risk state. Must live on real storage, never on
+    // tmpfs: the whole point is to survive the reboot or crash that tmpfs loses.
+    char state_file[192] = "/var/lib/crowdintel/daily_state.bin";
 
     // ── Multi-feed configuration (PHASE-1 enhancement) ──────────────────────
     uint32_t strategy_window_seconds = 300;  // 300=5m, 900=15m
@@ -490,6 +493,10 @@ struct MarketConfig {
             !copy_env(tls_pin, "BOT_TLS_PIN", "") ||
             !copy_env(kill_switch_file, "BOT_KILL_SWITCH_FILE",
                       kill_switch_file) ||
+            // Fase 2: mock runs must not need a writable /var/lib.
+            !copy_env(state_file, "BOT_STATE_FILE",
+                      mock_mode ? "/tmp/crowdintel_daily_state.bin"
+                                : "/var/lib/crowdintel/daily_state.bin") ||
             !copy_env(market_slug, "BOT_MARKET_SLUG",
                       mock_mode ? "mock-market" : "") ||
             !copy_env(bayes_sources, "BOT_BAYES_SOURCES", "") ||
@@ -504,6 +511,7 @@ struct MarketConfig {
         if (!safe_config_text(order_type) || !safe_config_text(clob_host) ||
             !safe_config_text(ws_host) || !safe_config_text(tls_pin) ||
             !safe_config_text(kill_switch_file) ||
+            !safe_config_text(state_file) ||
             !safe_config_text(market_slug) || !safe_config_text(alpha_bind))
             return "configuration strings cannot contain control characters";
         if (tls_pin[0] && !valid_tls_pins(tls_pin))

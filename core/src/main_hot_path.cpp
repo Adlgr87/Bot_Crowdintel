@@ -30,6 +30,7 @@
 #include "../include/risk_manager.hpp"
 #include "../include/volatility_gate.hpp"
 #include "../include/spsc_ring_buffer.hpp"
+#include "../include/daily_state.hpp"
 #include "../include/time_utils.hpp"
 #include "alpha_parser.hpp"
 #include "evidence_ingress.hpp"
@@ -128,6 +129,86 @@ long run_engine(Engine& engine, const MarketConfig& cfg,
         else ++productive;
         if (cfg.max_ticks > 0 && productive >= cfg.max_ticks) break;
     }
+    return productive;
+}
+
+// Fase 2 — run the tick loop with a cold persister attached.  The persister is
+// the only writer of the daily state file and it runs off the hot path: the
+// tick loop never touches the filesystem.
+template <typename Engine>
+long run_engine_persisting(Engine& engine, const MarketConfig& cfg,
+                           uint64_t* counts, size_t count_size,
+                           crowdintel::Metrics* metrics, RiskManager& risk,
+                           double restored_volume, uint64_t today) {
+    engine.restore_daily_state(restored_volume, today);
+
+    std::atomic<bool> persist_run{true};
+    std::thread persister([&] {
+        pin_to_cpu(cfg.cold_cpu);
+
+        crowdintel::DailyStateRecord rec{};
+        rec.utc_day = today;
+        rec.daily_buy_volume_usd = restored_volume;
+        rec.kill_latched = risk.killed() ? 1 : 0;
+        rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+        double last_volume = restored_volume;
+        uint8_t last_kill = rec.kill_latched;
+        uint8_t last_day_kill = rec.day_kill_latched;
+        bool warned = false;
+
+        // Seed the record immediately: a crash before the first trade must
+        // still leave today's day number on disk, otherwise the restart has no
+        // way to tell "first run" from "lost state".
+        if (!crowdintel::save_daily_state(cfg.state_file, rec)) {
+            std::fprintf(stderr, "WARN: cannot persist risk state to %s\n",
+                         cfg.state_file);
+            warned = true;
+        }
+
+        while (persist_run.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            const double volume = engine.daily_buy_volume();
+            const uint64_t day = engine.daily_buy_volume_day();
+            const uint8_t kill = risk.killed() ? 1 : 0;
+            const uint8_t day_kill = risk.day_kill_latched() ? 1 : 0;
+            if (volume == last_volume && kill == last_kill &&
+                day_kill == last_day_kill && rec.utc_day == day)
+                continue;  // nothing changed: no write, no fsync
+
+            if (day) rec.utc_day = day;
+            rec.daily_buy_volume_usd = volume;
+            rec.kill_latched = kill;
+            rec.day_kill_latched = day_kill;
+            if (crowdintel::save_daily_state(cfg.state_file, rec)) {
+                last_volume = volume;
+                last_kill = kill;
+                last_day_kill = day_kill;
+                warned = false;
+            } else if (!warned) {
+                std::fprintf(stderr, "WARN: cannot persist risk state to %s\n",
+                             cfg.state_file);
+                warned = true;
+            }
+            if (kill && !day_kill) {
+                // An operator kill is a stop, not a data point; keep the file
+                // current but do not spin on it.
+                last_kill = kill;
+            }
+        }
+
+        // Final flush: the shutdown path must not lose the last increments.
+        const uint64_t day = engine.daily_buy_volume_day();
+        if (day) rec.utc_day = day;
+        rec.daily_buy_volume_usd = engine.daily_buy_volume();
+        rec.kill_latched = risk.killed() ? 1 : 0;
+        rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+        (void)crowdintel::save_daily_state(cfg.state_file, rec);
+    });
+
+    const long productive = run_engine(engine, cfg, counts, count_size, metrics);
+    persist_run.store(false, std::memory_order_release);
+    if (persister.joinable()) persister.join();
     return productive;
 }
 
@@ -277,6 +358,74 @@ int main() {
         return 1;
     }
 
+    // ── Fase 2: adopt the durable daily risk state ─────────────────────────
+    // A restart must not re-arm the daily loss budget or clear a kill.  The
+    // policy below is deliberately asymmetric:
+    //   Missing  -> legitimate first run, start at zero and say so;
+    //   Corrupt  -> refuse to start in LIVE: not knowing today's exposure is
+    //               worse than not trading;
+    //   IoError  -> same, because an unreadable state file means the path or
+    //               permissions are wrong, which will also break persistence.
+    const uint64_t today = utc_day_number();
+    double restored_volume = 0.0;
+    bool restore_kill = false;
+    bool restore_day_kill = false;
+    {
+        crowdintel::DailyStateRecord saved{};
+        const crowdintel::DailyStateLoad loaded =
+            crowdintel::load_daily_state(cfg.state_file, saved);
+        switch (loaded) {
+            case crowdintel::DailyStateLoad::Loaded:
+                restore_kill = saved.kill_latched != 0;
+                restore_day_kill = saved.day_kill_latched != 0;
+                if (saved.utc_day == today) {
+                    restored_volume = saved.daily_buy_volume_usd;
+                    std::fprintf(stdout,
+                        "[state] restored buy_volume=%.2f USD for UTC day %llu\n",
+                        restored_volume,
+                        static_cast<unsigned long long>(today));
+                } else {
+                    std::fprintf(stdout,
+                        "[state] saved day %llu != today %llu: volume starts at 0\n",
+                        static_cast<unsigned long long>(saved.utc_day),
+                        static_cast<unsigned long long>(today));
+                }
+                if (restore_kill || restore_day_kill)
+                    std::fprintf(stderr,
+                        "WARN: kill latch restored from disk (day_kill=%d); "
+                        "clear the state file only after investigating\n",
+                        restore_day_kill ? 1 : 0);
+                break;
+            case crowdintel::DailyStateLoad::Missing:
+                std::fprintf(stdout,
+                    "[state] no prior state at %s (first run)\n", cfg.state_file);
+                break;
+            case crowdintel::DailyStateLoad::Corrupt:
+                if (!mock) {
+                    std::fprintf(stderr,
+                        "FATAL: risk state at %s is corrupt; refusing to start "
+                        "in live mode without a trustworthy daily budget\n",
+                        cfg.state_file);
+                    return 1;
+                }
+                std::fprintf(stderr,
+                    "WARN: risk state at %s is corrupt; ignoring it in mock mode\n",
+                    cfg.state_file);
+                break;
+            case crowdintel::DailyStateLoad::IoError:
+                if (!mock) {
+                    std::fprintf(stderr,
+                        "FATAL: cannot read risk state at %s (%s)\n",
+                        cfg.state_file, std::strerror(errno));
+                    return 1;
+                }
+                std::fprintf(stderr,
+                    "WARN: cannot read risk state at %s; mock continues\n",
+                    cfg.state_file);
+                break;
+        }
+    }
+
 #if defined(__linux__)
     if (!mock && mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
         std::fprintf(stderr,
@@ -322,6 +471,8 @@ int main() {
     limits.max_market_exposure_usd = cfg.max_exposure_usd;
     limits.max_portfolio_exposure_usd = cfg.max_portfolio_exposure_usd;
     RiskManager risk(limits);
+    // Fase 2 — a kill that survived a restart stays latched.
+    risk.restore_kill(restore_kill, restore_day_kill);
 
     EngineLayers layers{};
     layers.account_q = account_q.get();
@@ -703,14 +854,16 @@ int main() {
         ExecutionEngine<MockCLOBClient> engine(
             cfg, *book, *signals, signer, pool, mock_client, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT, &metrics);
+        run_engine_persisting(engine, cfg, counts, RESULT_COUNT, &metrics, risk,
+                                 restored_volume, today);
     }
 #if defined(CROWDINTEL_LIVE)
     else {
         ExecutionEngine<OrderGateway<LightweightCLOBClient>> engine(
             cfg, *book, *signals, signer, pool, *gateway, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT, &metrics);
+        run_engine_persisting(engine, cfg, counts, RESULT_COUNT, &metrics, risk,
+                                 restored_volume, today);
     }
 #endif
 

@@ -120,16 +120,22 @@ inline uint64_t utc_day_number() noexcept {
     std::tm utc{};
     // gmtime_r is POSIX; on all target platforms time_t is 64-bit.
     gmtime_r(&now, &utc);
-    const uint64_t year = static_cast<uint64_t>(utc.tm_year + 1900);
-    const uint64_t month = static_cast<uint64_t>(utc.tm_mon + 1);
-    const uint64_t day = static_cast<uint64_t>(utc.tm_mday);
-    // Days from epoch (1970-01-01) using the civil-from-days algorithm.
-    const uint64_t y = (month <= 2) ? year - 1 : year;
-    const uint64_t era = (y >= 0 ? y : y - 399) / 400;
-    const uint64_t yoe = y - (era * 400);                             // [0, 399]
-    const uint64_t doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-    const uint64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;       // [0, 146096]
-    return era * 36524 + static_cast<uint64_t>(doe);
+    const int64_t year = static_cast<int64_t>(utc.tm_year) + 1900;
+    const int64_t month = static_cast<int64_t>(utc.tm_mon) + 1;
+    const int64_t day = static_cast<int64_t>(utc.tm_mday);
+    // Howard Hinnant's days_from_civil.  The previous revision returned
+    // `era * 36524 + doe`, which is neither the day count since the epoch nor
+    // collision-free: `doe` spans [0, 146096] while one era step covers only
+    // 36524, so dates 400 years apart can share a value.  A collision here
+    // would make the daily loss cap miss its rollover, so the sign handling is
+    // done in int64_t as the algorithm requires.
+    const int64_t y = (month <= 2) ? year - 1 : year;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;                             // [0, 399]
+    const int64_t doy =
+        (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;  // [0, 365]
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;     // [0, 146096]
+    return static_cast<uint64_t>(era * 146097 + doe - 719468);
 }
 
 // Optional second-generation layers.  Every pointer is nullable; an absent
@@ -544,6 +550,25 @@ public:
         return exposure_now_usd();
     }
 
+    // ── Fase 2: durable daily risk state ────────────────────────────────────
+    // The accumulator and its day are read by the cold persister thread, so
+    // they must be reachable from outside the engine.
+    double daily_buy_volume() const noexcept {
+        return daily_buy_volume_.load(std::memory_order_acquire);
+    }
+
+    uint64_t daily_buy_volume_day() const noexcept {
+        return daily_buy_volume_day_.load(std::memory_order_acquire);
+    }
+
+    // Adopt state read from disk at startup.  Only the owner thread calls this,
+    // before the tick loop starts, so no tick can observe a half-restored pair.
+    void restore_daily_state(double buy_volume_usd,
+                             uint64_t utc_day) noexcept {
+        daily_buy_volume_.store(buy_volume_usd, std::memory_order_release);
+        daily_buy_volume_day_.store(utc_day, std::memory_order_release);
+    }
+
 private:
     static uint64_t realtime_ns() noexcept {
         return crowdintel::realtime_ns();
@@ -867,9 +892,7 @@ private:
     // worst_case_loss_usd_.  Only BUY orders (which consume USD) count
     // toward this daily gross-volume cap.  The counter resets at UTC
     // midnight so the cap window aligns with the calendar day.
-    double daily_buy_volume() const noexcept { 
-        return daily_buy_volume_.load(std::memory_order_acquire); 
-    }
+    // (accessor lives in the public block above, for the Fase 2 persister)
 
     // Resets the daily buy-volume counter when the UTC calendar day rolls
     // over.  Called once per tick, before budgeting.  O(1), no allocation.
