@@ -245,6 +245,11 @@ add_executable(test_maker_quote ../tests/unit/test_maker_quote.cpp)
 crowdintel_target(test_maker_quote)
 set_target_properties(test_maker_quote PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor C: cancel/replace bookkeeping for resting quotes
+add_executable(test_quote_registry ../tests/unit/test_quote_registry.cpp)
+crowdintel_target(test_quote_registry)
+set_target_properties(test_quote_registry PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -391,6 +396,7 @@ add_test(NAME metrics_units COMMAND $<TARGET_FILE:test_metrics>)
 add_test(NAME daily_state_units COMMAND $<TARGET_FILE:test_daily_state>)
 add_test(NAME chainlink_units COMMAND $<TARGET_FILE:test_chainlink>)
 add_test(NAME maker_quote_units COMMAND $<TARGET_FILE:test_maker_quote>)
+add_test(NAME quote_registry_units COMMAND $<TARGET_FILE:test_quote_registry>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
