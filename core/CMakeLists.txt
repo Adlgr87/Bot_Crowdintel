@@ -235,6 +235,11 @@ add_executable(test_daily_state ../tests/unit/test_daily_state.cpp)
 crowdintel_target(test_daily_state)
 set_target_properties(test_daily_state PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor A: Chainlink Data Streams ingestion + TWAP-60s replica
+add_executable(test_chainlink ../tests/unit/test_chainlink.cpp)
+crowdintel_target(test_chainlink)
+set_target_properties(test_chainlink PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -379,6 +384,7 @@ add_test(NAME kelly_adversarial COMMAND $<TARGET_FILE:test_kelly_adversarial>)
 add_test(NAME config_hardening COMMAND $<TARGET_FILE:test_config_hardening>)
 add_test(NAME metrics_units COMMAND $<TARGET_FILE:test_metrics>)
 add_test(NAME daily_state_units COMMAND $<TARGET_FILE:test_daily_state>)
+add_test(NAME chainlink_units COMMAND $<TARGET_FILE:test_chainlink>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
