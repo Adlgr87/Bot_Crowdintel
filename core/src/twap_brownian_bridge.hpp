@@ -198,12 +198,16 @@ public:
             };
         }
 
-        // ── Brownian Bridge probability ────────────────────────────────────────
-        // d = (A_t·t + S_t·τ − K·T_total) / (σ · √(τ³/3))
+        // ── Brownian Bridge probability (Conditional Variance Correction) ───────────
+        // Fixed: sigma_cond = s * (tau^1.5) / (sqrt(3) * W)
+        // d = (A_t·t + S_t·τ − K·T_total) / (sigma_cond * sqrt(T_total))
         double numerator   = twap_so_far * elapsed_in_window_sec +
                              current_price * tau -
                              strike_price  * twap_window_total_sec;
-        double denominator = sigma_t * std::sqrt(tau * tau * tau / 3.0);
+        
+        double sigma_cond = sigma_t * std::pow(tau, 1.5) / (std::sqrt(3.0) * twap_window_total_sec);
+        double denominator = sigma_cond * std::sqrt(twap_window_total_sec);
+
 
         if (denominator < 1e-15) {
             double p_up;

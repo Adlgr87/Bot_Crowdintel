@@ -170,6 +170,72 @@ public:
         return code == CURLE_OK && http_code >= 200 && http_code < 300;
     }
 
+    // Strict order-id validation. The id is interpolated into a JSON body, so
+    // it must be a bounded hex string or an attacker-controlled value could
+    // break the body (and the L2 HMAC covers exactly those bytes).
+    static bool valid_order_id(const char* id) noexcept {
+        if (!id) return false;
+        const size_t len = std::strlen(id);
+        // "0x" alone carries no digits: the bare prefix must not pass.
+        if (len < 4 || len > 66) return false;      // "0x" + 2..64 hex
+        if (id[0] != '0' || (id[1] != 'x' && id[1] != 'X')) return false;
+        for (size_t i = 2; i < len; ++i) {
+            const char c = id[i];
+            const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                             (c >= 'A' && c <= 'F');
+            if (!hex) return false;
+        }
+        return true;
+    }
+
+    // DELETE /order — cancel ONE resting order by id. Cold path only: the maker
+    // sleeve uses it to replace a stale quote without touching the other side.
+    // cancel_all() remains the nuclear option for the kill switch.
+    bool cancel_order(const char* order_id) {
+        static constexpr char PATH[] = "/order";
+        if (!valid_order_id(order_id)) return false;
+        if (!rest_ready()) return false;
+
+        char url[224];
+        const int n = std::snprintf(url, sizeof(url), "%s%s", cfg_.clob_host,
+                                    PATH);
+        if (n <= 0 || static_cast<size_t>(n) >= sizeof(url)) return false;
+
+        char body[96];
+        const int bn = std::snprintf(body, sizeof(body),
+                                     "{\"orderID\":\"%s\"}", order_id);
+        if (bn <= 0 || static_cast<size_t>(bn) >= sizeof(body)) return false;
+
+        curl_easy_setopt(rest_curl_, CURLOPT_URL, url);
+        curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, "DELETE");
+        // The L2 signature is computed over these exact bytes, so the body must
+        // be attached before the headers are built.
+        curl_easy_setopt(rest_curl_, CURLOPT_POSTFIELDS, body);
+        curl_easy_setopt(rest_curl_, CURLOPT_POSTFIELDSIZE,
+                         static_cast<long>(bn));
+
+        curl_slist* headers = nullptr;
+        if (!build_l2_headers(headers, "DELETE", PATH, body,
+                              static_cast<size_t>(bn))) {
+            curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, nullptr);
+            curl_easy_setopt(rest_curl_, CURLOPT_POSTFIELDS, nullptr);
+            return false;
+        }
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, headers);
+        const CURLcode code = curl_easy_perform(rest_curl_);
+        curl_slist_free_all(headers);
+        // Reset EVERY option this call set: rest_curl_ is shared with rest_get()
+        // and cancel_all(), and a stale body would be replayed on the next call.
+        curl_easy_setopt(rest_curl_, CURLOPT_HTTPHEADER, nullptr);
+        curl_easy_setopt(rest_curl_, CURLOPT_POSTFIELDS, nullptr);
+        curl_easy_setopt(rest_curl_, CURLOPT_POSTFIELDSIZE, 0L);
+        curl_easy_setopt(rest_curl_, CURLOPT_CUSTOMREQUEST, nullptr);
+
+        long http_code = 0;
+        curl_easy_getinfo(rest_curl_, CURLINFO_RESPONSE_CODE, &http_code);
+        return code == CURLE_OK && http_code >= 200 && http_code < 300;
+    }
+
     // Extract total size and VWAP for one asset from GET /data/positions.
     // Offline-testable pure parser: top-level array of objects.
     static bool parse_positions_for_asset(const char* json, size_t len,

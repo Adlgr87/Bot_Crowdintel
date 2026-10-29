@@ -11,6 +11,8 @@ option(CROWDINTEL_SANITIZERS "Backward-compatible alias for ASan + UBSan" OFF)
 option(CROWDINTEL_ASAN "Enable AddressSanitizer" OFF)
 option(CROWDINTEL_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(CROWDINTEL_TSAN "Enable ThreadSanitizer" OFF)
+option(CROWDINTEL_BUILD_EXPERIMENTAL
+    "Build targets that exercise orphaned / research code (engine_extensions, fee_calculator, kelly_sizer). OFF by default: these validate modules no production translation unit includes." OFF)
 set(CROWDINTEL_CPU_TARGET "portable" CACHE STRING
     "CPU target: portable, x86-64-v2, x86-64-v3, or native (local-only)")
 set_property(CACHE CROWDINTEL_CPU_TARGET PROPERTY STRINGS
@@ -218,6 +220,56 @@ add_executable(test_kelly_adversarial ../tests/unit/test_kelly_adversarial.cpp)
 crowdintel_target(test_kelly_adversarial)
 set_target_properties(test_kelly_adversarial PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Fase 0 (capital survival) + Fase 1.1 (category-aware fee rate)
+add_executable(test_config_hardening ../tests/unit/test_config_hardening.cpp)
+crowdintel_target(test_config_hardening)
+set_target_properties(test_config_hardening PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Fase 3: business metrics (decision histogram, edge, slippage, Brier)
+add_executable(test_metrics ../tests/unit/test_metrics.cpp)
+crowdintel_target(test_metrics)
+set_target_properties(test_metrics PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Fase 2: durable daily risk state
+add_executable(test_daily_state ../tests/unit/test_daily_state.cpp)
+crowdintel_target(test_daily_state)
+set_target_properties(test_daily_state PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor A: Chainlink Data Streams ingestion + TWAP-60s replica
+add_executable(test_chainlink ../tests/unit/test_chainlink.cpp)
+crowdintel_target(test_chainlink)
+set_target_properties(test_chainlink PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: maker quote placement decision core
+add_executable(test_maker_quote ../tests/unit/test_maker_quote.cpp)
+crowdintel_target(test_maker_quote)
+set_target_properties(test_maker_quote PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: cancel/replace bookkeeping for resting quotes
+add_executable(test_quote_registry ../tests/unit/test_quote_registry.cpp)
+crowdintel_target(test_quote_registry)
+set_target_properties(test_quote_registry PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: DELETE /order id validation (injection surface)
+add_executable(test_cancel_id ../tests/unit/test_cancel_id.cpp)
+crowdintel_target(test_cancel_id)
+set_target_properties(test_cancel_id PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: reward parameters read from the venue metadata
+add_executable(test_market_metadata ../tests/unit/test_market_metadata.cpp)
+crowdintel_target(test_market_metadata)
+set_target_properties(test_market_metadata PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: a transport that models resting orders (fills only on a cross)
+add_executable(test_resting_mock ../tests/unit/test_resting_mock.cpp)
+crowdintel_target(test_resting_mock)
+set_target_properties(test_resting_mock PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Motor C: the engine-facing resting transport
+add_executable(test_resting_client ../tests/unit/test_resting_client.cpp)
+crowdintel_target(test_resting_client)
+set_target_properties(test_resting_client PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -247,22 +299,28 @@ else()
     message(STATUS "AVX2 not available — skipping CfC tests/benchmarks")
 endif()
 
-# ── Phase 5: Integration tests (DSH, NO AVX2 required) ─────────────────────────
-# Pure deterministic math pipeline: BB + Vol + OFI + WindowShield + Kelly + Ladder
-add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
-crowdintel_target(test_pipeline)
-set_target_properties(test_pipeline PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# ── Phase 5: Integration tests — EXPERIMENTAL ─────────────────────────────────
+# These three drive engine_extensions.hpp, which bundles eleven orphaned
+# modules (TwapBrownianBridge, WindowShield, KellySizer, FeeCalculator, ...).
+# None of it is reachable from main_hot_path.cpp, and the flat-tier fee model
+# they assert does not match the venue. They stay behind an opt-in flag so the
+# default suite only certifies code the bot actually runs.
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_executable(test_pipeline ../tests/integration/test_pipeline.cpp)
+    crowdintel_target(test_pipeline)
+    set_target_properties(test_pipeline PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(test_dsh_pipeline ../tests/integration/test_dsh_pipeline.cpp)
-crowdintel_target(test_dsh_pipeline)
-set_target_properties(test_dsh_pipeline PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    add_executable(test_dsh_pipeline ../tests/integration/test_dsh_pipeline.cpp)
+    crowdintel_target(test_dsh_pipeline)
+    set_target_properties(test_dsh_pipeline PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(test_paper_trade ../tests/integration/test_paper_trade.cpp)
-crowdintel_target(test_paper_trade)
-set_target_properties(test_paper_trade PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    add_executable(test_paper_trade ../tests/integration/test_paper_trade.cpp)
+    crowdintel_target(test_paper_trade)
+    set_target_properties(test_paper_trade PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 # ── Phase 1 & 2: Deterministic Math ─────────────────────────────────────────────
 # Brownian Bridge TWAP probability, volatility estimator, OFI filter, WindowShield
@@ -327,17 +385,21 @@ add_executable(test_accept_rate_circuit ../tests/acceptance/test_accept_rate_cir
 crowdintel_target(test_accept_rate_circuit)
 set_target_properties(test_accept_rate_circuit PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(test_accept_kelly_edge ../tests/acceptance/test_accept_kelly_edge.cpp)
-crowdintel_target(test_accept_kelly_edge)
-set_target_properties(test_accept_kelly_edge PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_executable(test_accept_kelly_edge ../tests/acceptance/test_accept_kelly_edge.cpp)
+    crowdintel_target(test_accept_kelly_edge)
+    set_target_properties(test_accept_kelly_edge PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 add_executable(test_accept_ladder_time ../tests/acceptance/test_accept_ladder_time.cpp)
 crowdintel_target(test_accept_ladder_time)
 set_target_properties(test_accept_ladder_time PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(test_accept_latency_budget ../tests/acceptance/test_accept_latency_budget.cpp)
-crowdintel_target(test_accept_latency_budget)
-set_target_properties(test_accept_latency_budget PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_executable(test_accept_latency_budget ../tests/acceptance/test_accept_latency_budget.cpp)
+    crowdintel_target(test_accept_latency_budget)
+    set_target_properties(test_accept_latency_budget PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 enable_testing()
 add_test(NAME crypto_kat COMMAND $<TARGET_FILE:test_signer>)
@@ -349,17 +411,29 @@ add_test(NAME kelly_units COMMAND $<TARGET_FILE:test_kelly>)
 add_test(NAME kelly_clamp_units COMMAND $<TARGET_FILE:test_kelly_clamp>)
 add_test(NAME compliance_guard_units COMMAND $<TARGET_FILE:test_compliance_guard>)
 add_test(NAME kelly_adversarial COMMAND $<TARGET_FILE:test_kelly_adversarial>)
+add_test(NAME config_hardening COMMAND $<TARGET_FILE:test_config_hardening>)
+add_test(NAME metrics_units COMMAND $<TARGET_FILE:test_metrics>)
+add_test(NAME daily_state_units COMMAND $<TARGET_FILE:test_daily_state>)
+add_test(NAME chainlink_units COMMAND $<TARGET_FILE:test_chainlink>)
+add_test(NAME maker_quote_units COMMAND $<TARGET_FILE:test_maker_quote>)
+add_test(NAME quote_registry_units COMMAND $<TARGET_FILE:test_quote_registry>)
+add_test(NAME cancel_id_units COMMAND $<TARGET_FILE:test_cancel_id>)
+add_test(NAME market_metadata_units COMMAND $<TARGET_FILE:test_market_metadata>)
+add_test(NAME resting_mock_units COMMAND $<TARGET_FILE:test_resting_mock>)
+add_test(NAME resting_client_units COMMAND $<TARGET_FILE:test_resting_client>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
 endif()
-add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
-add_test(NAME dsh_pipeline COMMAND $<TARGET_FILE:test_dsh_pipeline>
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
-add_test(NAME paper_trade COMMAND $<TARGET_FILE:test_paper_trade>
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_test(NAME pipeline_integration COMMAND $<TARGET_FILE:test_pipeline>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+    add_test(NAME dsh_pipeline COMMAND $<TARGET_FILE:test_dsh_pipeline>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+    add_test(NAME paper_trade COMMAND $<TARGET_FILE:test_paper_trade>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
+endif()
 # Phase 1 enhancement: Multi-feed integration tests
 add_executable(test_multi_feed ../tests/integration/test_multi_feed.cpp)
 crowdintel_target(test_multi_feed)
@@ -387,7 +461,11 @@ add_test(NAME accept_vol_regime COMMAND $<TARGET_FILE:test_accept_vol_regime>)
 add_test(NAME accept_ofi_pressure COMMAND $<TARGET_FILE:test_accept_ofi_pressure>)
 add_test(NAME accept_shield_lifecycle COMMAND $<TARGET_FILE:test_accept_shield_lifecycle>)
 add_test(NAME accept_rate_circuit COMMAND $<TARGET_FILE:test_accept_rate_circuit>)
-add_test(NAME accept_kelly_edge COMMAND $<TARGET_FILE:test_accept_kelly_edge>)
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_test(NAME accept_kelly_edge COMMAND $<TARGET_FILE:test_accept_kelly_edge>)
+endif()
 add_test(NAME accept_ladder_time COMMAND $<TARGET_FILE:test_accept_ladder_time>)
-add_test(NAME accept_latency_budget COMMAND $<TARGET_FILE:test_accept_latency_budget>)
+if(CROWDINTEL_BUILD_EXPERIMENTAL)
+    add_test(NAME accept_latency_budget COMMAND $<TARGET_FILE:test_accept_latency_budget>)
+endif()
 # bench_cfc and latency_bench are benchmarks, not correctness tests; CI invokes them explicitly.

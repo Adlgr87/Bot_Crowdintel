@@ -30,13 +30,17 @@
 #include "../include/risk_manager.hpp"
 #include "../include/volatility_gate.hpp"
 #include "../include/spsc_ring_buffer.hpp"
+#include "../include/daily_state.hpp"
 #include "../include/time_utils.hpp"
 #include "alpha_parser.hpp"
 #include "evidence_ingress.hpp"
 #include "execution_engine.hpp"
 #include "market_config.hpp"
+#include "market_metadata.hpp"
+#include "metrics.hpp"
 #include "mock_client.hpp"
 #include "presigned_pool.hpp"
+#include "../../infra/monitoring/health_server.hpp"
 
 #if defined(CROWDINTEL_HAVE_NETWORK) && !defined(CROWDINTEL_FORCE_MOCK)
 #include "alpha_http_receiver.hpp"
@@ -112,16 +116,100 @@ void mock_feed(SPSC_RingBuffer<AlphaSignal>& queue, OrderBookL2& book,
 
 template <typename Engine>
 long run_engine(Engine& engine, const MarketConfig& cfg,
-                uint64_t* counts, size_t count_size) {
+                uint64_t* counts, size_t count_size,
+                crowdintel::Metrics* metrics) {
     long productive = 0;
     while (g_running.load(std::memory_order_acquire)) {
         const TickResult result = engine.run_tick();
         const size_t index = static_cast<size_t>(result);
         if (index < count_size) ++counts[index];
+        // Fase 3: one relaxed fetch_add per tick.  This is the only hot-path
+        // cost of the whole metrics layer.
+        if (metrics) metrics->on_decision(static_cast<uint32_t>(index));
         if (result == TickResult::NO_SIGNAL) idle_wait();
         else ++productive;
         if (cfg.max_ticks > 0 && productive >= cfg.max_ticks) break;
     }
+    return productive;
+}
+
+// Fase 2 — run the tick loop with a cold persister attached.  The persister is
+// the only writer of the daily state file and it runs off the hot path: the
+// tick loop never touches the filesystem.
+template <typename Engine>
+long run_engine_persisting(Engine& engine, const MarketConfig& cfg,
+                           uint64_t* counts, size_t count_size,
+                           crowdintel::Metrics* metrics, RiskManager& risk,
+                           double restored_volume, uint64_t today) {
+    engine.restore_daily_state(restored_volume, today);
+
+    std::atomic<bool> persist_run{true};
+    std::thread persister([&] {
+        pin_to_cpu(cfg.cold_cpu);
+
+        crowdintel::DailyStateRecord rec{};
+        rec.utc_day = today;
+        rec.daily_buy_volume_usd = restored_volume;
+        rec.kill_latched = risk.killed() ? 1 : 0;
+        rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+        double last_volume = restored_volume;
+        uint8_t last_kill = rec.kill_latched;
+        uint8_t last_day_kill = rec.day_kill_latched;
+        bool warned = false;
+
+        // Seed the record immediately: a crash before the first trade must
+        // still leave today's day number on disk, otherwise the restart has no
+        // way to tell "first run" from "lost state".
+        if (!crowdintel::save_daily_state(cfg.state_file, rec)) {
+            std::fprintf(stderr, "WARN: cannot persist risk state to %s\n",
+                         cfg.state_file);
+            warned = true;
+        }
+
+        while (persist_run.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            const double volume = engine.daily_buy_volume();
+            const uint64_t day = engine.daily_buy_volume_day();
+            const uint8_t kill = risk.killed() ? 1 : 0;
+            const uint8_t day_kill = risk.day_kill_latched() ? 1 : 0;
+            if (volume == last_volume && kill == last_kill &&
+                day_kill == last_day_kill && rec.utc_day == day)
+                continue;  // nothing changed: no write, no fsync
+
+            if (day) rec.utc_day = day;
+            rec.daily_buy_volume_usd = volume;
+            rec.kill_latched = kill;
+            rec.day_kill_latched = day_kill;
+            if (crowdintel::save_daily_state(cfg.state_file, rec)) {
+                last_volume = volume;
+                last_kill = kill;
+                last_day_kill = day_kill;
+                warned = false;
+            } else if (!warned) {
+                std::fprintf(stderr, "WARN: cannot persist risk state to %s\n",
+                             cfg.state_file);
+                warned = true;
+            }
+            if (kill && !day_kill) {
+                // An operator kill is a stop, not a data point; keep the file
+                // current but do not spin on it.
+                last_kill = kill;
+            }
+        }
+
+        // Final flush: the shutdown path must not lose the last increments.
+        const uint64_t day = engine.daily_buy_volume_day();
+        if (day) rec.utc_day = day;
+        rec.daily_buy_volume_usd = engine.daily_buy_volume();
+        rec.kill_latched = risk.killed() ? 1 : 0;
+        rec.day_kill_latched = risk.day_kill_latched() ? 1 : 0;
+        (void)crowdintel::save_daily_state(cfg.state_file, rec);
+    });
+
+    const long productive = run_engine(engine, cfg, counts, count_size, metrics);
+    persist_run.store(false, std::memory_order_release);
+    if (persister.joinable()) persister.join();
     return productive;
 }
 
@@ -177,6 +265,50 @@ void reconcile_once_with(LightweightCLOBClient& client,
 
 }  // namespace
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fase 0.1 — run-mode resolution.
+//
+// FAIL-CLOSED.  The previous code was fail-OPEN: in a network build (which is
+// what production uses, because `CROWDINTEL_LIVE` is defined whenever
+// CROWDINTEL_HAVE_NETWORK is set), an UNSET BOT_MODE evaluated to
+// `mock = false`, i.e. real orders against a real venue with real money.
+//
+// New contract:
+//   * network build + BOT_MODE unset        -> FATAL (never guess)
+//   * network build + BOT_MODE unknown      -> FATAL
+//   * offline build + BOT_MODE=live         -> FATAL (cannot honour it)
+//   * offline build + anything else         -> MOCK
+//   * "paper" is accepted but currently behaves as MOCK; main() says so.
+// Nothing here can widen permission; every unknown path aborts.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class RunMode { MOCK, LIVE };
+
+static RunMode resolve_run_mode() {
+    const char* env = std::getenv("BOT_MODE");
+#if !defined(CROWDINTEL_LIVE)
+    if (env && *env && std::strcmp(env, "live") == 0) {
+        std::fprintf(stderr,
+            "FATAL: BOT_MODE=live requires a network build "
+            "(CROWDINTEL_NETWORK=ON without CROWDINTEL_FORCE_MOCK)\n");
+        std::exit(EXIT_FAILURE);
+    }
+    return RunMode::MOCK;  // offline build: mock, and no env can change that
+#else
+    if (!env || !*env) {
+        std::fprintf(stderr,
+            "FATAL: BOT_MODE is not set. Set BOT_MODE=mock|paper|live. "
+            "Refusing to guess a trading mode (fail-closed).\n");
+        std::exit(EXIT_FAILURE);
+    }
+    if (std::strcmp(env, "mock") == 0 || std::strcmp(env, "paper") == 0)
+        return RunMode::MOCK;
+    if (std::strcmp(env, "live") == 0) return RunMode::LIVE;
+    std::fprintf(stderr, "FATAL: invalid BOT_MODE='%s' (expected mock|paper|live)\n",
+                 env);
+    std::exit(EXIT_FAILURE);
+#endif
+}
+
 int main() {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -184,12 +316,7 @@ int main() {
     std::signal(SIGPIPE, SIG_IGN);  // OpenSSL can ultimately write(2) a dead peer
 #endif
 
-    const bool mock =
-#if !defined(CROWDINTEL_LIVE)
-        true;
-#else
-        std::getenv("BOT_MODE") && std::string(std::getenv("BOT_MODE")) == "mock";
-#endif
+    const bool mock = (resolve_run_mode() != RunMode::LIVE);
 
     MarketConfig cfg;
     if (const char* error = cfg.load(!mock, mock)) {
@@ -232,6 +359,74 @@ int main() {
         return 1;
     }
 
+    // ── Fase 2: adopt the durable daily risk state ─────────────────────────
+    // A restart must not re-arm the daily loss budget or clear a kill.  The
+    // policy below is deliberately asymmetric:
+    //   Missing  -> legitimate first run, start at zero and say so;
+    //   Corrupt  -> refuse to start in LIVE: not knowing today's exposure is
+    //               worse than not trading;
+    //   IoError  -> same, because an unreadable state file means the path or
+    //               permissions are wrong, which will also break persistence.
+    const uint64_t today = utc_day_number();
+    double restored_volume = 0.0;
+    bool restore_kill = false;
+    bool restore_day_kill = false;
+    {
+        crowdintel::DailyStateRecord saved{};
+        const crowdintel::DailyStateLoad loaded =
+            crowdintel::load_daily_state(cfg.state_file, saved);
+        switch (loaded) {
+            case crowdintel::DailyStateLoad::Loaded:
+                restore_kill = saved.kill_latched != 0;
+                restore_day_kill = saved.day_kill_latched != 0;
+                if (saved.utc_day == today) {
+                    restored_volume = saved.daily_buy_volume_usd;
+                    std::fprintf(stdout,
+                        "[state] restored buy_volume=%.2f USD for UTC day %llu\n",
+                        restored_volume,
+                        static_cast<unsigned long long>(today));
+                } else {
+                    std::fprintf(stdout,
+                        "[state] saved day %llu != today %llu: volume starts at 0\n",
+                        static_cast<unsigned long long>(saved.utc_day),
+                        static_cast<unsigned long long>(today));
+                }
+                if (restore_kill || restore_day_kill)
+                    std::fprintf(stderr,
+                        "WARN: kill latch restored from disk (day_kill=%d); "
+                        "clear the state file only after investigating\n",
+                        restore_day_kill ? 1 : 0);
+                break;
+            case crowdintel::DailyStateLoad::Missing:
+                std::fprintf(stdout,
+                    "[state] no prior state at %s (first run)\n", cfg.state_file);
+                break;
+            case crowdintel::DailyStateLoad::Corrupt:
+                if (!mock) {
+                    std::fprintf(stderr,
+                        "FATAL: risk state at %s is corrupt; refusing to start "
+                        "in live mode without a trustworthy daily budget\n",
+                        cfg.state_file);
+                    return 1;
+                }
+                std::fprintf(stderr,
+                    "WARN: risk state at %s is corrupt; ignoring it in mock mode\n",
+                    cfg.state_file);
+                break;
+            case crowdintel::DailyStateLoad::IoError:
+                if (!mock) {
+                    std::fprintf(stderr,
+                        "FATAL: cannot read risk state at %s (%s)\n",
+                        cfg.state_file, std::strerror(errno));
+                    return 1;
+                }
+                std::fprintf(stderr,
+                    "WARN: cannot read risk state at %s; mock continues\n",
+                    cfg.state_file);
+                break;
+        }
+    }
+
 #if defined(__linux__)
     if (!mock && mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
         std::fprintf(stderr,
@@ -241,10 +436,59 @@ int main() {
 #endif
 
     std::fprintf(stdout,
-        "CrowdIntel 2.1 mode=%s market=%s tick=%.4f sig=%u order=%s\n",
+        "CrowdIntel 2.1 mode=%s market=%s tick=%.4f sig=%u exit=%s entry=%s\n",
         mock ? "mock" : "live", cfg.market_slug,
         static_cast<double>(cfg.tick_size) * 1e-6,
-        cfg.signature_type, cfg.order_type);
+        cfg.signature_type, cfg.order_type, cfg.entry_order_type);
+    // Fase 0.2 — effective limits on the first lines of every log.
+    cfg.print_limits(stdout);
+    if (cfg.paper_mode_requested) {
+        std::fprintf(stderr,
+            "NOTICE: BOT_MODE=paper has no distinct engine yet; this process "
+            "runs the MOCK transport (synthetic book, synthetic fills). "
+            "Do not draw fill-rate or Brier conclusions from it.\n");
+    }
+
+    // ── Motor C: read the reward parameters from the venue ─────────────────
+    // The band and minimum size live in the market object and are fractional
+    // (rewardsMaxSpread 3.5 cents == 350 bps). Hand-typing them is a silent
+    // failure: a stale band puts quotes outside eligibility while they keep
+    // carrying full adverse risk. Only fetched when entries rest, since a taker
+    // never needs them.
+    const bool entry_rests_cfg = std::strcmp(cfg.entry_order_type, "GTC") == 0 ||
+                                 std::strcmp(cfg.entry_order_type, "GTD") == 0;
+#if defined(CROWDINTEL_HAVE_NETWORK) && !defined(CROWDINTEL_FORCE_MOCK)
+    if (entry_rests_cfg && cfg.market_slug[0] &&
+        std::strcmp(cfg.market_slug, "mock-market") != 0) {
+        crowdintel::MarketRewards rewards{};
+        const crowdintel::RewardParse rp = crowdintel::fetch_market_rewards(
+            cfg.gamma_host, cfg.market_slug, rewards);
+        if (rp == crowdintel::RewardParse::Ok) {
+            cfg.rewards_max_spread_bps = rewards.max_spread_bps;
+            cfg.rewards_min_size_shares = rewards.min_size_shares;
+            std::fprintf(stdout,
+                "[rewards] from venue: pool=$%llu/day band=%ubps min_size=%.0f "
+                "program=%d\n",
+                static_cast<unsigned long long>(rewards.daily_rate_usdc),
+                static_cast<unsigned>(rewards.max_spread_bps),
+                static_cast<double>(rewards.min_size_shares) * 1e-6,
+                rewards.has_program ? 1 : 0);
+            if (!rewards.has_program)
+                std::fprintf(stderr,
+                    "WARN: %s has no active reward program; the maker sleeve "
+                    "earns only spread there\n", cfg.market_slug);
+        } else {
+            std::fprintf(stderr,
+                "WARN: could not read rewards from %s (%s); keeping the "
+                "BOT_MK_* values\n", cfg.gamma_host,
+                crowdintel::reward_parse_name(rp));
+        }
+    } else if (entry_rests_cfg) {
+        std::fprintf(stderr,
+            "WARN: BOT_MARKET_SLUG is unset or mock; rewards not read from the "
+            "venue, using BOT_MK_* values\n");
+    }
+#endif
 
     auto book = std::make_unique<OrderBookL2>();
     std::unique_ptr<OrderBookL2> hedge_book;
@@ -269,6 +513,8 @@ int main() {
     limits.max_market_exposure_usd = cfg.max_exposure_usd;
     limits.max_portfolio_exposure_usd = cfg.max_portfolio_exposure_usd;
     RiskManager risk(limits);
+    // Fase 2 — a kill that survived a restart stays latched.
+    risk.restore_kill(restore_kill, restore_day_kill);
 
     EngineLayers layers{};
     layers.account_q = account_q.get();
@@ -314,6 +560,107 @@ int main() {
     if (mock) mock_client.attach_fill_queue(account_q.get());
     std::atomic<bool> workers_running{true};
     std::atomic<bool> trading_enabled{true};
+
+    // ── Fase 3: business metrics + Prometheus/health endpoint ──────────────
+    // The counters answer the only question that matters before sizing up:
+    // WHY the engine is not trading.  The endpoint is cold-path only.
+    static_assert(static_cast<size_t>(TickResult::COUNT) <=
+                      crowdintel::METRICS_RESULT_SLOTS,
+                  "TickResult grew past the metrics histogram; widen "
+                  "METRICS_RESULT_SLOTS");
+    crowdintel::Metrics metrics;
+    std::unique_ptr<crowdintel::HealthServer> health;
+    if (cfg.metrics_port != 0) {
+        crowdintel::HealthServerConfig hcfg;
+        hcfg.port = cfg.metrics_port;
+        hcfg.bind_address = "127.0.0.1";
+        hcfg.status_callback = [&]() {
+            crowdintel::BotStatusSnapshot snap{};
+            snap.overall_status =
+                g_running.load(std::memory_order_acquire) ? crowdintel::HealthStatus::HEALTHY
+                                                         : crowdintel::HealthStatus::UNHEALTHY;
+            snap.kill_switch_active = risk.killed();
+            snap.venue_connected =
+                mock ? true : trading_enabled.load(std::memory_order_acquire);
+            snap.feeds_active = true;
+            // Exposure comes from the authoritative position tracker.
+            snap.committed_exposure_usd =
+                static_cast<double>(tracker.exposure_worst_cost()) * 1e-6;
+            const crowdintel::MetricsSnapshot m = metrics.snapshot();
+            snap.total_orders = m.orders_requested;
+            snap.total_fills = m.fills;
+            // Rejections are verdicts that actively refused a signal.  An idle
+            // "no_signal" tick is not a rejection; counting it made this field
+            // read as 36k "rejects" on a perfectly healthy idle loop.
+            uint64_t not_rejects = 0;
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::NO_SIGNAL)];
+            not_rejects += m.reject_reason[static_cast<size_t>(TickResult::QUEUED)];
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::SUBMITTED)];
+            not_rejects +=
+                m.reject_reason[static_cast<size_t>(TickResult::ACCOUNT_APPLIED)];
+            snap.total_rejects =
+                m.decisions > not_rejects ? m.decisions - not_rejects : 0;
+            // latency_* and daily_pnl_pct still need per-stage timestamps and
+            // a settlement feed; they stay zero rather than being invented.
+            return snap;
+        };
+        // Decision-reason histogram, edge, slippage and Brier.  This is the
+        // series that decides whether a strategy has alpha at all.
+        hcfg.extra_metrics = [&]() {
+            const crowdintel::MetricsSnapshot m = metrics.snapshot();
+            std::string out;
+            out.reserve(4096);
+            out += "# HELP crowdintel_decisions_total Engine ticks evaluated\n"
+                   "# TYPE crowdintel_decisions_total counter\n"
+                   "crowdintel_decisions_total " + std::to_string(m.decisions) + "\n";
+            out += "# HELP crowdintel_orders_requested_total Orders enqueued\n"
+                   "# TYPE crowdintel_orders_requested_total counter\n"
+                   "crowdintel_orders_requested_total " +
+                   std::to_string(m.orders_requested) + "\n";
+            out += "# HELP crowdintel_fills_total Fills observed\n"
+                   "# TYPE crowdintel_fills_total counter\n"
+                   "crowdintel_fills_total " + std::to_string(m.fills) + "\n";
+            out += "# HELP crowdintel_decisions_by_result Decision verdict histogram\n"
+                   "# TYPE crowdintel_decisions_by_result counter\n";
+            for (size_t i = 0; i < static_cast<size_t>(TickResult::COUNT); ++i) {
+                out += "crowdintel_decisions_by_result{result=\"" +
+                       std::string(tick_result_name(static_cast<TickResult>(i))) +
+                       "\"} " + std::to_string(m.reject_reason[i]) + "\n";
+            }
+            out += "# HELP crowdintel_edge_mean Net edge at submit (probability)\n"
+                   "# TYPE crowdintel_edge_mean gauge\n"
+                   "crowdintel_edge_mean " + std::to_string(m.edge_mean) + "\n";
+            out += "# HELP crowdintel_edge_samples Orders contributing to edge_mean\n"
+                   "# TYPE crowdintel_edge_samples counter\n"
+                   "crowdintel_edge_samples " + std::to_string(m.edge_samples) + "\n";
+            out += "# HELP crowdintel_slippage_bps_mean Mean adverse fill slippage\n"
+                   "# TYPE crowdintel_slippage_bps_mean gauge\n"
+                   "crowdintel_slippage_bps_mean " + std::to_string(m.slip_mean_bps) + "\n";
+            out += "# HELP crowdintel_brier_score Calibration error (lower is better)\n"
+                   "# TYPE crowdintel_brier_score gauge\n"
+                   "crowdintel_brier_score " + std::to_string(m.brier) + "\n";
+            out += "# HELP crowdintel_brier_samples Outcomes contributing to Brier\n"
+                   "# TYPE crowdintel_brier_samples counter\n"
+                   "crowdintel_brier_samples " + std::to_string(m.brier_samples) + "\n";
+            out += "# HELP crowdintel_taker_fee_rate Category fee rate in force\n"
+                   "# TYPE crowdintel_taker_fee_rate gauge\n"
+                   "crowdintel_taker_fee_rate " + std::to_string(cfg.taker_fee_rate) + "\n";
+            return out;
+        };
+        health = std::make_unique<crowdintel::HealthServer>(hcfg);
+        if (health->start()) {
+            std::fprintf(stdout,
+                "[metrics] /health /ready /metrics /status on 127.0.0.1:%u\n",
+                static_cast<unsigned>(cfg.metrics_port));
+        } else {
+            std::fprintf(stderr,
+                "WARN: metrics server could not bind 127.0.0.1:%u; continuing\n",
+                static_cast<unsigned>(cfg.metrics_port));
+            health.reset();
+        }
+    }
 
     // Cold journal consumer: the only renderer of hot-path audit events.
     std::thread journal_thread([&] {
@@ -549,18 +896,22 @@ int main() {
         ExecutionEngine<MockCLOBClient> engine(
             cfg, *book, *signals, signer, pool, mock_client, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT);
+        run_engine_persisting(engine, cfg, counts, RESULT_COUNT, &metrics, risk,
+                                 restored_volume, today);
     }
 #if defined(CROWDINTEL_LIVE)
     else {
         ExecutionEngine<OrderGateway<LightweightCLOBClient>> engine(
             cfg, *book, *signals, signer, pool, *gateway, &trading_enabled,
             &layers, &compliance_cfg);
-        run_engine(engine, cfg, counts, RESULT_COUNT);
+        run_engine_persisting(engine, cfg, counts, RESULT_COUNT, &metrics, risk,
+                                 restored_volume, today);
     }
 #endif
 
     workers_running.store(false, std::memory_order_release);
+    // Stop the endpoint before the objects its callbacks capture go away.
+    if (health) health->stop();
 #if defined(CROWDINTEL_LIVE)
     if (alpha_receiver) alpha_receiver->stop();
     if (user_listener) user_listener->stop();

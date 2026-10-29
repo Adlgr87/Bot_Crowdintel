@@ -77,6 +77,19 @@ public:
         kill_.store(true, std::memory_order_release);
     }
 
+    // Fase 2 — `day_kill_latched_` marks a kill caused by the daily loss cap.
+    // It is distinct from an operator kill, so it is persisted separately and
+    // can be reported without guessing why the bot stopped.
+    bool day_kill_latched() const noexcept { return day_kill_latched_; }
+
+    // Fase 2 — restore a latch that survived a restart.  Without this a
+    // `systemctl restart` cleared a kill that had already fired, which is
+    // exactly how a crash loop keeps spending the daily budget.
+    void restore_kill(bool latched, bool day_latched) noexcept {
+        if (latched) kill_.store(true, std::memory_order_release);
+        if (day_latched) day_kill_latched_ = true;
+    }
+
     bool authorize(uint8_t /*side*/, double notional_usd,
                    double exposure_now_usd,
                    double portfolio_exposure_usd) const noexcept {

@@ -1,0 +1,24 @@
+# Prometheus configuration for CrowdIntel bot metrics
+global:
+  scrape_interval: 5s
+  evaluation_interval: 10s
+
+rule_files:
+  - "alerts.yaml"
+
+scrape_configs:
+  # Bot metrics endpoint
+  - job_name: "crowdintel_bot"
+    static_configs:
+      - targets: ["localhost:9090"]
+    metrics_path: "/metrics"
+
+  # PostgreSQL metrics
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["postgres:9187"]
+
+  # Redis metrics
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:9121"]
