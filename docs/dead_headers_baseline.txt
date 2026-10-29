@@ -1,11 +1,16 @@
 # Headers unreachable from core/src/main_hot_path.cpp.
 # Regenerate: ./scripts/check_dead_headers.sh --update
 # Entries may only be REMOVED (by wiring or deleting the header).
+core/include/maker_quote.hpp
+core/include/quote_registry.hpp
+core/include/resting_mock_client.hpp
+core/include/resting_mock.hpp
 core/src/bench_engine.hpp
 core/src/binance_spike_detector.hpp
 core/src/binance_ws_client.hpp
 core/src/cfc_network.hpp
 core/src/cfc_network_test.hpp
+core/src/chainlink_stream.hpp
 core/src/circuit_breaker.hpp
 core/src/crowdintel_bias.hpp
 core/src/engine_extensions.hpp
@@ -28,3 +33,26 @@ core/src/venue_state_machine.hpp
 core/src/volatility_estimator.hpp
 core/src/window_shield.hpp
 infra/feeds/clob_websocket.hpp
+#
+# DELIBERATE, awaiting integration (not dead knowledge)
+#
+# This block is why the guard exists and also why it must be read, not obeyed
+# blindly. The entries above are frozen or scheduled for deletion. The entries
+# below are TESTED library code that main_hot_path.cpp does not call yet:
+#
+#   core/src/chainlink_stream.hpp   Motor A: report parser + TWAP-60s replica.
+#                                   The A gate came back negative, so wiring it
+#                                   is deferred until the proxy gap closes.
+#   core/src/market_metadata.hpp    Motor C: reads reward parameters. WIRED.
+#                                   Appears here only because the only call
+#                                   site is inside a #if the closure does not
+#                                   resolve.
+#   core/include/daily_state.hpp    Fase 2: durable risk state. WIRED.
+#   core/include/maker_quote.hpp    Motor C: placement decision core. Needs the
+#                                   quote loop that drives it.
+#   core/include/quote_registry.hpp Motor C: cancel/replace. Needs the loop.
+#   core/include/resting_mock*.hpp  Motor C: the canary transport. Needs the
+#                                   loop plus the book driver thread.
+#
+# When the Motor C quote loop is wired, the last five must disappear from this
+# file. That removal is the signal that the sleeve is actually running.
