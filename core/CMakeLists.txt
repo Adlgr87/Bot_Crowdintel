@@ -270,6 +270,11 @@ add_executable(test_resting_client ../tests/unit/test_resting_client.cpp)
 crowdintel_target(test_resting_client)
 set_target_properties(test_resting_client PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor C: the quote loop that ties the decision cores together
+add_executable(test_maker_loop ../tests/unit/test_maker_loop.cpp)
+crowdintel_target(test_maker_loop)
+set_target_properties(test_maker_loop PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -421,6 +426,7 @@ add_test(NAME cancel_id_units COMMAND $<TARGET_FILE:test_cancel_id>)
 add_test(NAME market_metadata_units COMMAND $<TARGET_FILE:test_market_metadata>)
 add_test(NAME resting_mock_units COMMAND $<TARGET_FILE:test_resting_mock>)
 add_test(NAME resting_client_units COMMAND $<TARGET_FILE:test_resting_client>)
+add_test(NAME maker_loop_units COMMAND $<TARGET_FILE:test_maker_loop>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>

@@ -111,11 +111,17 @@ the reconciler, the daily-state persister and the health server.
 `volatility_gate.hpp` · `bayesian_engine.hpp` · `metrics.hpp` ·
 `daily_state.hpp` · `market_metadata.hpp`
 
-### Motor C maker path (built, awaiting the quote loop)
+### Motor C maker path
 
-`maker_quote.hpp` (where to quote) · `quote_registry.hpp` (when to pull) ·
-`resting_mock.hpp` / `resting_mock_client.hpp` (a transport where orders rest) ·
-plus `entry_order_type` routing and `DELETE /order` in `lightweight_client.hpp`.
+`maker_loop.hpp` (the cycle) composes `maker_quote.hpp` (where to quote) and
+`quote_registry.hpp` (when to pull); `resting_mock.hpp` /
+`resting_mock_client.hpp` provide a transport where orders actually rest; plus
+`entry_order_type` routing and `DELETE /order` in `lightweight_client.hpp`.
+
+The loop cancels **before** it places: a replace that placed first could
+momentarily double the exposure on that side, which is what the inventory caps
+exist to prevent. It signs nothing and sends nothing — it emits a decision the
+engine executes, so signing stays in one place.
 
 Entries may rest (`GTC`), exits are always `FAK` — a protective exit that merely
 rests is an exit that did not happen. Resting entries bypass the pre-signed pool
@@ -199,6 +205,7 @@ Behaviour that was verified rather than assumed:
 | `test_market_metadata` | 15 | fractional-cent band → bps |
 | `test_resting_mock` | 30 | fills only on a cross |
 | `test_resting_client` | 26 | OPEN vs FILL, cancel, malformed bodies |
+| `test_maker_loop` | 20 | place → keep → replace (cancel first) → withdraw |
 
 ---
 
@@ -292,9 +299,10 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Wire the Motor C quote loop** — the only thing between this repository and
-   its first real measurement. `plan_quotes` → `entry_order_type=GTC` →
-   `quote_registry` → `cancel_order` already compose; nothing drives them.
+1. **Connect the loop to the live path** — `MakerLoop::on_tick` produces the
+   decision; the engine still has to execute it through `OrderGateway` with the
+   resting client and feed `on_open`/`on_fill`/`on_cancel` back from the user
+   channel.
 2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
    book, then with a size-minimal live canary. This is the number that decides
    whether the sleeve is funded.
