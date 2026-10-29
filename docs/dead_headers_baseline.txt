@@ -19,6 +19,7 @@ core/src/fee_calculator_v2.hpp
 core/src/kelly_sizer.hpp
 core/src/ladder_builder.hpp
 core/src/maker_loop.hpp
+core/src/maker_runner.hpp
 core/src/market_context.hpp
 core/src/mmap_state.hpp
 core/src/multi_feed_manager.hpp
