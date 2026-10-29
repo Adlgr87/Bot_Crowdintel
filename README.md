@@ -223,6 +223,7 @@ Behaviour that was verified rather than assumed:
 | `test_resting_client` | 26 | OPEN vs FILL, cancel, malformed bodies |
 | `test_maker_loop` | 20 | place → keep → replace (cancel first) → withdraw |
 | `test_maker_runner` | 24 | decision executed against a client; a crossing fills, the loop re-quotes; cancel-before-place |
+| `test_gateway_cancel` | 15 | per-order withdrawal through the egress worker, incl. a latched kill switch |
 
 ---
 
@@ -316,10 +317,12 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Live adapter for the maker path.** The loop runs today against the resting
-   transport in mock. For live it needs an `OrderGateway` route that (a) sends
-   `entry_order_type=GTC` and (b) exposes per-order `DELETE /order`, since the
-   gateway currently fronts `cancel_all` only.
+1. **Point the maker path at the real gateway.** `OrderGateway::cancel(id)` now
+   queues a per-order `DELETE /order` to the same worker that submits, so a
+   cancel cannot overtake the placement it targets, and it keeps working while
+   the kill switch is latched (withdrawing is risk-reducing). What remains is
+   instantiating the maker path with `OrderGateway<LightweightCLOBClient>`
+   instead of the mock transport, plus feeding the real book.
 2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
    book, then with a size-minimal live canary. This is the number that decides
    whether the sleeve is funded.

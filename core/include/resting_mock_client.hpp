@@ -33,14 +33,9 @@ namespace crowdintel {
 
 class RestingMockCLOBClient {
 public:
-    struct SubmitResult {
-        bool ok = false;
-        bool final = true;
-        long http_code = 0;
-        char status[24]{};
-        char error[64]{};
-        bool retryable = false;
-    };
+    // Uses the SHARED SubmitResult from polymarket_order.hpp. A nested copy made
+    // this client incompatible with OrderGateway, which is the exact class of
+    // duplicate-type drift this repository keeps having to remove.
 
     void attach_fill_queue(SPSC_RingBuffer<AccountEvent>* q) noexcept {
         fill_q_ = q;

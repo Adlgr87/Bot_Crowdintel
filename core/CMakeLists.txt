@@ -280,6 +280,11 @@ add_executable(test_maker_runner ../tests/unit/test_maker_runner.cpp)
 crowdintel_target(test_maker_runner)
 set_target_properties(test_maker_runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor C: per-order withdrawal through the egress worker
+add_executable(test_gateway_cancel ../tests/unit/test_gateway_cancel.cpp)
+crowdintel_target(test_gateway_cancel)
+set_target_properties(test_gateway_cancel PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -433,6 +438,7 @@ add_test(NAME resting_mock_units COMMAND $<TARGET_FILE:test_resting_mock>)
 add_test(NAME resting_client_units COMMAND $<TARGET_FILE:test_resting_client>)
 add_test(NAME maker_loop_units COMMAND $<TARGET_FILE:test_maker_loop>)
 add_test(NAME maker_runner_units COMMAND $<TARGET_FILE:test_maker_runner>)
+add_test(NAME gateway_cancel_units COMMAND $<TARGET_FILE:test_gateway_cancel>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>
