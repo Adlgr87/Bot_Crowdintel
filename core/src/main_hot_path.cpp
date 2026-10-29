@@ -37,6 +37,7 @@
 #include "execution_engine.hpp"
 #include "market_config.hpp"
 #include "market_metadata.hpp"
+#include "../include/reconcile.hpp"
 #include "maker_engine.hpp"
 #include "../include/resting_mock_client.hpp"
 #include "metrics.hpp"
@@ -237,20 +238,29 @@ void reconcile_once_with(LightweightCLOBClient& client,
 
     PositionTracker::Snapshot view{};
     if (!tracker.snapshot(view)) return;
-    const auto diff_shares = [](uint64_t a, uint64_t b) {
-        return a > b ? a - b : b - a;
-    };
-    const uint64_t max_drift = static_cast<uint64_t>(
-        cfg.reconcile_max_drift_shares * 1000000.0);
-    const uint64_t drift = diff_shares(view.net_yes, yes) +
-                           diff_shares(view.net_hedge, hedge);
+
+    // The DECISION lives in reconcile.hpp so it can be tested without a venue:
+    // it decides whether we adopt the venue's inventory and whether that
+    // disagreement stops trading.
+    crowdintel::ReconcileInput rin;
+    rin.local_yes_shares = view.net_yes;
+    rin.local_hedge_shares = view.net_hedge;
+    rin.venue_yes_shares = yes;
+    rin.venue_hedge_shares = hedge;
+    rin.venue_yes_avg = yes_avg;
+    rin.venue_hedge_avg = hedge_avg;
+    rin.max_drift_shares = cfg.reconcile_max_drift_shares;
+    const crowdintel::ReconcileOutcome rout =
+        crowdintel::reconcile_positions(rin);
+
     TrackerRestate restate{};
     restate.yes_shares = yes;
     restate.yes_avg = yes_avg;
     restate.hedge_shares = hedge;
     restate.hedge_avg = hedge_avg;
-    restate.drift_exceeded = drift > max_drift && max_drift != 0 ? 1 : 0;
-    if (drift > 0) {
+    restate.drift_exceeded = rout.drift_exceeded ? 1 : 0;
+    const uint64_t drift = rout.drift;
+    if (rout.restate) {
         std::fprintf(stderr,
             "RCN drift: local yes=%llu hedge=%llu vs venue yes=%llu "
             "hedge=%llu (drift=%llu x1e6, kill=%llu)\n",
