@@ -36,6 +36,7 @@
 #include "evidence_ingress.hpp"
 #include "execution_engine.hpp"
 #include "market_config.hpp"
+#include "market_metadata.hpp"
 #include "metrics.hpp"
 #include "mock_client.hpp"
 #include "presigned_pool.hpp"
@@ -447,6 +448,47 @@ int main() {
             "runs the MOCK transport (synthetic book, synthetic fills). "
             "Do not draw fill-rate or Brier conclusions from it.\n");
     }
+
+    // ── Motor C: read the reward parameters from the venue ─────────────────
+    // The band and minimum size live in the market object and are fractional
+    // (rewardsMaxSpread 3.5 cents == 350 bps). Hand-typing them is a silent
+    // failure: a stale band puts quotes outside eligibility while they keep
+    // carrying full adverse risk. Only fetched when entries rest, since a taker
+    // never needs them.
+    const bool entry_rests_cfg = std::strcmp(cfg.entry_order_type, "GTC") == 0 ||
+                                 std::strcmp(cfg.entry_order_type, "GTD") == 0;
+#if defined(CROWDINTEL_HAVE_NETWORK) && !defined(CROWDINTEL_FORCE_MOCK)
+    if (entry_rests_cfg && cfg.market_slug[0] &&
+        std::strcmp(cfg.market_slug, "mock-market") != 0) {
+        crowdintel::MarketRewards rewards{};
+        const crowdintel::RewardParse rp = crowdintel::fetch_market_rewards(
+            cfg.gamma_host, cfg.market_slug, rewards);
+        if (rp == crowdintel::RewardParse::Ok) {
+            cfg.rewards_max_spread_bps = rewards.max_spread_bps;
+            cfg.rewards_min_size_shares = rewards.min_size_shares;
+            std::fprintf(stdout,
+                "[rewards] from venue: pool=$%llu/day band=%ubps min_size=%.0f "
+                "program=%d\n",
+                static_cast<unsigned long long>(rewards.daily_rate_usdc),
+                static_cast<unsigned>(rewards.max_spread_bps),
+                static_cast<double>(rewards.min_size_shares) * 1e-6,
+                rewards.has_program ? 1 : 0);
+            if (!rewards.has_program)
+                std::fprintf(stderr,
+                    "WARN: %s has no active reward program; the maker sleeve "
+                    "earns only spread there\n", cfg.market_slug);
+        } else {
+            std::fprintf(stderr,
+                "WARN: could not read rewards from %s (%s); keeping the "
+                "BOT_MK_* values\n", cfg.gamma_host,
+                crowdintel::reward_parse_name(rp));
+        }
+    } else if (entry_rests_cfg) {
+        std::fprintf(stderr,
+            "WARN: BOT_MARKET_SLUG is unset or mock; rewards not read from the "
+            "venue, using BOT_MK_* values\n");
+    }
+#endif
 
     auto book = std::make_unique<OrderBookL2>();
     std::unique_ptr<OrderBookL2> hedge_book;

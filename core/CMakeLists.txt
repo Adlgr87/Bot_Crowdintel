@@ -255,6 +255,11 @@ add_executable(test_cancel_id ../tests/unit/test_cancel_id.cpp)
 crowdintel_target(test_cancel_id)
 set_target_properties(test_cancel_id PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor C: reward parameters read from the venue metadata
+add_executable(test_market_metadata ../tests/unit/test_market_metadata.cpp)
+crowdintel_target(test_market_metadata)
+set_target_properties(test_market_metadata PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -403,6 +408,7 @@ add_test(NAME chainlink_units COMMAND $<TARGET_FILE:test_chainlink>)
 add_test(NAME maker_quote_units COMMAND $<TARGET_FILE:test_maker_quote>)
 add_test(NAME quote_registry_units COMMAND $<TARGET_FILE:test_quote_registry>)
 add_test(NAME cancel_id_units COMMAND $<TARGET_FILE:test_cancel_id>)
+add_test(NAME market_metadata_units COMMAND $<TARGET_FILE:test_market_metadata>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>

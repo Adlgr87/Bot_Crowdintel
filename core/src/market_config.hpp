@@ -145,6 +145,8 @@ struct MarketConfig {
     char entry_order_type[8] = "FAK";
     uint64_t gtd_ttl_seconds = 0;
     char clob_host[128] = "https://clob.polymarket.com";
+    // Motor C: where the maker sleeve reads its reward parameters from.
+    char gamma_host[128] = "https://gamma-api.polymarket.com";
     char ws_host[192] = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
     // Private user channel (order/fill reconciliation) and hedge complement.
     char ws_user_host[192] = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
@@ -554,6 +556,7 @@ struct MarketConfig {
 
         if (!copy_env(order_type, "BOT_ORDER_TYPE", order_type) ||
             !copy_env(clob_host, "CLOB_HOST", clob_host) ||
+            !copy_env(gamma_host, "BOT_GAMMA_HOST", gamma_host) ||
             !copy_env(ws_host, "WS_HOST", ws_host) ||
             !copy_env(ws_user_host, "BOT_WS_USER_HOST", ws_user_host) ||
             !copy_env(market_condition_id, "BOT_MARKET_CONDITION_ID", "") ||
@@ -577,6 +580,7 @@ struct MarketConfig {
         if (!safe_config_text(bayes_recal_file))
             return "BOT_BAYES_RECAL_FILE cannot contain control characters";
         if (!safe_config_text(order_type) || !safe_config_text(clob_host) ||
+            !safe_config_text(gamma_host) ||
             !safe_config_text(ws_host) || !safe_config_text(tls_pin) ||
             !safe_config_text(kill_switch_file) ||
             !safe_config_text(state_file) ||
