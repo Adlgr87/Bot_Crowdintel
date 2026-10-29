@@ -189,7 +189,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-**Current state: 35 of 36 CTest targets pass.** The single failure is
+**Current state: 39 of 40 CTest targets pass.** The single failure is
 pre-existing and unrelated: `layer_units`'s "flow resumes after cooldown".
 Suppression has two sources — a time-based shock cooldown that expires, and a
 published regime pause that only recomputes on fresh book samples. That is a
@@ -224,6 +224,7 @@ Behaviour that was verified rather than assumed:
 | `test_maker_loop` | 20 | place → keep → replace (cancel first) → withdraw |
 | `test_maker_runner` | 24 | decision executed against a client; a crossing fills, the loop re-quotes; cancel-before-place |
 | `test_gateway_cancel` | 15 | per-order withdrawal through the egress worker, incl. a latched kill switch |
+| `test_reconcile` | 16 | position-diff decision: silent on no drift, `drift == max` tolerated, zero max disables the kill |
 
 ---
 
@@ -303,7 +304,8 @@ core/crypto/       EIP-712 + libsecp256k1 signing, keccak, ChaCha20 salts
 infra/             Docker, systemd (SCHED_FIFO + CPU isolation), Prometheus, health
 scripts/           region preflight, three research gates, dead-code guard
 tests/             36 CTest targets: unit, integration, acceptance, replay
-docs/              architecture, ADRs, three experiment write-ups, dead-code ledger
+docs/              architecture, ADRs, three experiment write-ups, dead-code ledger,
+                   CANARY_RUNBOOK.md (the two steps that need a human)
 experimental/      (planned) frozen research code behind -DCROWDINTEL_BUILD_EXPERIMENTAL
 ```
 
@@ -317,18 +319,16 @@ Governing documents: `docs/STATUS.md` (what is verified vs not),
 
 In dependency order, not in wish order:
 
-1. **Two narrower maker risks remain.** Inventory skew and the daily BUY-volume
-   cap now exist on the maker path (the tracker consumes every account event —
-   without that it would never learn about a fill — and the volume accumulator
-   persists through `daily_state` like the taker path). The `BOT_MK_LIVE_ACK`
-   gate stays because two things are still absent: inventory **reservations**
-   before the wire (the taker path reserves so a second order cannot duplicate
-   exposure while a fill is in flight) and reconciliation of resting orders
-   across a restart.
-2. **Measure the conditional mark-out** with `resting_mock_client` driving a mock
-   book, then with a size-minimal live canary. This is the number that decides
-   whether the sleeve is funded.
-3. **`probe_region.sh --aws eu-west-1`** before any lease is signed.
+1. **`MarkoutTracker`** — the last buildable piece. Today the conditional
+   mark-out is computed by hand from the journal; it should be C++ that, on every
+   fill, records the price and compares it with the mid at T+N, accumulating the
+   *conditional* adverse move as a metric. Half a day, testable offline.
+2. **Two narrower maker risks remain.** `BOT_MK_LIVE_ACK` stays because inventory
+   **reservations** before the wire are absent (the taker path reserves so a
+   second order cannot duplicate exposure while a fill is in flight) and resting
+   orders are not reconciled across a restart.
+3. **Execute the canary** — `docs/CANARY_RUNBOOK.md` reduces it to copy-paste.
+   This produces the number that decides whether the sleeve is funded.
 4. Only then: capital, at a fraction of the originally planned allocation.
 
 The planned $10,000 allocation is **not** justified by the evidence. Motor C's
