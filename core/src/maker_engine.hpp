@@ -34,6 +34,7 @@
 #include "../include/risk_manager.hpp"
 #include "../include/time_utils.hpp"
 #include "execution_engine.hpp"
+#include "../include/markout_tracker.hpp"
 #include "maker_loop.hpp"
 #include "maker_runner.hpp"
 #include "market_config.hpp"
@@ -63,6 +64,15 @@ inline ReplacePolicy replace_policy_from(const MarketConfig& cfg) {
     return p;
 }
 
+// The tracker reports a mean; the metric wants the accumulator so it can be
+// rendered without re-deriving it. Kept as a tiny helper rather than exposing
+// internals.
+inline int64_t markout_sum(const MarkoutTracker& t) {
+    if (t.settled() == 0) return 0;
+    return static_cast<int64_t>(t.mean_adverse_cents() * 10000.0 *
+                                static_cast<double>(t.settled()));
+}
+
 struct MakerRunStats {
     long ticks = 0;
     long places = 0;
@@ -84,6 +94,11 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                                double* daily_buy_volume,
                                MakerLoop* loop_out = nullptr) {
     MakerLoop loop(quote_config_from(cfg), replace_policy_from(cfg));
+    // The conditional adverse move: recorded on every fill, settled against the
+    // mid one horizon later. This is the only honest measure of what a maker
+    // costs, and it is what the canary exists to produce.
+    MarkoutTracker markout;
+    markout.configure(static_cast<uint64_t>(cfg.mk_markout_horizon_ms) * 1000000ULL);
     FastRandom rng;  // OS-seeded ChaCha20; salts must not be guessable
     MakerRunStats stats{};
     const uint64_t max_age_ns = cfg.max_book_age_ms * 1000000ULL;
@@ -108,6 +123,9 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                     break;
                 case AccountEvent::Type::FILL:
                     loop.on_fill(ev.order_hash, ev.size);
+                    (void)markout.record(ev.side == K_SIDE_BUY ? MARKOUT_SIDE_BUY
+                                                               : MARKOUT_SIDE_SELL,
+                                         ev.price, ev.size, ev.timestamp_ns);
                     break;
                 case AccountEvent::Type::CANCEL:
                     loop.on_cancel(ev.order_hash);
@@ -168,6 +186,11 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
         in.inventory_shares =
             tracker ? static_cast<int64_t>(tracker->net_yes()) : 0;
         in.now_ns = crowdintel::mono_ns();
+
+        // Settle any fill whose horizon elapsed against the current mid.
+        (void)markout.observe(in.fair_value, in.now_ns);
+        if (metrics) metrics->set_markout(markout_sum(markout),
+                                          markout.settled());
 
         const MakerDecision d = loop.on_tick(in);
         if (d.quotes.status != QuoteStatus::Placed) ++stats.skipped;

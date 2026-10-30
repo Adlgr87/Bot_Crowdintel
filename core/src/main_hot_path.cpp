@@ -727,6 +727,17 @@ int main() {
                        "\"} " + std::to_string(metrics.maker(
                            static_cast<crowdintel::MakerEvent>(i))) + "\n";
             }
+            const uint64_t mos = metrics.markout_samples();
+            const double moc = mos
+                ? (static_cast<double>(metrics.markout_sum_e6()) /
+                   static_cast<double>(mos) / 10000.0)
+                : 0.0;
+            out += "# HELP crowdintel_maker_markout_cents Mean adverse move after a fill\n"
+                   "# TYPE crowdintel_maker_markout_cents gauge\n"
+                   "crowdintel_maker_markout_cents " + std::to_string(moc) + "\n";
+            out += "# HELP crowdintel_maker_markout_samples Settled fills\n"
+                   "# TYPE crowdintel_maker_markout_samples counter\n"
+                   "crowdintel_maker_markout_samples " + std::to_string(mos) + "\n";
             out += "# HELP crowdintel_taker_fee_rate Category fee rate in force\n"
                    "# TYPE crowdintel_taker_fee_rate gauge\n"
                    "crowdintel_taker_fee_rate " + std::to_string(cfg.taker_fee_rate) + "\n";

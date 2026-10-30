@@ -144,7 +144,21 @@ curl -s localhost:8080/metrics | grep -E "crowdintel_maker_total|crowdintel_deci
 the kill-switch file exists, `venue_refused` exceeds a handful, or `/ready`
 reports not ready.
 
-### Computing the mark-out (while the tracker is not yet built)
+### The mark-out is now built — read it, do not calculate it
+
+`MarkoutTracker` records every fill and settles it against the mid one horizon
+later (`BOT_MK_MARKOUT_HORIZON_MS`, default 60 s), exposing two series:
+
+```
+crowdintel_maker_markout_cents    0.000000    # the decisive number, in cents
+crowdintel_maker_markout_samples           0  # settled fills; trust the gauge only when this is > 30
+```
+
+A markout of **0 with 0 samples** is not a good result, it is no result: no fill
+has settled yet. The manual fallback below exists only for a run that predates
+the tracker.
+
+### Manual fallback
 
 The decisive number is the price move **after** each fill, signed against the
 position. Until `MarkoutTracker` lands, take it from the journal:
@@ -152,8 +166,10 @@ position. Until `MarkoutTracker` lands, take it from the journal:
 1. Every fill is journalled as `ACCOUNT_FILL` with price and size.
 2. For each fill, note the book mid at fill time and again N minutes later
    (60s minimum; the experiment used one minute).
-3. `adverse = (mid_later − fill_price) × sign` where `sign = +1` for a BUY.
-   Positive means the price moved **against** you — the cost you are measuring.
+3. `adverse = sign × (fill_price − mid_later)` where `sign = +1` for a BUY and
+   `−1` for a SELL. Positive means the price moved **against** you — the cost you
+   are measuring. (Getting this backwards inverts the conclusion, so the sign is
+   pinned by assertions in `tests/unit/test_markout.cpp`.)
 4. Report the **mean of that quantity over fills**, not over ticks. A market can
    look calm unconditionally and be brutal conditional on being filled; that gap
    is the whole point of the canary.

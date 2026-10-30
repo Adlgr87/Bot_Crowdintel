@@ -290,6 +290,11 @@ add_executable(test_reconcile ../tests/unit/test_reconcile.cpp)
 crowdintel_target(test_reconcile)
 set_target_properties(test_reconcile PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Motor C: conditional adverse move measured on real fills
+add_executable(test_markout ../tests/unit/test_markout.cpp)
+crowdintel_target(test_markout)
+set_target_properties(test_markout PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(test_ladder ../tests/unit/test_ladder.cpp)
 crowdintel_target(test_ladder)
 set_target_properties(test_ladder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -445,6 +450,7 @@ add_test(NAME maker_loop_units COMMAND $<TARGET_FILE:test_maker_loop>)
 add_test(NAME maker_runner_units COMMAND $<TARGET_FILE:test_maker_runner>)
 add_test(NAME gateway_cancel_units COMMAND $<TARGET_FILE:test_gateway_cancel>)
 add_test(NAME reconcile_units COMMAND $<TARGET_FILE:test_reconcile>)
+add_test(NAME markout_units COMMAND $<TARGET_FILE:test_markout>)
 add_test(NAME ladder_units COMMAND $<TARGET_FILE:test_ladder>)
 if(HAVE_AVX2_INTRINSICS)
     add_test(NAME cfc_kat COMMAND $<TARGET_FILE:test_cfc_kat>

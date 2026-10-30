@@ -175,6 +175,7 @@ struct MarketConfig {
     uint64_t quote_replace_ticks = 1;         // reprice after this much drift
     uint64_t quote_max_age_ms = 30000;        // refresh a quote older than this
     uint64_t quote_size_tolerance = 1000000;  // ignore sub-share size churn
+    uint64_t mk_markout_horizon_ms = 60000;   // settle a fill against the mid here
     FeeCategory fee_category = FeeCategory::Unknown;          // Fase 1.1
     FeeRateSource fee_rate_source = FeeRateSource::Default;   // Fase 1.1
     double max_order_usd = 100.0;
@@ -339,6 +340,7 @@ struct MarketConfig {
         long adverse_l = 25, min_edge_bps_l = 10, rewards_band_l = 0;
         long rewards_min_l = 0, quote_size_l = 0;
         long max_inv_l = 0, replace_ticks_l = 1, max_age_l = 30000;
+        long markout_l = 60000;
         long reservation_ttl_l = 10000, reconcile_l = 30, pool_vol_ttl_l = 500;
         long vol_ticks_l = 200, bayes_on_l = 1;
         double tick = 0, min_size = 0, initial_position = 0;
@@ -359,6 +361,7 @@ struct MarketConfig {
             !env_l("BOT_MK_MAX_INVENTORY", 0, max_inv_l) ||
             !env_l("BOT_MK_REPLACE_TICKS", 1, replace_ticks_l) ||
             !env_l("BOT_MK_MAX_AGE_MS", 30000, max_age_l) ||
+            !env_l("BOT_MK_MARKOUT_HORIZON_MS", 60000, markout_l) ||
             !env_d("BOT_MIN_SIZE_SHARES", 5.0, min_size) ||
             !env_d("BOT_INITIAL_POSITION_SHARES", 0.0, initial_position) ||
             !env_d("BOT_INITIAL_POSITION_AVG_PRICE", 0.50, initial_avg) ||
@@ -534,6 +537,9 @@ struct MarketConfig {
         if (max_inv_l < 0 || replace_ticks_l < 0 || replace_ticks_l > 1000 ||
             max_age_l < 100 || max_age_l > 86400000)
             return "maker refresh policy is out of range";
+        if (markout_l < 1000 || markout_l > 86400000)
+            return "BOT_MK_MARKOUT_HORIZON_MS is out of range";
+        mk_markout_horizon_ms = static_cast<uint64_t>(markout_l);
         max_quote_inventory_shares = static_cast<uint64_t>(max_inv_l);
         quote_replace_ticks = static_cast<uint64_t>(replace_ticks_l);
         quote_max_age_ms = static_cast<uint64_t>(max_age_l);
