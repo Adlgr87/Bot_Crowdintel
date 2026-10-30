@@ -33,6 +33,9 @@ inline constexpr uint8_t MARKOUT_SIDE_SELL = 1;
 
 class MarkoutTracker {
 public:
+    // Startup-only. There is no hot reconfig of the horizon in this process, so
+    // clearing pending samples here is deliberate; calling this mid-run would
+    // drop the very samples this class exists to measure.
     void configure(uint64_t horizon_ns) noexcept {
         horizon_ns_ = horizon_ns ? horizon_ns : 60'000'000'000ULL;
         clear();
@@ -43,12 +46,16 @@ public:
         count_ = 0;
         qualified_ = 0;
         sum_adverse_e6_ = 0;
+        dropped_ = 0;
     }
 
     // Record a fill. Returns false when the sample is malformed or the ring is
-    // full (a dropped sample is reported, never silently discarded).
+    // full; a full ring increments dropped() so the loss is visible, not silent.
     bool record(uint8_t side, uint64_t price, uint64_t size,
                 uint64_t ts_ns) noexcept {
+        // `size` is validated (a zero-size fill is malformed) but not stored:
+        // the mean is unweighted by design until the canary shows a size spread
+        // that justifies weighting.
         if (price == 0 || price >= 1000000ULL || size == 0) return false;
         if (side != MARKOUT_SIDE_BUY && side != MARKOUT_SIDE_SELL) return false;
         for (size_t i = 0; i < MARKOUT_CAPACITY; ++i) {
@@ -56,11 +63,11 @@ public:
             samples_[i].pending = true;
             samples_[i].side = side;
             samples_[i].price = price;
-            samples_[i].size = size;
             samples_[i].ts_ns = ts_ns;
             ++count_;
             return true;
         }
+        ++dropped_;
         return false;
     }
 
@@ -89,6 +96,11 @@ public:
 
     uint64_t settled() const noexcept { return qualified_; }
     uint64_t pending() const noexcept { return count_; }
+    uint64_t dropped() const noexcept { return dropped_; }
+
+    // Exact int64 accumulator in 1e6 price units (microdollars). Exposed so the
+    // metrics gauge reads the exact sum instead of a double round-trip.
+    int64_t sum_adverse_e6() const noexcept { return sum_adverse_e6_; }
 
     // Mean adverse move in CENTS (1e6 price units / 10000 = one cent).
     double mean_adverse_cents() const noexcept {
@@ -102,7 +114,6 @@ public:
 private:
     struct Sample {
         uint64_t price = 0;
-        uint64_t size = 0;
         uint64_t ts_ns = 0;
         uint8_t side = 0;
         bool pending = false;
@@ -110,6 +121,7 @@ private:
     Sample samples_[MARKOUT_CAPACITY]{};
     size_t count_ = 0;
     uint64_t qualified_ = 0;
+    uint64_t dropped_ = 0;
     int64_t sum_adverse_e6_ = 0;
     uint64_t horizon_ns_ = 60'000'000'000ULL;
 };

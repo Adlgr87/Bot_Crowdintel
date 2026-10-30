@@ -738,6 +738,10 @@ int main() {
             out += "# HELP crowdintel_maker_markout_samples Settled fills\n"
                    "# TYPE crowdintel_maker_markout_samples counter\n"
                    "crowdintel_maker_markout_samples " + std::to_string(mos) + "\n";
+            out += "# HELP crowdintel_maker_markout_dropped Fills lost because the mark-out ring was full\n"
+                   "# TYPE crowdintel_maker_markout_dropped counter\n"
+                   "crowdintel_maker_markout_dropped " +
+                   std::to_string(metrics.markout_dropped()) + "\n";
             out += "# HELP crowdintel_taker_fee_rate Category fee rate in force\n"
                    "# TYPE crowdintel_taker_fee_rate gauge\n"
                    "crowdintel_taker_fee_rate " + std::to_string(cfg.taker_fee_rate) + "\n";

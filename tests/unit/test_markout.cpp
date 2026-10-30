@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include <cstdio>
 #include "../../core/include/markout_tracker.hpp"
+#include "../../core/include/time_utils.hpp"
 
 static int g_failures = 0, g_tests = 0;
 #define CHECK(cond, name)                                                     \
@@ -94,6 +95,52 @@ static void test_rejections_and_empty() {
     CHECK(t.pending() == 0, "nothing was left pending by the rejections");
 }
 
+static void test_clock_domain_contract() {
+    std::printf("clock_domain_contract\n");
+    // The engine MUST feed record() and observe() from the SAME clock. The
+    // venue event stamp is realtime (epoch ns); observe() uses mono_ns(). Mixing
+    // them makes `now < ts` always true, so nothing ever settles. This test
+    // documents that trap and the fixed contract.
+    MarkoutTracker trap;
+    trap.configure(60 * NS);
+    (void)trap.record(MARKOUT_SIDE_BUY, 450000, 200000000ULL,
+                      crowdintel::realtime_ns());
+    (void)trap.observe(440000, crowdintel::mono_ns());
+    CHECK(trap.settled() == 0, "mixed clocks settle nothing (the trap)");
+
+    MarkoutTracker ok;
+    ok.configure(60 * NS);
+    const uint64_t t0 = crowdintel::mono_ns();
+    (void)ok.record(MARKOUT_SIDE_BUY, 450000, 200000000ULL, t0);
+    (void)ok.observe(440000, t0 + 60 * NS);
+    CHECK(ok.settled() == 1, "same clock settles at the horizon");
+}
+
+static void test_dropped_visible() {
+    std::printf("dropped_visible\n");
+    MarkoutTracker t;
+    t.configure(10 * NS);
+    size_t accepted = 0;
+    for (size_t i = 0; i < MARKOUT_CAPACITY + 1; ++i) {
+        if (t.record(MARKOUT_SIDE_BUY, 500000, 100000000ULL, 0)) ++accepted;
+    }
+    CHECK(accepted == MARKOUT_CAPACITY, "ring holds exactly capacity");
+    CHECK(t.dropped() == 1, "the overflow sample is counted, not silent");
+    CHECK(t.pending() == MARKOUT_CAPACITY, "pending reflects the ring fill");
+}
+
+static void test_sum_exact() {
+    std::printf("sum_exact\n");
+    MarkoutTracker t;
+    t.configure(10 * NS);
+    (void)t.record(MARKOUT_SIDE_BUY, 500000, 100000000ULL, 0);
+    (void)t.record(MARKOUT_SIDE_SELL, 500000, 100000000ULL, 0);
+    (void)t.observe(490000, 10 * NS);
+    // BUY lost 10000 e6, SELL gained 10000 e6 -> exact integer sum 0, no FP.
+    CHECK(t.sum_adverse_e6() == 0, "exact integer accumulator");
+    CHECK(t.settled() == 2, "both settled");
+}
+
 int main() {
     std::printf("=== test_markout ===\n");
     test_buy_adverse();
@@ -101,6 +148,9 @@ int main() {
     test_sell_adverse();
     test_aggregate();
     test_rejections_and_empty();
+    test_clock_domain_contract();
+    test_dropped_visible();
+    test_sum_exact();
     std::printf("\n--- Results: %d/%d passed, %d failed ---\n",
                 g_tests - g_failures, g_tests, g_failures);
     return g_failures == 0 ? 0 : 1;

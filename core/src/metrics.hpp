@@ -126,11 +126,17 @@ public:
         markout_sum_e6_.store(sum_e6, std::memory_order_relaxed);
         markout_n_.store(n, std::memory_order_relaxed);
     }
+    void set_markout_dropped(uint64_t n) noexcept {
+        markout_dropped_.store(n, std::memory_order_relaxed);
+    }
     int64_t markout_sum_e6() const noexcept {
         return markout_sum_e6_.load(std::memory_order_relaxed);
     }
     uint64_t markout_samples() const noexcept {
         return markout_n_.load(std::memory_order_relaxed);
+    }
+    uint64_t markout_dropped() const noexcept {
+        return markout_dropped_.load(std::memory_order_relaxed);
     }
 
     void on_order_requested() noexcept {
@@ -210,6 +216,7 @@ public:
             maker_[i].store(0, std::memory_order_relaxed);
         markout_sum_e6_.store(0, std::memory_order_relaxed);
         markout_n_.store(0, std::memory_order_relaxed);
+        markout_dropped_.store(0, std::memory_order_relaxed);
     }
 
 private:
@@ -229,6 +236,7 @@ private:
     alignas(64) std::atomic<uint64_t> maker_[MAKER_EVENT_SLOTS]{};
     alignas(64) std::atomic<int64_t> markout_sum_e6_{0};
     alignas(64) std::atomic<uint64_t> markout_n_{0};
+    alignas(64) std::atomic<uint64_t> markout_dropped_{0};
     alignas(64) std::atomic<uint64_t> decisions_{0};
     alignas(64) std::atomic<uint64_t> results_[METRICS_RESULT_SLOTS]{};
     alignas(64) std::atomic<uint64_t> orders_requested_{0};
