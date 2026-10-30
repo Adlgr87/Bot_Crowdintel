@@ -67,8 +67,8 @@ private:
     alignas(64) std::array<T, Capacity> slots_{};
     alignas(64) std::atomic<size_t> head_{0};
     alignas(64) std::atomic<size_t> tail_{0};
-    size_t tail_cache_ = 0;  // producer-owned
-    size_t head_cache_ = 0;  // consumer-owned
+    alignas(64) size_t tail_cache_ = 0;  // producer-owned — keep off tail_'s line
+    alignas(64) size_t head_cache_ = 0;  // consumer-owned — keep off head_'s line
 };
 
 #endif  // SPSC_RING_BUFFER_HPP

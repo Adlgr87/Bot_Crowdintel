@@ -64,15 +64,6 @@ inline ReplacePolicy replace_policy_from(const MarketConfig& cfg) {
     return p;
 }
 
-// The tracker reports a mean; the metric wants the accumulator so it can be
-// rendered without re-deriving it. Kept as a tiny helper rather than exposing
-// internals.
-inline int64_t markout_sum(const MarkoutTracker& t) {
-    if (t.settled() == 0) return 0;
-    return static_cast<int64_t>(t.mean_adverse_cents() * 10000.0 *
-                                static_cast<double>(t.settled()));
-}
-
 struct MakerRunStats {
     long ticks = 0;
     long places = 0;
@@ -99,11 +90,22 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
     // costs, and it is what the canary exists to produce.
     MarkoutTracker markout;
     markout.configure(static_cast<uint64_t>(cfg.mk_markout_horizon_ms) * 1000000ULL);
+    uint64_t last_mid = 0;  // last readable mid, for settling on schedule
     FastRandom rng;  // OS-seeded ChaCha20; salts must not be guessable
     MakerRunStats stats{};
     const uint64_t max_age_ns = cfg.max_book_age_ms * 1000000ULL;
 
     while (running.load(std::memory_order_acquire)) {
+        // Settle fills on schedule against the last readable mid, even if the
+        // book is stale right now. The horizon is against the mid at T+N;
+        // waiting for the book to recover would settle late against a post-move
+        // mid and bias the number that decides funding upward.
+        (void)markout.observe(last_mid, crowdintel::mono_ns());
+        if (metrics) {
+            metrics->set_markout(markout.sum_adverse_e6(), markout.settled());
+            metrics->set_markout_dropped(markout.dropped());
+        }
+
         // ── 1. Drain the venue's answers first, so the decision below sees the
         //       true state: a fill that arrived just now changes the inventory
         //       and the resting size.
@@ -123,9 +125,12 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
                     break;
                 case AccountEvent::Type::FILL:
                     loop.on_fill(ev.order_hash, ev.size);
+                    // ev.timestamp_ns is realtime (epoch ns); observe() settles
+                    // against mono_ns(). Mixing the two makes `now < ts` always
+                    // true, so no fill would ever settle in live. Use mono here.
                     (void)markout.record(ev.side == K_SIDE_BUY ? MARKOUT_SIDE_BUY
                                                                : MARKOUT_SIDE_SELL,
-                                         ev.price, ev.size, ev.timestamp_ns);
+                                         ev.price, ev.size, crowdintel::mono_ns());
                     break;
                 case AccountEvent::Type::CANCEL:
                     loop.on_cancel(ev.order_hash);
@@ -180,17 +185,13 @@ MakerRunStats run_maker_engine(Client& client, const MarketConfig& cfg,
         in.best_ask = top.ask.price;
         in.ask_size = top.ask.size;
         in.fair_value = (top.bid.price + top.ask.price) / 2u;
+        last_mid = in.fair_value;   // last readable mid for on-schedule settling
         in.tick_size = cfg.tick_size;
         // Real inventory: net YES held, signed positive = long. Without this the
         // skew never activates and the loop keeps bidding while accumulating.
         in.inventory_shares =
             tracker ? static_cast<int64_t>(tracker->net_yes()) : 0;
         in.now_ns = crowdintel::mono_ns();
-
-        // Settle any fill whose horizon elapsed against the current mid.
-        (void)markout.observe(in.fair_value, in.now_ns);
-        if (metrics) metrics->set_markout(markout_sum(markout),
-                                          markout.settled());
 
         const MakerDecision d = loop.on_tick(in);
         if (d.quotes.status != QuoteStatus::Placed) ++stats.skipped;
