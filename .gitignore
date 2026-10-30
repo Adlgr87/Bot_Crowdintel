@@ -27,6 +27,12 @@ Thumbs.db
 # Secrets
 .env
 .env.*
+# systemd reads this (infra/systemd/crowdintel-trading.service); it is where
+# BOT_PRIVATE_KEY_HEX and the CLOB HMAC secrets live. Never commit it.
+# infra/deploy/canary.env is deliberately tracked: it contains limits only.
+bot.env
+bot.env.*
+*.pem
 *.key
 *_secret*
 credentials/
