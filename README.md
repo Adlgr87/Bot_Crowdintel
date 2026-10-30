@@ -144,6 +144,12 @@ rests is an exit that did not happen. Resting entries bypass the pre-signed pool
 because a pre-signed ladder assumes immediate consumption on a TTL, while a
 resting order's lifetime is governed by cancel/replace.
 
+`MarkoutTracker` (`markout_tracker.hpp`) records every fill and settles it
+against the mid one `BOT_MK_MARKOUT_HORIZON_MS` later, publishing the conditional
+adverse move as `crowdintel_maker_markout_cents` (mean) plus `…_samples` and
+`…_dropped`. It is measured, not asserted — and it is the number §9.3 says can
+still kill the sleeve.
+
 ### Motor A crypto path (built, gated negative)
 
 `chainlink_stream.hpp` — strict Data Streams report parser plus a
@@ -225,7 +231,7 @@ Behaviour that was verified rather than assumed:
 | `test_maker_runner` | 24 | decision executed against a client; a crossing fills, the loop re-quotes; cancel-before-place |
 | `test_gateway_cancel` | 15 | per-order withdrawal through the egress worker, incl. a latched kill switch |
 | `test_reconcile` | 16 | position-diff decision: silent on no drift, `drift == max` tolerated, zero max disables the kill |
-| `test_markout` | 18 | conditional adverse move; sign pinned in all four directions |
+| `test_markout` | 25 | conditional adverse move; sign pinned; clock-domain contract; ring-drop visibility; exact int64 sum |
 
 ---
 
@@ -251,7 +257,9 @@ that matters: a blocked region cannot trade no matter how fast it is.
 Endpoints on `BOT_METRICS_PORT` (127.0.0.1, `0` disables):
 `/health` `/ready` `/metrics` (Prometheus) `/status`. The series that decides
 whether a strategy has alpha at all is `crowdintel_decisions_by_result` — the
-labelled histogram of every verdict.
+labelled histogram of every verdict. For the maker sleeve the decisive series is
+`crowdintel_maker_markout_cents` (mean adverse move after a fill, with
+`…_samples` as its trust gauge).
 
 ---
 
@@ -267,6 +275,7 @@ Full reference: `docs/CONFIGURATION.md`. The ones that change behaviour:
 | `BOT_ENTRY_ORDER_TYPE` | `FAK` | `GTC` for resting maker entries |
 | `BOT_MK_ADVERSE_BPS` | 25 | **the maker sleeve's decisive number** |
 | `BOT_MK_REWARDS_BAND_BPS` | from venue | overridden by `market_metadata` |
+| `BOT_MK_MARKOUT_HORIZON_MS` | 60000 | fill → mid settlement horizon for the mark-out |
 | `BOT_BANKROLL_USD` *(or `BOT_MAX_BANKROLL_USDC`)* | 1000 | both spellings, conflict = fatal |
 | `BOT_MAX_DAILY_LOSS_USD` | 50 | refused at startup if 0 in live |
 | `BOT_STATE_FILE` | `/var/lib/crowdintel/daily_state.bin` | durable risk state |
@@ -280,13 +289,18 @@ Full reference: `docs/CONFIGURATION.md`. The ones that change behaviour:
    statement above is offline verification, public-API measurement, or a mock.
 2. **No paper engine exists.** `BOT_MODE=paper` runs the mock transport:
    `MockCLOBClient` synthesizes a fill on every accepted submit, so it cannot
-   observe a rest. `resting_mock_client.hpp` is the transport that can, and it is
-   not yet driven by a quote loop.
-3. **The Motor C conditional mark-out is unmeasured.** The +0.392¢/fill figure
-   uses *unconditional* one-minute volatility. Adverse selection is conditional
-   on being filled, which is strictly worse. If the real number is 2¢ rather than
-   0.09¢, every net in that table flips negative. **This is the number that can
-   still kill the only funded sleeve**, and it needs real fills.
+   observe a rest. The maker sleeve instead runs against
+   `resting_mock_client.hpp`, whose orders actually rest and fill only on a
+   cross — which is why its mark-out reads 0 samples: the mock book never
+   crosses, so there is nothing to settle.
+3. **The Motor C conditional mark-out is built but not yet populated.** The
+   +0.392¢/fill figure uses *unconditional* one-minute volatility. Adverse
+   selection is conditional on being filled, which is strictly worse.
+   `MarkoutTracker` measures it in-process (`crowdintel_maker_markout_cents`, one
+   `BOT_MK_MARKOUT_HORIZON_MS` after each real fill), but it reads 0 samples here
+   because no real fill has occurred in this environment. If the real number is
+   2¢ rather than 0.09¢, every net in that table flips negative — **this is still
+   the number that can kill the only funded sleeve**, and it needs real fills.
 4. **Motor A's result has a proxy gap.** The TWAP replica uses Binance VWAP, not
    Chainlink's own aggregate. Part of the accuracy difference could be proxy
    error. Closing it needs Data Streams credentials.
@@ -304,7 +318,7 @@ core/include/      risk, book, SPSC rings, daily state, maker_quote, quote_regis
 core/crypto/       EIP-712 + libsecp256k1 signing, keccak, ChaCha20 salts
 infra/             Docker, systemd (SCHED_FIFO + CPU isolation), Prometheus, health
 scripts/           region preflight, three research gates, dead-code guard
-tests/             36 CTest targets: unit, integration, acceptance, replay
+tests/             41 CTest targets: unit, integration, acceptance, replay
 docs/              architecture, ADRs, three experiment write-ups, dead-code ledger,
                    CANARY_RUNBOOK.md (the two steps that need a human)
 experimental/      (planned) frozen research code behind -DCROWDINTEL_BUILD_EXPERIMENTAL
@@ -331,4 +345,5 @@ In dependency order, not in wish order:
 3. Only then: capital, at a fraction of the originally planned allocation.
 
 The planned $10,000 allocation is **not** justified by the evidence. Motor C's
-positive result is real but its decisive risk term is unmeasured.
+positive result is real, but its decisive risk term — the conditional mark-out —
+is now measured in-process and still reads zero real fills.
